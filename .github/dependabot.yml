@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    groups:
+      tauri:
+        patterns:
+          - "tauri*"
+          - "wry"
+          - "tao"
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /
+    groups:
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+      vue:
+        patterns:
+          - "vue*"
+          - "pinia"
+          - "@vitejs/*"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+    schedule:
+      interval: daily
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
