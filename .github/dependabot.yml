@@ -8,6 +8,8 @@ updates:
           - "tauri*"
           - "wry"
           - "tao"
+    schedule:
+      interval: daily
 
   - package-ecosystem: npm
     directory: /
@@ -24,6 +26,10 @@ updates:
         patterns:
           - "tailwindcss"
           - "@tailwindcss/*"
+    schedule:
+      interval: daily
 
   - package-ecosystem: github-actions
     directory: /
+    schedule:
+      interval: daily
