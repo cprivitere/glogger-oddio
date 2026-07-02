@@ -2,11 +2,27 @@
 
 **Date:** 2026-07-02 (Session 27 — Surveying tab: only track items actually collected from surveys)
 **Machine:** Windows 11 (primary dev box)
-**Branch:** `dev` — committed `9a8d59c` on top of `610b63c`.
-**Status:** ✅ `cargo test --lib` **489 pass** (+8 aggregator tests, net +4). Both ignored accuracy
-replays run locally again and are **100.0%**: `accuracy_report` (player.log path, unchanged) and the
-new **`chat_only_accuracy_report`** — 103/103 items exact, 2400/2400 qty, **zero extra items** across
-all six ground-truth datasets. No frontend changes (`vue-tsc` untouched surface).
+**Branch:** `dev` — committed `9a8d59c` (windows) + `ea33aa6` (identity fallback) on top of `610b63c`.
+**Status:** ✅ `cargo test --lib` **490 pass**. Both ignored accuracy replays run locally again:
+`accuracy_report` (player.log path) **103/103 exact**; the new **`chat_only_accuracy_report`**
+captures **100.0%** with zero undercounts (identity fallback adds a small, codified wild-node
+overcount — see below). No frontend changes (`vue-tsc` untouched surface).
+
+### ⚠️ Live-test result → item-identity fallback (`ea33aa6`)
+The window gating alone **did not attribute loot on the user's live setup** (the windows need
+Player.log timing signals — mining delay loops / StartInteraction — which evidently don't reach the
+user's live log the way the captured datasets suggest). Per the user's direction, a
+**timing-independent identity fallback** now runs after the windows in `attribute_chat_gain`:
+while a session is active, gains whose item is identifiable as survey yield attribute to the
+session's **latest use** (`latest_use_id_for_session` reinstated). Identity
+(`is_survey_loot_item`): CDN keyword **`Ore`** (rhodium, stibnite, silver/gold/copper ore, paladium,
+iridium, pyrite, cinnabar, tungsten, orichalcum, molybdenum, gold nugget, …) or **`MetalSlab`**
+(every slab tier), plus **Semi-Real Hassium** (keyword `SemiRealHassium`) and **Magic Sand**
+(internal `MagicSand`). **Accepted trade-off (user's explicit choice):** wild-node ore mined during
+a session counts as session loot. The chat-only report's assertions encode the contract:
+undercount >2 = hard failure (zero observed), overcount bounded at 2% of expected (observed
++15/2400, all wild-node ore in 50x-povus; the five basic datasets stay exact). Crystal/basic
+surveys aren't in the identity list — they still rely on the window paths.
 
 ## TL;DR — Session 27 (survey chat-loot gating)
 
