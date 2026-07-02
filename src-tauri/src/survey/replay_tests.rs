@@ -305,8 +305,14 @@ fn replay_dataset_chat_only(player_log: &Path, chat_log: &Path) -> Result<Connec
                          g: &ChatGain,
                          internal: &Option<String>| {
         let ts = format!("{} {}", base_date_str, g.utc_hms);
-        let attributed =
-            aggregator.attribute_chat_gain(&conn, internal.as_deref(), g.quantity, &ts);
+        let attributed = aggregator.attribute_chat_gain(
+            &conn,
+            CHARACTER,
+            SERVER,
+            internal.as_deref(),
+            g.quantity,
+            &ts,
+        );
         let (kind, details): (Option<&str>, Option<String>) = match attributed {
             Some(id) => (
                 Some("survey_chat"),
@@ -1335,14 +1341,7 @@ fn run_accuracy_report(chat_only: bool) {
     println!("════════════════════════════════════════════════════════════════════════════");
     println!();
 
-    // Hard assertions:
-    // 1. Every dataset must replay successfully.
-    // 2. No items may be off by >2 (wrong quantity for a known item).
-    // 3. No extra items (pipeline attributed items not in ground truth).
-    // 4. Overall quantity accuracy must stay above 90%.
-    //
-    // Per-dataset status shows FAIL for any non-exact item or any extra
-    // item — every deviation is a signal worth investigating.
+    // Hard assertions. Every dataset must replay successfully in both modes.
     for r in &results {
         assert!(
             r.ok,
@@ -1350,16 +1349,54 @@ fn run_accuracy_report(chat_only: bool) {
             r.name, r.error
         );
     }
-    assert!(
-        grand_large == 0,
-        "found {} items with >2 difference — these indicate real pipeline bugs or ground-truth errors",
-        grand_large
-    );
-    assert!(
-        grand_extra_items == 0,
-        "found {} extra items ({} qty) attributed to surveys but not in ground truth — pipeline is over-attributing",
-        grand_extra_items, grand_extra_qty
-    );
+
+    if chat_only {
+        // Chat-only mode includes the item-identity fallback, which by
+        // design also counts Ore/MetalSlab items mined from *wild* nodes
+        // during a session (chat identity can't tell them apart — accepted
+        // trade-off). So: undercounts are still hard failures (survey loot
+        // must never be missed), while overcounts vs the hand-isolated
+        // ground truth are allowed but must stay small.
+        let big_undercounts: Vec<String> = results
+            .iter()
+            .flat_map(|r| r.item_details.iter().map(move |d| (r.name.clone(), d)))
+            .filter(|(_, (_, _, _, delta))| *delta < -2)
+            .map(|(ds, (item, expected, actual, _))| {
+                format!("{ds}: {item} expected={expected} actual={actual}")
+            })
+            .collect();
+        assert!(
+            big_undercounts.is_empty(),
+            "survey loot missed by the chat gate (undercount >2): {:?}",
+            big_undercounts
+        );
+        let overcount: i64 = results
+            .iter()
+            .flat_map(|r| r.item_details.iter())
+            .map(|(_, _, _, delta)| (*delta).max(0))
+            .sum::<i64>()
+            + grand_extra_qty;
+        let overcount_limit = (grand_expected_qty as f64 * 0.02).ceil() as i64;
+        assert!(
+            overcount <= overcount_limit.max(10),
+            "identity-fallback overcount {} exceeds bound {} (2% of expected {}) — over-attributing beyond wild-node noise",
+            overcount, overcount_limit, grand_expected_qty
+        );
+    } else {
+        // Player.log mode is exact:
+        // 1. No items may be off by >2 (wrong quantity for a known item).
+        // 2. No extra items (pipeline attributed items not in ground truth).
+        assert!(
+            grand_large == 0,
+            "found {} items with >2 difference — these indicate real pipeline bugs or ground-truth errors",
+            grand_large
+        );
+        assert!(
+            grand_extra_items == 0,
+            "found {} extra items ({} qty) attributed to surveys but not in ground truth — pipeline is over-attributing",
+            grand_extra_items, grand_extra_qty
+        );
+    }
     if grand_expected_qty > 0 {
         assert!(
             grand_accuracy >= 90.0,

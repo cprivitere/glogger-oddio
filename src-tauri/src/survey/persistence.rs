@@ -288,6 +288,23 @@ pub fn get_use(conn: &Connection, use_id: i64) -> Result<Option<SurveyUse>> {
     .optional()
 }
 
+/// The most-recently-used survey use belonging to a session, if any.
+///
+/// Used by the chat-loot identity path: a gained item that is identifiable
+/// as survey yield (Ore/MetalSlab keywords, …) attributes to whichever
+/// survey map the player most recently consumed in the active session.
+/// Ordered by `used_at` then `id` so the latest map wins even when two uses
+/// share a second-resolution timestamp.
+pub fn latest_use_id_for_session(conn: &Connection, session_id: i64) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM survey_uses WHERE session_id = ?1
+         ORDER BY used_at DESC, id DESC LIMIT 1",
+        params![session_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// The most recent Motherlode/Multihit use for a character, no older than
 /// `max_age_secs` before `now_iso`.
 ///

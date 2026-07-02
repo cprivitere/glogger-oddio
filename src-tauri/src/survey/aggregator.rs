@@ -325,9 +325,11 @@ impl SurveySessionAggregator {
     /// Kaeus' GorgonSurveyTracker reads, and why its summary works where ours
     /// did not).
     ///
-    /// Chat lines carry no node/map identity, so the gain is gated on
-    /// per-kind **collection windows** instead (see
-    /// docs/architecture/survey-mechanics.md):
+    /// Chat lines carry no node/map identity, so the gain is gated two ways
+    /// (see docs/architecture/survey-mechanics.md):
+    ///
+    /// Per-kind **collection windows** (precise, attributes to the exact
+    /// use):
     /// - **Basic**: loot lands in the same game tick as the map's
     ///   consumption → attribute within [`CHAT_BASIC_WINDOW_SECS`] of a
     ///   recently-consumed Basic use.
@@ -335,9 +337,16 @@ impl SurveySessionAggregator {
     ///   survey-spawned node completes → attribute inside the current
     ///   swing's window of the adopted node (see [`ChatMiningState`]).
     ///
-    /// Anything gained outside these windows — kill loot, foraging, quest
-    /// items, crafted survey maps — is **not** survey loot and returns
-    /// `None`.
+    /// **Item-identity fallback** (robust — needs no Player.log timing
+    /// signals, which don't reach every user's log): items identifiable as
+    /// survey yield ([`Self::is_survey_loot_item`]: `Ore`/`MetalSlab`
+    /// keywords, Semi-Real Hassium, Magic Sand) attribute to the active
+    /// session's most recent use whenever a session is running. Regular
+    /// mining during a session counts too — accepted trade-off; the item
+    /// identity is the strongest signal chat offers.
+    ///
+    /// Anything else gained mid-session — kill loot, foraging, quest items,
+    /// crafted survey maps — is **not** survey loot and returns `None`.
     ///
     /// Returns the `survey_use_id` the caller should stamp into the chat
     /// row's `source_details` (so the loot summary query can join it).
@@ -348,6 +357,8 @@ impl SurveySessionAggregator {
     pub fn attribute_chat_gain(
         &mut self,
         conn: &Connection,
+        character: &str,
+        server: &str,
         internal_name: Option<&str>,
         quantity: u32,
         timestamp: &str,
@@ -387,7 +398,61 @@ impl SurveySessionAggregator {
             }
         }
 
+        // Identity fallback: survey-yield items count while a session is
+        // active, attributed to its most recent use.
+        if internal_name.is_some_and(|internal| self.is_survey_loot_item(internal)) {
+            if let Some(session_id) = self.fetch_active_session(conn, character, server) {
+                if let Ok(Some(use_id)) =
+                    persistence::latest_use_id_for_session(conn, session_id)
+                {
+                    return self.record_chat_attribution(conn, use_id, quantity, timestamp, false);
+                }
+            }
+        }
+
         None
+    }
+
+    /// Is this item identifiable as survey yield by its CDN identity alone?
+    /// - `Ore` keyword: metal-survey loot (Copper/Silver/Gold Ore, Rhodium,
+    ///   Stibnite, Paladium, Iridium, Pyrite, Cinnabar, Tungsten,
+    ///   Orichalcum, Molybdenum, Gold Nugget, …).
+    /// - `MetalSlab` keyword: every "… Metal Slab" tier.
+    /// - Color-crystal keywords: the base crystal families the color-named
+    ///   mineral surveys yield (Blue/Green/White/Orange/Yellow Mineral +
+    ///   Rubywall, whose internal name IS `RedCrystal`), covering
+    ///   Massive/Maximized variants too. Deliberately NOT the bare
+    ///   `Crystal` keyword — that would drag in emotion pearls, mind gems,
+    ///   gem fragments, and other non-survey items.
+    /// - Semi-Real Hassium (own keyword); Magic Sand, Sulfur, Saltpeter by
+    ///   internal name (no distinctive keyword).
+    fn is_survey_loot_item(&self, internal_name: &str) -> bool {
+        const YIELD_KEYWORDS: [&str; 9] = [
+            "Ore",
+            "MetalSlab",
+            "SemiRealHassium",
+            "BlueCrystal",
+            "GreenCrystal",
+            "WhiteCrystal",
+            "OrangeCrystal",
+            "YellowCrystal",
+            "RedCrystal",
+        ];
+        const YIELD_INTERNAL_NAMES: [&str; 3] = ["MagicSand", "Sulfur", "Saltpeter"];
+
+        let Ok(gd) = self.game_data.try_read() else {
+            return false;
+        };
+        let Some(info) = gd.resolve_item(internal_name) else {
+            return false;
+        };
+        info.keywords
+            .iter()
+            .any(|k| YIELD_KEYWORDS.iter().any(|y| k == y))
+            || info
+                .internal_name
+                .as_deref()
+                .is_some_and(|n| YIELD_INTERNAL_NAMES.contains(&n))
     }
 
     /// Shared tail of a successful chat attribution: bump the use's
@@ -1585,6 +1650,59 @@ mod tests {
                 "Povus Astounding Mining Survey",
                 &["Document", "MiningSurvey"][..],
             ),
+            // Survey-yield identity items (chat identity fallback) + a
+            // resolvable non-yield item for the negative case.
+            (
+                400,
+                "Tungsten",
+                "Tungsten",
+                &["AlchemyIngredient", "Ore", "Tungsten=250"][..],
+            ),
+            (
+                500,
+                "MetalSlab9",
+                "Marvelous Metal Slab",
+                &["MetalSlab", "MetalSlab9", "SkillIngredient", "ValuableMetalSlab"][..],
+            ),
+            (
+                600,
+                "MagicSand",
+                "Magic Sand",
+                &["KhyrulekLore", "Sand=1000", "VendorTrash"][..],
+            ),
+            (
+                700,
+                "SemiRealHassium",
+                "Semi-Real Hassium",
+                &["Crystal", "IrradiatedCrystal", "SemiRealHassium"][..],
+            ),
+            (800, "Skull", "Skull", &["VendorTrash"][..]),
+            (
+                810,
+                "Sulfur",
+                "Sulfur",
+                &["AlchemyIngredient", "MagicDust", "Sulfur"][..],
+            ),
+            (
+                820,
+                "Saltpeter",
+                "Saltpeter",
+                &["AlchemyIngredient", "MagicDust", "Saltpeter"][..],
+            ),
+            (
+                830,
+                "Fluorite",
+                "Fluorite",
+                &["BlueCrystal", "Crystal", "Fluorite=500", "Gem=200"][..],
+            ),
+            // Crystal-keyword but NOT a color family — must not match the
+            // identity gate (emotion pearls, gem fragments, etc.).
+            (
+                840,
+                "FearPearl1",
+                "Small Fear Pearl",
+                &["Crystal", "EmotionPearl", "GemFragment"][..],
+            ),
         ];
         for (id, internal, display, keywords) in entries {
             gd.items.insert(id, survey_item(id, internal, display, keywords));
@@ -1743,7 +1861,7 @@ mod tests {
             .unwrap();
         let use_id = persistence::uses_for_session(&conn, session.id).unwrap()[0].id;
 
-        let attributed = agg.attribute_chat_gain(&conn, None, 9, "2026-04-15 12:00:01");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 9, "2026-04-15 12:00:01");
         assert_eq!(attributed, Some(use_id));
 
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
@@ -1755,12 +1873,12 @@ mod tests {
         );
 
         // A second same-tick gain (speed-bonus item) accumulates.
-        agg.attribute_chat_gain(&conn, None, 3, "2026-04-15 12:00:02");
+        agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 3, "2026-04-15 12:00:02");
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
         assert_eq!(su.loot_qty, 12);
 
         // 30s later the window is closed — incidental loot is NOT survey loot.
-        let attributed = agg.attribute_chat_gain(&conn, None, 5, "2026-04-15 12:00:30");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 5, "2026-04-15 12:00:30");
         assert_eq!(attributed, None, "gain outside the basic window must not attribute");
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
         assert_eq!(su.loot_qty, 12, "loot_qty unchanged by rejected gain");
@@ -1771,7 +1889,7 @@ mod tests {
         // No survey activity at all → nothing to attribute to.
         let conn = fresh_db();
         let mut agg = SurveySessionAggregator::new(game_data_with_survey_maps());
-        let attributed = agg.attribute_chat_gain(&conn, None, 5, "2026-04-15 12:00:00");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 5, "2026-04-15 12:00:00");
         assert_eq!(attributed, None);
     }
 
@@ -1783,7 +1901,7 @@ mod tests {
         let mut agg = SurveySessionAggregator::new(game_data_with_survey_maps());
         agg.start_manual_session(&conn, "Zenith", "Dreva", "2026-04-15 12:00:00")
             .unwrap();
-        let attributed = agg.attribute_chat_gain(&conn, None, 5, "2026-04-15 12:00:01");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 5, "2026-04-15 12:00:01");
         assert_eq!(attributed, None);
     }
 
@@ -1805,6 +1923,8 @@ mod tests {
 
         let attributed = agg.attribute_chat_gain(
             &conn,
+            "Zenith",
+            "Dreva",
             Some("GeologySurveySerbule1"),
             1,
             "2026-04-15 12:00:01",
@@ -1857,11 +1977,11 @@ mod tests {
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
 
         // Loot at swing completion (start + 6s) attributes.
-        let attributed = agg.attribute_chat_gain(&conn, None, 2, "2026-04-15 12:00:26");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 2, "2026-04-15 12:00:26");
         assert_eq!(attributed, Some(use_id), "swing-completion loot attributes");
 
         // Between swings: not survey loot (e.g. corpse loot mid-fight).
-        let attributed = agg.attribute_chat_gain(&conn, None, 1, "2026-04-15 12:00:40");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 1, "2026-04-15 12:00:40");
         assert_eq!(attributed, None, "gain between swings must not attribute");
 
         // Swing 2 on the same node refreshes the window.
@@ -1869,7 +1989,7 @@ mod tests {
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
         let mut ev = mining_loop("12:00:45");
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
-        let attributed = agg.attribute_chat_gain(&conn, None, 3, "2026-04-15 12:00:51");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 3, "2026-04-15 12:00:51");
         assert_eq!(attributed, Some(use_id));
 
         // A swing on a DIFFERENT node closes the engagement; its loot is
@@ -1879,7 +1999,7 @@ mod tests {
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
         let mut ev = mining_loop("12:01:10");
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
-        let attributed = agg.attribute_chat_gain(&conn, None, 4, "2026-04-15 12:01:16");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 4, "2026-04-15 12:01:16");
         assert_eq!(attributed, None, "regular-node loot must not attribute");
 
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
@@ -1895,7 +2015,7 @@ mod tests {
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
         let mut ev = mining_loop("12:01:30");
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
-        let attributed = agg.attribute_chat_gain(&conn, None, 2, "2026-04-15 12:01:36");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 2, "2026-04-15 12:01:36");
         assert_eq!(attributed, Some(use_id), "returning to the survey node resumes");
 
         // Corpse loot right after a swing completes (observed leak in the
@@ -1905,11 +2025,11 @@ mod tests {
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
         let mut ev = mining_loop("12:02:00");
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
-        let attributed = agg.attribute_chat_gain(&conn, None, 1, "2026-04-15 12:02:06");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 1, "2026-04-15 12:02:06");
         assert_eq!(attributed, Some(use_id), "swing loot at completion attributes");
         let mut ev = interaction("12:02:08", 7777, ""); // corpse search
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("Povus"));
-        let attributed = agg.attribute_chat_gain(&conn, None, 1, "2026-04-15 12:02:09");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 1, "2026-04-15 12:02:09");
         assert_eq!(attributed, None, "corpse loot inside the clipped slack must not attribute");
     }
 
@@ -1952,14 +2072,75 @@ mod tests {
         };
         agg.process_event(&mut ev, &conn, "Zenith", "Dreva", Some("KurMountains"));
 
-        let attributed = agg.attribute_chat_gain(&conn, None, 2, "2026-04-15 12:00:36");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 2, "2026-04-15 12:00:36");
         assert_eq!(attributed, Some(use_id), "swing loot attributes");
 
-        let attributed = agg.attribute_chat_gain(&conn, None, 1, "2026-04-15 12:00:50");
+        let attributed = agg.attribute_chat_gain(&conn, "Zenith", "Dreva", None, 1, "2026-04-15 12:00:50");
         assert_eq!(attributed, None, "loot after the swing window must not attribute");
 
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
         assert_eq!(su.loot_qty, 2);
+    }
+
+    #[test]
+    fn test_ore_identity_attributes_to_latest_use_mid_session() {
+        // Item-identity fallback: Ore/MetalSlab/Hassium/Magic Sand gains
+        // count as survey loot whenever a session is active — no collection
+        // window required (Player.log timing signals don't reach every
+        // user's log). Non-yield items still need a window; nothing counts
+        // after the session ends.
+        let conn = fresh_db();
+        let mut agg = SurveySessionAggregator::new(game_data_with_survey_maps());
+        agg.set_base_date(test_base_date());
+
+        let mut consume = PlayerEvent::ItemDeleted {
+            timestamp: "12:00:00".to_string(),
+            instance_id: 1,
+            item_name: Some("MiningSurveyPovus7Y".to_string()),
+            context: crate::player_event_parser::DeleteContext::Consumed,
+        };
+        agg.process_event(&mut consume, &conn, "Zenith", "Dreva", Some("Povus"));
+        let session_id = persistence::active_session(&conn, "Zenith", "Dreva")
+            .unwrap()
+            .unwrap()
+            .id;
+        let use_id = persistence::uses_for_session(&conn, session_id).unwrap()[0].id;
+
+        // Minutes after any window: identity still attributes.
+        for (internal, qty, ts) in [
+            ("Tungsten", 3, "2026-04-15 12:05:00"),
+            ("MetalSlab9", 2, "2026-04-15 12:06:00"),
+            ("MagicSand", 4, "2026-04-15 12:07:00"),
+            ("SemiRealHassium", 1, "2026-04-15 12:08:00"),
+            ("Sulfur", 2, "2026-04-15 12:08:10"),
+            ("Saltpeter", 1, "2026-04-15 12:08:20"),
+            ("Fluorite", 3, "2026-04-15 12:08:30"), // color-crystal family
+        ] {
+            let attributed = agg.attribute_chat_gain(
+                &conn, "Zenith", "Dreva", Some(internal), qty, ts,
+            );
+            assert_eq!(attributed, Some(use_id), "{internal} should attribute by identity");
+        }
+        let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
+        assert_eq!(su.loot_qty, 16, "3+2+4+1+2+1+3 identity gains");
+
+        // Resolvable non-yield items outside every window: not survey loot.
+        // A bare-`Crystal` item (emotion pearl) must not match the color
+        // families either.
+        for internal in ["Skull", "FearPearl1"] {
+            let attributed = agg.attribute_chat_gain(
+                &conn, "Zenith", "Dreva", Some(internal), 1, "2026-04-15 12:09:00",
+            );
+            assert_eq!(attributed, None, "{internal} needs a collection window");
+        }
+
+        // After the session ends, ore is regular mining again.
+        agg.end_active_session(&conn, "Zenith", "Dreva", "2026-04-15 12:10:00")
+            .unwrap();
+        let attributed = agg.attribute_chat_gain(
+            &conn, "Zenith", "Dreva", Some("Tungsten"), 1, "2026-04-15 12:11:00",
+        );
+        assert_eq!(attributed, None, "no attribution without an active session");
     }
 
     #[test]
