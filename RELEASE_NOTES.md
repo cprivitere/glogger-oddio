@@ -1,7 +1,8 @@
-## What's Changed since v0.11.19
+## What's Changed since v0.11.20
 
 ### Features
-- feat(surveying): only track items actually collected from surveys (`9a8d59c`)
+- feat(surveying): extend chat-loot identity to sulfur, saltpeter, base crystals (`705813d`)
+- feat(surveying): item-identity fallback for chat loot attribution (`ea33aa6`)
 
 ---
-*3 commits since v0.11.19*
+*5 commits since v0.11.20*
