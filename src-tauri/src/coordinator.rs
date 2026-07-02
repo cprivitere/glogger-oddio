@@ -1049,6 +1049,8 @@ impl DataIngestCoordinator {
                                         let survey_use_id = if context == "loot" {
                                             self.survey_aggregator.attribute_chat_gain(
                                                 &conn,
+                                                &character,
+                                                &server,
                                                 internal_name.as_deref(),
                                                 *quantity,
                                                 timestamp,
