@@ -1,7 +1,7 @@
-## What's Changed since v0.11.9
+## What's Changed since v0.11.19
 
-### Fixes
-- fix(crafting): move consume-buffer arrows outside the input box (`f8c5c26`)
+### Features
+- feat(surveying): only track items actually collected from surveys (`9a8d59c`)
 
 ---
-*2 commits since v0.11.9*
+*3 commits since v0.11.19*
