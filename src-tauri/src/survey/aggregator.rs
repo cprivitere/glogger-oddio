@@ -414,12 +414,32 @@ impl SurveySessionAggregator {
     }
 
     /// Is this item identifiable as survey yield by its CDN identity alone?
-    /// Metal-survey loot carries the `Ore` keyword (Copper/Silver/Gold Ore,
-    /// Rhodium, Stibnite, Paladium, Iridium, Pyrite, Cinnabar, Tungsten,
-    /// Orichalcum, Molybdenum, Gold Nugget, …) or the `MetalSlab` keyword
-    /// (every "… Metal Slab" tier); Semi-Real Hassium and Magic Sand are
-    /// special-cased survey drops without a shared keyword.
+    /// - `Ore` keyword: metal-survey loot (Copper/Silver/Gold Ore, Rhodium,
+    ///   Stibnite, Paladium, Iridium, Pyrite, Cinnabar, Tungsten,
+    ///   Orichalcum, Molybdenum, Gold Nugget, …).
+    /// - `MetalSlab` keyword: every "… Metal Slab" tier.
+    /// - Color-crystal keywords: the base crystal families the color-named
+    ///   mineral surveys yield (Blue/Green/White/Orange/Yellow Mineral +
+    ///   Rubywall, whose internal name IS `RedCrystal`), covering
+    ///   Massive/Maximized variants too. Deliberately NOT the bare
+    ///   `Crystal` keyword — that would drag in emotion pearls, mind gems,
+    ///   gem fragments, and other non-survey items.
+    /// - Semi-Real Hassium (own keyword); Magic Sand, Sulfur, Saltpeter by
+    ///   internal name (no distinctive keyword).
     fn is_survey_loot_item(&self, internal_name: &str) -> bool {
+        const YIELD_KEYWORDS: [&str; 9] = [
+            "Ore",
+            "MetalSlab",
+            "SemiRealHassium",
+            "BlueCrystal",
+            "GreenCrystal",
+            "WhiteCrystal",
+            "OrangeCrystal",
+            "YellowCrystal",
+            "RedCrystal",
+        ];
+        const YIELD_INTERNAL_NAMES: [&str; 3] = ["MagicSand", "Sulfur", "Saltpeter"];
+
         let Ok(gd) = self.game_data.try_read() else {
             return false;
         };
@@ -428,8 +448,11 @@ impl SurveySessionAggregator {
         };
         info.keywords
             .iter()
-            .any(|k| k == "Ore" || k == "MetalSlab" || k == "SemiRealHassium")
-            || info.internal_name.as_deref() == Some("MagicSand")
+            .any(|k| YIELD_KEYWORDS.iter().any(|y| k == y))
+            || info
+                .internal_name
+                .as_deref()
+                .is_some_and(|n| YIELD_INTERNAL_NAMES.contains(&n))
     }
 
     /// Shared tail of a successful chat attribution: bump the use's
@@ -1654,6 +1677,32 @@ mod tests {
                 &["Crystal", "IrradiatedCrystal", "SemiRealHassium"][..],
             ),
             (800, "Skull", "Skull", &["VendorTrash"][..]),
+            (
+                810,
+                "Sulfur",
+                "Sulfur",
+                &["AlchemyIngredient", "MagicDust", "Sulfur"][..],
+            ),
+            (
+                820,
+                "Saltpeter",
+                "Saltpeter",
+                &["AlchemyIngredient", "MagicDust", "Saltpeter"][..],
+            ),
+            (
+                830,
+                "Fluorite",
+                "Fluorite",
+                &["BlueCrystal", "Crystal", "Fluorite=500", "Gem=200"][..],
+            ),
+            // Crystal-keyword but NOT a color family — must not match the
+            // identity gate (emotion pearls, gem fragments, etc.).
+            (
+                840,
+                "FearPearl1",
+                "Small Fear Pearl",
+                &["Crystal", "EmotionPearl", "GemFragment"][..],
+            ),
         ];
         for (id, internal, display, keywords) in entries {
             gd.items.insert(id, survey_item(id, internal, display, keywords));
@@ -2063,6 +2112,9 @@ mod tests {
             ("MetalSlab9", 2, "2026-04-15 12:06:00"),
             ("MagicSand", 4, "2026-04-15 12:07:00"),
             ("SemiRealHassium", 1, "2026-04-15 12:08:00"),
+            ("Sulfur", 2, "2026-04-15 12:08:10"),
+            ("Saltpeter", 1, "2026-04-15 12:08:20"),
+            ("Fluorite", 3, "2026-04-15 12:08:30"), // color-crystal family
         ] {
             let attributed = agg.attribute_chat_gain(
                 &conn, "Zenith", "Dreva", Some(internal), qty, ts,
@@ -2070,13 +2122,17 @@ mod tests {
             assert_eq!(attributed, Some(use_id), "{internal} should attribute by identity");
         }
         let su = persistence::get_use(&conn, use_id).unwrap().unwrap();
-        assert_eq!(su.loot_qty, 10, "3+2+4+1 identity gains");
+        assert_eq!(su.loot_qty, 16, "3+2+4+1+2+1+3 identity gains");
 
-        // A resolvable non-yield item outside every window: not survey loot.
-        let attributed = agg.attribute_chat_gain(
-            &conn, "Zenith", "Dreva", Some("Skull"), 1, "2026-04-15 12:09:00",
-        );
-        assert_eq!(attributed, None, "non-yield item needs a collection window");
+        // Resolvable non-yield items outside every window: not survey loot.
+        // A bare-`Crystal` item (emotion pearl) must not match the color
+        // families either.
+        for internal in ["Skull", "FearPearl1"] {
+            let attributed = agg.attribute_chat_gain(
+                &conn, "Zenith", "Dreva", Some(internal), 1, "2026-04-15 12:09:00",
+            );
+            assert_eq!(attributed, None, "{internal} needs a collection window");
+        }
 
         // After the session ends, ore is regular mining again.
         agg.end_active_session(&conn, "Zenith", "Dreva", "2026-04-15 12:10:00")
