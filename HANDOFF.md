@@ -17,12 +17,16 @@ while a session is active, gains whose item is identifiable as survey yield attr
 session's **latest use** (`latest_use_id_for_session` reinstated). Identity
 (`is_survey_loot_item`): CDN keyword **`Ore`** (rhodium, stibnite, silver/gold/copper ore, paladium,
 iridium, pyrite, cinnabar, tungsten, orichalcum, molybdenum, gold nugget, …) or **`MetalSlab`**
-(every slab tier), plus **Semi-Real Hassium** (keyword `SemiRealHassium`) and **Magic Sand**
-(internal `MagicSand`). **Accepted trade-off (user's explicit choice):** wild-node ore mined during
-a session counts as session loot. The chat-only report's assertions encode the contract:
-undercount >2 = hard failure (zero observed), overcount bounded at 2% of expected (observed
-+15/2400, all wild-node ore in 50x-povus; the five basic datasets stay exact). Crystal/basic
-surveys aren't in the identity list — they still rely on the window paths.
+(every slab tier), the **six color-crystal family keywords** (`BlueCrystal`/`GreenCrystal`/
+`WhiteCrystal`/`OrangeCrystal`/`YellowCrystal`/`RedCrystal` — the base crystal types the
+color-named mineral surveys yield, incl. Massive/Maximized; Rubywall Crystal is internally
+`RedCrystal`; deliberately NOT the bare `Crystal` keyword, which would drag in emotion pearls /
+mind gems / gem fragments), plus **Semi-Real Hassium** (keyword) and **Magic Sand / Sulfur /
+Saltpeter** (internal names — the dusts carry `MagicDust`, not `Ore`). Extension commit `705813d`.
+**Accepted trade-off (user's explicit choice):** wild-node ore/gems mined during a session count as
+session loot. The chat-only report's assertions encode the contract: undercount >2 = hard failure
+(zero observed), overcount bounded at 2% of expected (observed +15/2400, all wild-node ore in
+50x-povus; the five basic datasets stay exact even with the crystal families active).
 
 ## TL;DR — Session 27 (survey chat-loot gating)
 
