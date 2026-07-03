@@ -478,19 +478,71 @@
               </div>
 
               <!-- You Own -->
-              <div v-if="ownershipInfo && ownershipInfo.total_count > 0" class="flex flex-col gap-1.5">
+              <div v-if="ownershipInfo" class="flex flex-col gap-1.5">
                 <div class="text-[0.65rem] uppercase tracking-widest text-text-dim border-b border-surface-card pb-0.5">
                   You Own: <span class="text-text-secondary normal-case tracking-normal font-mono">{{ ownershipInfo.total_count }}</span>
                 </div>
-                <div class="flex flex-col gap-0.5">
+                <div v-if="ownershipInfo.total_count === 0" class="text-text-dim text-xs italic px-2">
+                  None in inventory or storage
+                </div>
+                <div v-else class="flex flex-col gap-0.5">
                   <div
                     v-for="loc in ownershipInfo.locations"
                     :key="loc.location"
-                    class="text-xs flex justify-between px-2 py-0.5 bg-surface-inset">
-                    <span class="text-text-muted">{{ loc.location }}</span>
-                    <span class="text-text-secondary font-mono">{{ loc.count }}</span>
+                    class="text-xs flex justify-between gap-2 px-2 py-0.5 bg-surface-inset">
+                    <span class="text-text-muted min-w-0 truncate" :title="loc.location">
+                      {{ vaultLabel(loc.location) }}
+                      <span v-if="vaultArea(loc.location)" class="text-text-dim text-[0.65rem]">— {{ vaultArea(loc.location) }}</span>
+                    </span>
+                    <span class="text-text-secondary font-mono shrink-0">{{ loc.count }}</span>
                   </div>
                 </div>
+              </div>
+
+              <!-- Needed For Crafting Projects -->
+              <div v-if="projectNeedsLoading || (projectNeeds !== null && craftingStore.projects.length > 0)" class="flex flex-col gap-1.5">
+                <div class="text-[0.65rem] uppercase tracking-widest text-text-dim border-b border-surface-card pb-0.5">
+                  Needed For Projects
+                  <span v-if="projectNeeds?.length" class="text-text-dim font-normal ml-1">({{ projectNeeds.length }})</span>
+                </div>
+                <div v-if="projectNeedsLoading" class="text-text-dim text-xs italic px-2">Checking projects...</div>
+                <div v-else-if="!projectNeeds || projectNeeds.length === 0" class="text-text-dim text-xs italic px-2">
+                  Not needed in any crafting project
+                </div>
+                <template v-else>
+                  <div class="flex flex-col gap-0.5">
+                    <div
+                      v-for="need in projectNeeds"
+                      :key="need.project_id"
+                      class="flex flex-col gap-0.5 px-2 py-1 bg-surface-inset border-l-2 border-l-[#4a3a6a]">
+                      <div class="text-xs flex items-baseline justify-between gap-2">
+                        <button
+                          class="bg-transparent border-none p-0 cursor-pointer text-xs text-[#b3a1d6] hover:underline text-left truncate"
+                          :title="need.group_name ? `${need.group_name} / ${need.project_name}` : need.project_name"
+                          @click="openProject(need.project_id)">
+                          {{ need.project_name }}
+                        </button>
+                        <span v-if="need.quantity + need.intermediate_quantity > 0" class="text-text-secondary font-mono shrink-0">
+                          &times;{{ need.quantity + need.intermediate_quantity }}
+                        </span>
+                      </div>
+                      <div v-if="need.intermediate_quantity > 0" class="text-[0.65rem] text-text-dim">
+                        crafted as an intermediate in this project
+                      </div>
+                      <div v-for="kw in need.keyword_needs" :key="kw.keyword" class="text-[0.65rem] text-text-dim">
+                        can fill "{{ kw.keyword }}" slot &times;{{ kw.quantity }}
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="totalProjectNeed > 0 && ownershipInfo" class="text-[0.65rem] flex justify-between px-2 py-0.5">
+                    <span class="text-text-muted">Own {{ ownershipInfo.total_count }} of {{ totalProjectNeed }} needed</span>
+                    <span
+                      class="font-mono font-bold"
+                      :class="ownershipInfo.total_count >= totalProjectNeed ? 'text-value-positive' : 'text-accent-red'">
+                      {{ ownershipInfo.total_count >= totalProjectNeed ? 'covered' : `short ${totalProjectNeed - ownershipInfo.total_count}` }}
+                    </span>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -514,9 +566,12 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useGameDataStore } from "../../stores/gameDataStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useMarketStore, type MarketValue } from "../../stores/marketStore";
+import { useCraftingStore } from "../../stores/craftingStore";
 import { useKeyboard } from "../../composables/useKeyboard";
 import { useDataBrowserStore } from "../../stores/dataBrowserStore";
 import { useEntityNavigation } from "../../composables/useEntityNavigation";
+import { useViewNavigation } from "../../composables/useViewNavigation";
+import type { ProjectItemNeed } from "../../types/crafting";
 import { parseQuery, getTextQuery, getFilter, getNegatedFilters } from "../../utils/SearchParser";
 import type { EntityNavigationTarget } from "../../composables/useEntityNavigation";
 import type { ItemInfo, RecipeInfo, EntitySources, NpcFavorEntry, GardeningProductChain } from "../../types/gameData";
@@ -534,8 +589,10 @@ const props = defineProps<{
 const store = useGameDataStore();
 const settingsStore = useSettingsStore();
 const marketStore = useMarketStore();
+const craftingStore = useCraftingStore();
 const dataBrowserStore = useDataBrowserStore();
 const { navigateToEntity } = useEntityNavigation();
+const { navigateToView } = useViewNavigation();
 
 const isFav = computed(() =>
   selected.value ? dataBrowserStore.isFavorite("item", selected.value.name) : false
@@ -610,6 +667,42 @@ interface ItemOwnershipInfo {
 }
 const ownershipInfo = ref<ItemOwnershipInfo | null>(null);
 
+// Friendly vault names + zones for ownership locations
+const vaultZoneMap = ref(new Map<string, { label: string; area: string | null }>());
+
+function vaultLabel(location: string): string {
+  if (location === "Inventory") return "Inventory";
+  const info = vaultZoneMap.value.get(location);
+  if (info) return info.label;
+  if (location.startsWith("*AccountStorage_")) {
+    return `Account Storage (${location.replace("*AccountStorage_", "")})`;
+  }
+  return location;
+}
+
+function vaultArea(location: string): string | null {
+  return vaultZoneMap.value.get(location)?.area ?? null;
+}
+
+// Crafting projects that need the selected item
+const projectNeeds = ref<ProjectItemNeed[] | null>(null);
+const projectNeedsLoading = ref(false);
+let projectNeedsGen = 0;
+
+const totalProjectNeed = computed(() =>
+  (projectNeeds.value ?? []).reduce((sum, n) => sum + n.quantity + n.intermediate_quantity, 0),
+);
+
+async function openProject(projectId: number) {
+  try {
+    await craftingStore.loadProject(projectId);
+  } catch (e) {
+    console.warn("Failed to load project:", e);
+  }
+  navigateToView({ view: "crafting", subTab: "projects" });
+  dataBrowserStore.close();
+}
+
 // Advanced filters
 const showFilters = ref(false);
 const filterSlot = ref("");
@@ -651,6 +744,20 @@ function clearFilters() {
 }
 
 onMounted(async () => {
+  // Vault display names for the You Own panel
+  store.getStorageVaultZones()
+    .then((zones) => {
+      const map = new Map<string, { label: string; area: string | null }>();
+      for (const z of zones) {
+        map.set(z.vault_key, { label: z.npc_friendly_name ?? z.vault_key, area: z.area_name });
+      }
+      vaultZoneMap.value = map;
+    })
+    .catch((e) => { console.warn("Failed to load vault zones:", e); });
+
+  // Project list so the Needed For Projects panel knows whether any exist
+  craftingStore.loadProjects().catch((e) => { console.warn("Failed to load projects:", e); });
+
   try {
     const [slots, keywords] = await Promise.all([
       store.getEquipSlots(),
@@ -804,9 +911,18 @@ async function selectItem(item: ItemInfo) {
   marketValue.value = null;
   editingMarket.value = false;
   ownershipInfo.value = null;
+  projectNeeds.value = null;
 
   // Load market value
   marketValue.value = marketStore.valuesByItemId[item.id] ?? null;
+
+  // Load crafting-project needs (first call resolves all projects, then cached)
+  const needsGen = ++projectNeedsGen;
+  projectNeedsLoading.value = true;
+  craftingStore.getProjectNeedsForItem(item)
+    .then((needs) => { if (needsGen === projectNeedsGen) projectNeeds.value = needs; })
+    .catch((e) => { console.warn("Project needs fetch failed:", e); })
+    .finally(() => { if (needsGen === projectNeedsGen) projectNeedsLoading.value = false; });
 
   // Load ownership info
   const charName = settingsStore.settings.activeCharacterName;
@@ -911,6 +1027,9 @@ function clearSelection() {
   marketValue.value = null;
   editingMarket.value = false;
   ownershipInfo.value = null;
+  projectNeedsGen++;
+  projectNeeds.value = null;
+  projectNeedsLoading.value = false;
 }
 
 function dropRateColor(rate: number): string {

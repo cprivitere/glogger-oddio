@@ -20,6 +20,7 @@ import type {
   IntermediateCraft,
   MaterialAvailability,
   MaterialNeed,
+  ProjectItemNeed,
   ResolvedIngredient,
   ResolvedRecipe,
   SkillCraftingStats,
@@ -125,6 +126,7 @@ export const useCraftingStore = defineStore("crafting", () => {
     recipesForItemCache.clear();
     itemInfoCache.clear();
     ingredientTreeCache.clear();
+    invalidateProjectNeedsIndex();
   }
 
   // ── Recipe filtering helpers ────────────────────────────────────────────────
@@ -205,6 +207,7 @@ export const useCraftingStore = defineStore("crafting", () => {
       },
     });
     await loadProjects();
+    invalidateProjectNeedsIndex();
     if (activeProject.value?.id === id) {
       activeProject.value.name = name;
       activeProject.value.notes = notes;
@@ -218,11 +221,13 @@ export const useCraftingStore = defineStore("crafting", () => {
     await invoke("delete_crafting_project", { projectId: id });
     if (activeProject.value?.id === id) activeProject.value = null;
     await loadProjects();
+    invalidateProjectNeedsIndex();
   }
 
   async function duplicateProject(id: number) {
     const newId = await invoke<number>("duplicate_crafting_project", { projectId: id });
     await loadProjects();
+    invalidateProjectNeedsIndex();
     return newId;
   }
 
@@ -234,6 +239,7 @@ export const useCraftingStore = defineStore("crafting", () => {
       await loadProject(projectId);
     }
     await loadProjects();
+    invalidateProjectNeedsIndex();
   }
 
   /**
@@ -265,6 +271,7 @@ export const useCraftingStore = defineStore("crafting", () => {
       await loadProject(projectId);
     }
     await loadProjects();
+    invalidateProjectNeedsIndex();
   }
 
   /**
@@ -293,6 +300,7 @@ export const useCraftingStore = defineStore("crafting", () => {
     if (activeProject.value) {
       await loadProject(activeProject.value.id);
     }
+    invalidateProjectNeedsIndex();
   }
 
   async function removeEntry(entryId: number) {
@@ -301,6 +309,7 @@ export const useCraftingStore = defineStore("crafting", () => {
       await loadProject(activeProject.value.id);
     }
     await loadProjects();
+    invalidateProjectNeedsIndex();
   }
 
   // ── Dependency Resolver ───────────────────────────────────────────────────
@@ -860,6 +869,146 @@ export const useCraftingStore = defineStore("crafting", () => {
     }
 
     return result;
+  }
+
+  // ── Project needs index (Data Browser cross-reference) ──────────────────
+  // Answers "which crafting projects need item X?" for the item detail view.
+  // Built lazily by resolving every project's material tree with the same
+  // logic as the Projects tab (stock targets, pinned slots, expanded
+  // intermediates), then cached. A short TTL covers edits that bypass store
+  // invalidation (e.g. expansion toggles written directly by ProjectsTab).
+
+  interface ProjectNeedsEntry {
+    project_id: number
+    project_name: string
+    group_name: string | null
+    /** Flattened material key (item id or "kw:Keyword") → expected quantity */
+    materials: Map<string, number>
+    /** Intermediate item id → quantity needed (crafted within the project) */
+    intermediates: Map<number, number>
+  }
+
+  const PROJECT_NEEDS_TTL_MS = 60_000;
+  let projectNeedsIndex: { builtAt: number; entries: ProjectNeedsEntry[] } | null = null;
+  let projectNeedsBuild: Promise<void> | null = null;
+
+  function invalidateProjectNeedsIndex() {
+    projectNeedsIndex = null;
+  }
+
+  async function buildProjectNeedsIndex(): Promise<ProjectNeedsEntry[]> {
+    const summaries = await invoke<CraftingProjectSummary[]>("get_crafting_projects");
+    const entries: ProjectNeedsEntry[] = [];
+
+    for (const summary of summaries) {
+      if (summary.entry_count === 0) continue;
+      try {
+        const project = await invoke<CraftingProject>("get_crafting_project", { projectId: summary.id });
+        const targets = await resolveStockTargets(project.entries);
+
+        const expandItemIds = new Set<number>();
+        for (const entry of project.entries) {
+          for (const itemId of entry.expanded_ingredient_ids) expandItemIds.add(itemId);
+        }
+        // Fresh map per project — the resolver consumes stock as it allocates it
+        const intermediateStock = expandItemIds.size > 0
+          ? await queryItemStock(Array.from(expandItemIds))
+          : undefined;
+
+        const materials = new Map<string, number>();
+        const intermediates = new Map<number, number>();
+
+        for (const entry of project.entries) {
+          const targetInfo = targets.get(entry.id);
+          const quantity = targetInfo ? targetInfo.effectiveQty : entry.quantity;
+          if (quantity <= 0) continue;
+
+          let recipe = await gameData.resolveRecipe(entry.recipe_name);
+          if (!recipe) continue;
+          if (entry.slot_item_ids && entry.slot_item_ids.length > 0) {
+            recipe = pinRecipeSlots(recipe, entry.slot_item_ids);
+          }
+
+          const resolved = await resolveRecipeIngredients(
+            recipe,
+            quantity,
+            false,
+            new Set(),
+            expandItemIds.size > 0 ? expandItemIds : undefined,
+            intermediateStock,
+          );
+
+          for (const inter of collectIntermediates(resolved.ingredients)) {
+            intermediates.set(inter.item_id, (intermediates.get(inter.item_id) ?? 0) + inter.quantity_produced);
+          }
+          for (const [key, mat] of flattenIngredients(resolved.ingredients)) {
+            materials.set(key, (materials.get(key) ?? 0) + mat.expected_quantity);
+          }
+        }
+
+        if (materials.size > 0 || intermediates.size > 0) {
+          entries.push({
+            project_id: project.id,
+            project_name: project.name,
+            group_name: project.group_name,
+            materials,
+            intermediates,
+          });
+        }
+      } catch (e) {
+        console.warn(`[crafting] Needs index: failed to resolve project "${summary.name}":`, e);
+      }
+    }
+
+    return entries;
+  }
+
+  /**
+   * Which crafting projects need this item, and how much? Matches concrete
+   * raw materials, expanded intermediates, and dynamic keyword slots the item
+   * can fill (respecting dynamic-item preferences).
+   */
+  async function getProjectNeedsForItem(item: { id: number; keywords: string[] }): Promise<ProjectItemNeed[]> {
+    if (!projectNeedsIndex || Date.now() - projectNeedsIndex.builtAt > PROJECT_NEEDS_TTL_MS) {
+      if (!projectNeedsBuild) {
+        projectNeedsBuild = buildProjectNeedsIndex()
+          .then((entries) => { projectNeedsIndex = { builtAt: Date.now(), entries }; })
+          .finally(() => { projectNeedsBuild = null; });
+      }
+      await projectNeedsBuild;
+    }
+
+    const needs: ProjectItemNeed[] = [];
+    for (const proj of projectNeedsIndex?.entries ?? []) {
+      const quantity = proj.materials.get(String(item.id)) ?? 0;
+      const intermediateQty = proj.intermediates.get(item.id) ?? 0;
+
+      // Keyword slots: item keywords may carry a value suffix ("MushroomParts=300")
+      // while recipe slots use the bare key, so match on the base name.
+      const keywordNeeds: ProjectItemNeed["keyword_needs"] = [];
+      const seenKeywords = new Set<string>();
+      for (const rawKeyword of item.keywords) {
+        const keyword = rawKeyword.split("=")[0];
+        if (seenKeywords.has(keyword)) continue;
+        seenKeywords.add(keyword);
+        const kwQty = proj.materials.get(`kw:${keyword}`);
+        if (kwQty && !getDynamicItemDisabledSet(keyword).has(item.id)) {
+          keywordNeeds.push({ keyword, quantity: kwQty });
+        }
+      }
+
+      if (quantity > 0 || intermediateQty > 0 || keywordNeeds.length > 0) {
+        needs.push({
+          project_id: proj.project_id,
+          project_name: proj.project_name,
+          group_name: proj.group_name,
+          quantity,
+          intermediate_quantity: intermediateQty,
+          keyword_needs: keywordNeeds,
+        });
+      }
+    }
+    return needs.sort((a, b) => a.project_name.localeCompare(b.project_name));
   }
 
   // ── Leveling Helper ──────────────────────────────────────────────────────
@@ -1471,6 +1620,9 @@ export const useCraftingStore = defineStore("crafting", () => {
     // Stock targets
     resolveStockTargets,
     queryItemStock,
+    // Project needs cross-reference
+    getProjectNeedsForItem,
+    invalidateProjectNeedsIndex,
     // Leveling helper
     estimateRecipeCost,
     getSkillLevel,
