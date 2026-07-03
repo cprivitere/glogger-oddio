@@ -120,6 +120,19 @@ export interface IntermediateCraft {
   quantity_produced: number
 }
 
+/** How much of one item a crafting project needs (Data Browser cross-reference) */
+export interface ProjectItemNeed {
+  project_id: number
+  project_name: string
+  group_name: string | null
+  /** Expected quantity needed as a raw material (post-buffer) */
+  quantity: number
+  /** Quantity needed as an expanded intermediate (crafted within the project) */
+  intermediate_quantity: number
+  /** Dynamic keyword slots this item can fill, with quantities */
+  keyword_needs: { keyword: string; quantity: number }[]
+}
+
 // ── Inventory integration types ──────────────────────────────────────────────
 
 export interface VaultStock {
