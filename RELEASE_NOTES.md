@@ -1,7 +1,7 @@
-## What's Changed since v0.11.21
+## What's Changed since v0.11.22
 
-### Features
-- feat(data-browser): project needs + friendly locations on item detail (`5ccc6c8`)
+### Fixes
+- fix(survey): index survey-attributed transactions and harden session capture (`92850dc`)
 
 ---
-*2 commits since v0.11.21*
+*2 commits since v0.11.22*
