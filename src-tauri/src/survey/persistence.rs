@@ -270,7 +270,7 @@ pub fn mark_transactions_as_speed_bonus(
                 COALESCE(source_details, '{}'),
                 '$.is_speed_bonus', json('true'))
           WHERE item_name = ?2
-            AND CAST(json_extract(source_details, '$.survey_use_id') AS INTEGER) = ?1",
+            AND survey_use_id = ?1",
         params![survey_use_id, item_name],
     )?;
     Ok(updated)
@@ -433,7 +433,7 @@ pub fn session_time_bounds(conn: &Connection, session_id: i64) -> Result<Session
                 UNION ALL
                 SELECT it.timestamp AS t
                 FROM item_transactions it
-                JOIN survey_uses u ON u.id = CAST(json_extract(it.source_details, '$.survey_use_id') AS INTEGER)
+                JOIN survey_uses u ON u.id = it.survey_use_id
                 WHERE u.session_id = ?1
              )",
             params![session_id],
@@ -450,7 +450,7 @@ pub fn session_time_bounds(conn: &Connection, session_id: i64) -> Result<Session
                 UNION ALL
                 SELECT it.timestamp AS t
                 FROM item_transactions it
-                JOIN survey_uses u ON u.id = CAST(json_extract(it.source_details, '$.survey_use_id') AS INTEGER)
+                JOIN survey_uses u ON u.id = it.survey_use_id
                 WHERE u.session_id = ?1
              )",
             params![session_id],
