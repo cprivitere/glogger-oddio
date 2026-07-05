@@ -1,7 +1,11 @@
-## What's Changed since v0.11.22
+## What's Changed since v0.11.23
+
+### Features
+- feat(farming): make the 2h session cap configurable in App Settings (`a8e3eac`)
+- feat(sessions): auto-roll survey + farming sessions past 2h (`bea3cda`)
 
 ### Fixes
-- fix(survey): index survey-attributed transactions and harden session capture (`92850dc`)
+- fix(build-planner): resolve ability names past monster-ability collisions (`91f4166`)
 
 ---
-*2 commits since v0.11.22*
+*5 commits since v0.11.23*
