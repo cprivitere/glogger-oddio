@@ -54,7 +54,15 @@ export const useFarmingStore = defineStore("farming", () => {
   function startAutosaveTicker() {
     stopAutosaveTicker();
     lastAutoSaveMs = Date.now();
-    autosaveTicker = setInterval(() => { void maybeAutoSave(); }, 60_000);
+    autosaveTicker = setInterval(() => {
+      void (async () => {
+        // Enforce the length cap first: a rollover ends+restarts the session
+        // (spinning up its own fresh ticker), so there's nothing left to
+        // auto-save on this tick afterward.
+        if (await maybeAutoRollover()) return;
+        await maybeAutoSave();
+      })();
+    }, 60_000);
   }
 
   function stopAutosaveTicker() {
@@ -70,6 +78,35 @@ export const useFarmingStore = defineStore("farming", () => {
     if (!minutes || minutes <= 0) return;
     if (Date.now() - lastAutoSaveMs < minutes * 60_000) return;
     await autoSaveSession();
+  }
+
+  // End-and-restart the active session once it has been logging for the
+  // configured cap (settings.farmingSessionCapMinutes), so no single session
+  // grows without bound. Independent of the autosave setting (this is a safety
+  // cap, not a convenience); reading the setting each tick means a changed
+  // value takes effect without restarting anything. Skips paused/already-ended
+  // sessions, and only rolls a session that has actually collected something —
+  // capping an empty session would just spawn a blank history row, and an empty
+  // session is no burden anyway. Returns true when a rollover happened.
+  async function maybeAutoRollover(): Promise<boolean> {
+    const s = session.value;
+    if (!sessionActive.value || !s) return false;
+    if (s.isPaused || s.endTime) return false;
+    const capMinutes = useSettingsStore().settings.farmingSessionCapMinutes;
+    if (!capMinutes || capMinutes <= 0) return false; // cap disabled / invalid
+    if (getActiveSeconds() < capMinutes * 60) return false;
+
+    // Nothing collected yet — leave it; it'll roll the moment real activity
+    // lands and pushes it over the cap again.
+    const input = await buildSessionInput(false);
+    if (isEmptyInput(input)) return false;
+
+    const name = s.name;
+    await endSession(); // persists the capped session (updates its row in place)
+    reset();
+    startSession(name); // fresh session, same name; timers + autosave restart
+    console.log("[farming] Session auto-rolled after", capMinutes, "min of activity");
+    return true;
   }
 
   // Persist the current session snapshot, updating the existing row when one

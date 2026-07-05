@@ -204,10 +204,21 @@ pub struct AppSettings {
     /// Toggling it off ends and saves any active session. Off by default (opt-in).
     #[serde(default)]
     pub auto_start_farming_sessions: bool,
+
+    /// Maximum active (unpaused) duration, in minutes, a single farming session
+    /// may run before it's auto-ended (and saved) and rolled over to a fresh
+    /// one — bounding how large any one session can grow so a long-running
+    /// session can't slow down or crash the app. Default 120 (2 hours).
+    #[serde(default = "default_farming_session_cap_minutes")]
+    pub farming_session_cap_minutes: u32,
 }
 
 fn default_farming_autosave_minutes() -> u32 {
     5
+}
+
+fn default_farming_session_cap_minutes() -> u32 {
+    120
 }
 
 fn default_dashboard_widget_opacity() -> u32 {
@@ -374,6 +385,7 @@ impl Default for AppSettings {
             auto_ingest_player_prev: true,
             farming_autosave_minutes: default_farming_autosave_minutes(),
             auto_start_farming_sessions: false,
+            farming_session_cap_minutes: default_farming_session_cap_minutes(),
         }
     }
 }

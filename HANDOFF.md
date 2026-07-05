@@ -1,5 +1,61 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-05 (Session 28 — Cap runaway survey & farming sessions at 2h)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `bea3cda` (auto-roll) + `a8e3eac` (configurable farming cap) on top of `91f4166`.
+**Status:** ✅ `cargo test --lib survey::aggregator::tests` **22 pass** (incl. 2 new rollover tests);
+`cargo check` + `vue-tsc --noEmit` clean. Verified live in `tauri dev`: the new App Settings
+dropdown renders under **Settings → App Settings → Farming**, defaulting to 2 hours.
+
+## TL;DR — Session 28 (session length cap)
+
+**User request:** users were "accidentally forming dozens of hour-long sessions, causing them to
+crash the program." Fix: cap any single survey **or** farming session at 2h, then roll it over to a
+fresh one so no one session grows into an enormous record the UI can't handle. Follow-up: make the
+farming duration user-configurable.
+
+### Surveys — backend, log-time driven ([survey/aggregator.rs](src-tauri/src/survey/aggregator.rs))
+- `SESSION_MAX_DURATION_SECS = 2*60*60`. New **`maybe_roll_over_session`** runs at the **top** of
+  `process_event` (before the event is handled): if the active session's span — `started_at` → the
+  current event, both log-derived UTC — has reached the cap, it `end_session` +
+  `recompute_session_bounds_and_end` and emits **`SessionEnded { reason: "rollover" }`**.
+- The **replacement session auto-starts on the next survey craft/use** via the normal path, so the
+  triggering event lands in the fresh session and **no empty sessions** are ever created.
+- **Gated on `auto_start_enabled`** — the automatic regime is exactly the "sessions forming
+  accidentally" case; a manually-managed session is the user's to end, so it's left untouched.
+- Pending loot windows are intentionally **not** severed — loot that arrives after the roll keeps
+  attributing to its (now-closed) use as before.
+- `event_iso` is hoisted to the top of `process_event` and reused by the crafting auto-end sweep.
+- Tests: `test_session_rolls_over_after_max_duration`, `test_no_rollover_when_auto_start_disabled`.
+- **Survey cap is a fixed constant** (deliberately not tied to the new farming setting).
+
+### Farming — frontend, store-driven ([stores/farmingStore.ts](src/stores/farmingStore.ts))
+- **`maybeAutoRollover`** rides the existing 60s autosave ticker (so the cap is enforced ~within a
+  minute of the mark, no new timer). Past the cap (`getActiveSeconds()`), it `endSession()` (saves
+  the capped row in place) → `reset()` → `startSession(name)` — a fresh session with the **same
+  name**; timers + autosave restart.
+- Guards: skips paused / already-ended sessions, and **only rolls a non-empty session** (an empty
+  one is no burden and shouldn't spawn a blank history row — it'll roll the moment real activity
+  pushes it back over the cap). Applies to **manual** sessions too, and is **independent of the
+  autosave setting** (this is a safety cap, not a convenience).
+
+### Configurable farming cap (`a8e3eac`)
+- New setting **`farming_session_cap_minutes`** (default **120**), full plumbing:
+  [settings.rs](src-tauri/src/settings.rs) (serde default so old settings files load) →
+  [settingsStore.ts](src/stores/settingsStore.ts) (camelCase + backend interfaces, to/fromBackend,
+  defaults) → read in `maybeAutoRollover` **each tick** so a change takes effect with no restart.
+  **`0`/invalid ⇒ cap disabled** (defensive — prevents a bad value causing runaway rollovers).
+- UI: **"Auto-reset session after"** `<select>` in the Farming section of
+  [AppSettingsTab.vue](src/components/Settings/AppSettingsTab.vue) — 1 / 2 / 3 / 4 / 6 / 8 hours,
+  mirroring the "Auto-save active session" control right above it.
+
+### Notes / possible follow-ups
+- The survey cap could be wired to this same setting (or its own) if desired — currently fixed 2h.
+- `src-tauri/Cargo.toml` shows a phantom LF→CRLF-only modification in `git status` (0 insertions/
+  deletions); left uncommitted on purpose.
+
+---
+
 **Date:** 2026-07-02 (Session 27 — Surveying tab: only track items actually collected from surveys)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `9a8d59c` (windows) + `ea33aa6` (identity fallback) on top of `610b63c`.

@@ -153,6 +153,30 @@
           a session is only saved when you end it manually.
         </p>
       </div>
+
+      <div class="mb-2">
+        <label for="farming-session-cap" class="block text-text-secondary mb-2 text-sm">
+          Auto-reset session after
+        </label>
+        <select
+          id="farming-session-cap"
+          v-model.number="farmingSessionCapMinutes"
+          @change="handleFarmingSessionCapChange"
+          class="input">
+          <option :value="60">1 hour</option>
+          <option :value="120">2 hours</option>
+          <option :value="180">3 hours</option>
+          <option :value="240">4 hours</option>
+          <option :value="360">6 hours</option>
+          <option :value="480">8 hours</option>
+        </select>
+        <p class="mt-2 text-text-muted text-xs leading-relaxed">
+          Caps how long a single farming session runs before it's automatically saved
+          and a fresh one starts in its place (inheriting the same name). Keeps a
+          session left running for a long time from growing so large it slows down or
+          crashes the app. Only sessions with logged activity are rolled over.
+        </p>
+      </div>
     </div>
   </div>
 </template>
@@ -182,6 +206,7 @@ const uiFontSize = ref(settingsStore.settings.uiFontSize);
 const dashboardWidgetOpacity = ref(settingsStore.settings.dashboardWidgetOpacity);
 const uiScale = ref(settingsStore.settings.uiScale);
 const farmingAutosaveMinutes = ref(settingsStore.settings.farmingAutosaveMinutes);
+const farmingSessionCapMinutes = ref(settingsStore.settings.farmingSessionCapMinutes);
 
 watch(
   () => settingsStore.settings.uiFontFamily,
@@ -208,6 +233,11 @@ watch(
   (val) => { farmingAutosaveMinutes.value = val; }
 );
 
+watch(
+  () => settingsStore.settings.farmingSessionCapMinutes,
+  (val) => { farmingSessionCapMinutes.value = val; }
+);
+
 function handleFontChange() {
   settingsStore.updateSettings({ uiFontFamily: uiFontFamily.value });
 }
@@ -232,6 +262,10 @@ function resetWidgetOpacity() {
 
 function handleFarmingAutosaveChange() {
   settingsStore.updateSettings({ farmingAutosaveMinutes: farmingAutosaveMinutes.value });
+}
+
+function handleFarmingSessionCapChange() {
+  settingsStore.updateSettings({ farmingSessionCapMinutes: farmingSessionCapMinutes.value });
 }
 
 // Live-apply the zoom as the slider drags (visual only), then persist on release

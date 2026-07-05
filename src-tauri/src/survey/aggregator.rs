@@ -37,6 +37,14 @@ const SURVEY_TO_MINING_GRACE_SECS: u32 = 60;
 /// See docs/architecture/survey-mechanics.md for why this is 30 minutes.
 const MULTIHIT_TIMEOUT_SECS: u32 = 30 * 60;
 
+/// Maximum span (in log-derived seconds, from `started_at` to the current
+/// event) a single survey session may cover before it's rolled over to a
+/// fresh one. Bounds the size of any one session so a marathon — or
+/// left-running-and-forgotten — play session can't accumulate into one
+/// enormous row that overwhelms (or crashes) the UI. The replacement session
+/// auto-starts on the next survey craft/use via the normal path.
+const SESSION_MAX_DURATION_SECS: i64 = 2 * 60 * 60;
+
 /// Chat-loot gate, Basic surveys: a `[Status]` gain counts as survey loot
 /// only within this many seconds of a Basic survey use's `used_at` (the loot
 /// lands in the same game tick as the map's DeleteItem; the slack covers
@@ -500,6 +508,23 @@ impl SurveySessionAggregator {
             self.expire_pending_uses(now_secs);
         }
 
+        // UTC timestamp of this event (log-derived, not wall clock). Computed
+        // once here and reused by the crafting auto-end sweep below.
+        let event_iso = event_hms_timestamp(event).map(|hms| self.to_utc(hms));
+
+        // Session length cap: if the active session has run past the max
+        // duration, roll it over now — *before* the event is handled, so a
+        // triggering survey use lands in the fresh session rather than the one
+        // being closed. Only in the auto-start regime; a manually-managed
+        // session is the user's to end. See [`SESSION_MAX_DURATION_SECS`].
+        if self.auto_start_enabled {
+            if let Some(ref iso) = event_iso {
+                if let Some(ev) = self.maybe_roll_over_session(conn, character, server, iso) {
+                    emitted.push(ev);
+                }
+            }
+        }
+
         match event {
             // Survey map crafted (item entered inventory, kind is a survey).
             // Detected on ItemAdded with is_new=true.
@@ -605,7 +630,6 @@ impl SurveySessionAggregator {
         // small and indexed.
         if let Some(now_secs) = event_secs_of_day(event) {
             self.run_multihit_sweep(conn, character, server, now_secs, &mut emitted);
-            let event_iso = event_hms_timestamp(event).map(|hms| self.to_utc(hms));
             self.maybe_auto_end_crafting_session(conn, character, server, event_iso.as_deref(), &mut emitted);
         }
 
@@ -1358,6 +1382,48 @@ impl SurveySessionAggregator {
         });
     }
 
+    /// Hard cap on session length. If the active session's span — from its
+    /// `started_at` to `event_iso`, both log-derived UTC — has reached
+    /// [`SESSION_MAX_DURATION_SECS`], end it. A fresh session auto-starts on
+    /// the next survey craft/use via the normal path, so the triggering event
+    /// (handled right after this returns) lands in the new session.
+    ///
+    /// Pending uses are intentionally left untouched: ending the session
+    /// doesn't sever a use from its still-open loot window, so any loot that
+    /// arrives afterward keeps attributing to the (now-closed) use as before.
+    ///
+    /// Returns a `SessionEnded { reason: "rollover" }` event when it fires so
+    /// the frontend can refresh; `None` otherwise (no active session, span
+    /// under the cap, or an unparseable timestamp — all safe no-ops).
+    fn maybe_roll_over_session(
+        &mut self,
+        conn: &Connection,
+        character: &str,
+        server: &str,
+        event_iso: &str,
+    ) -> Option<SurveyAggregatorEvent> {
+        let s = self.fetch_active_session_full(conn, character, server)?;
+        let start = parse_utc_datetime(&s.started_at)?;
+        let now = parse_utc_datetime(event_iso)?;
+        if (now - start).num_seconds() < SESSION_MAX_DURATION_SECS {
+            return None;
+        }
+        if let Err(e) = persistence::end_session(conn, s.id, event_iso) {
+            eprintln!("[survey-aggregator] rollover end_session failed: {e}");
+            return None;
+        }
+        // Correct started_at/ended_at from the session's own event timestamps
+        // so its header reflects the real activity span, not the cap moment.
+        if let Err(e) = persistence::recompute_session_bounds_and_end(conn, s.id, event_iso) {
+            eprintln!("[survey-aggregator] rollover recompute_session_bounds_and_end failed: {e}");
+        }
+        self.cached_active_session_id = Some(None);
+        Some(SurveyAggregatorEvent::SessionEnded {
+            session_id: s.id,
+            reason: "rollover",
+        })
+    }
+
     // ============================================================
     // Helpers
     // ============================================================
@@ -1832,6 +1898,105 @@ mod tests {
         // use auto-starts a fresh one instead of reusing the missing id.
         agg.invalidate_session_cache();
         assert_eq!(agg.fetch_active_session(&conn, "Zenith", "Dreva"), None);
+    }
+
+    #[test]
+    fn test_session_rolls_over_after_max_duration() {
+        // A session that runs past SESSION_MAX_DURATION_SECS is auto-ended and
+        // the next survey use starts a fresh session, bounding session size.
+        let conn = fresh_db();
+        let mut agg = SurveySessionAggregator::new(game_data_with_survey_maps());
+        agg.set_base_date(test_base_date());
+
+        // First Basic use at 12:00:00 auto-starts session 1.
+        let mut use1 = PlayerEvent::ItemDeleted {
+            timestamp: "12:00:00".to_string(),
+            instance_id: 1,
+            item_name: Some("GeologySurveySerbule1".to_string()),
+            context: crate::player_event_parser::DeleteContext::Consumed,
+        };
+        agg.process_event(&mut use1, &conn, "Zenith", "Dreva", Some("Serbule"));
+        let id1 = persistence::active_session(&conn, "Zenith", "Dreva")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        // A use 1h later is under the cap — same session.
+        let mut use_mid = PlayerEvent::ItemDeleted {
+            timestamp: "13:00:00".to_string(),
+            instance_id: 2,
+            item_name: Some("GeologySurveySerbule1".to_string()),
+            context: crate::player_event_parser::DeleteContext::Consumed,
+        };
+        agg.process_event(&mut use_mid, &conn, "Zenith", "Dreva", Some("Serbule"));
+        assert_eq!(
+            persistence::active_session(&conn, "Zenith", "Dreva")
+                .unwrap()
+                .unwrap()
+                .id,
+            id1,
+            "a use within the cap stays in the same session"
+        );
+
+        // A use just past 2h from the start rolls the session over.
+        let mut use_late = PlayerEvent::ItemDeleted {
+            timestamp: "14:00:01".to_string(),
+            instance_id: 3,
+            item_name: Some("GeologySurveySerbule1".to_string()),
+            context: crate::player_event_parser::DeleteContext::Consumed,
+        };
+        let emitted =
+            agg.process_event(&mut use_late, &conn, "Zenith", "Dreva", Some("Serbule"));
+
+        // Session 1 is now ended…
+        let s1 = persistence::get_session(&conn, id1).unwrap().unwrap();
+        assert!(s1.ended_at.is_some(), "over-long session must be ended");
+        // …a rollover end event was emitted…
+        assert!(
+            emitted.iter().any(|e| matches!(
+                e,
+                SurveyAggregatorEvent::SessionEnded {
+                    reason: "rollover",
+                    ..
+                }
+            )),
+            "expected a rollover SessionEnded event: {emitted:?}"
+        );
+        // …and a fresh session now owns the late use.
+        let active = persistence::active_session(&conn, "Zenith", "Dreva")
+            .unwrap()
+            .expect("a new session should be active after rollover");
+        assert!(active.id > id1, "rollover should start a new session");
+        assert_eq!(
+            active.consumed_count, 1,
+            "the late use belongs to the new session, not the closed one"
+        );
+    }
+
+    #[test]
+    fn test_no_rollover_when_auto_start_disabled() {
+        // Manual regime (auto_start off): the length cap does not touch a
+        // user-managed session, even well past the max duration.
+        let conn = fresh_db();
+        let mut agg = SurveySessionAggregator::new(game_data_with_survey_maps());
+        agg.auto_start_enabled = false;
+        agg.set_base_date(test_base_date());
+
+        let id = agg
+            .start_manual_session(&conn, "Zenith", "Dreva", "2026-04-15 12:00:00")
+            .unwrap();
+
+        // An event 3h later must not auto-end the manual session.
+        let mut later = PlayerEvent::ItemDeleted {
+            timestamp: "15:00:00".to_string(),
+            instance_id: 1,
+            item_name: Some("UnknownItem".to_string()),
+            context: crate::player_event_parser::DeleteContext::Consumed,
+        };
+        agg.process_event(&mut later, &conn, "Zenith", "Dreva", None);
+
+        let s = persistence::get_session(&conn, id).unwrap().unwrap();
+        assert!(s.ended_at.is_none(), "manual session must survive the cap");
     }
 
     #[test]
