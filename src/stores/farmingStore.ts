@@ -13,6 +13,13 @@ import { useGameDataStore } from "./gameDataStore";
 import { useSettingsStore } from "./settingsStore";
 import { formatTimeFull, formatDuration } from "../composables/useTimestamp";
 
+// Hard cap on a single farming session's active (unpaused) duration. Once a
+// session has been logging this long it's auto-ended (and saved) and a fresh
+// one takes its place, so a session left running for many hours can't grow
+// into one giant record that bogs down — or crashes — the app. The
+// replacement inherits the same name.
+const SESSION_MAX_ACTIVE_SECONDS = 2 * 60 * 60;
+
 export const useFarmingStore = defineStore("farming", () => {
   const sessionActive = ref(false);
   const session = ref<FarmingSession | null>(null);
@@ -54,7 +61,15 @@ export const useFarmingStore = defineStore("farming", () => {
   function startAutosaveTicker() {
     stopAutosaveTicker();
     lastAutoSaveMs = Date.now();
-    autosaveTicker = setInterval(() => { void maybeAutoSave(); }, 60_000);
+    autosaveTicker = setInterval(() => {
+      void (async () => {
+        // Enforce the length cap first: a rollover ends+restarts the session
+        // (spinning up its own fresh ticker), so there's nothing left to
+        // auto-save on this tick afterward.
+        if (await maybeAutoRollover()) return;
+        await maybeAutoSave();
+      })();
+    }, 60_000);
   }
 
   function stopAutosaveTicker() {
@@ -70,6 +85,32 @@ export const useFarmingStore = defineStore("farming", () => {
     if (!minutes || minutes <= 0) return;
     if (Date.now() - lastAutoSaveMs < minutes * 60_000) return;
     await autoSaveSession();
+  }
+
+  // End-and-restart the active session once it has been logging for
+  // SESSION_MAX_ACTIVE_SECONDS, so no single session grows without bound.
+  // Independent of the autosave setting (this is a safety cap, not a
+  // convenience). Skips paused/already-ended sessions, and only rolls a
+  // session that has actually collected something — capping an empty session
+  // would just spawn a blank history row, and an empty session is no burden
+  // anyway. Returns true when a rollover happened. See SESSION_MAX_ACTIVE_SECONDS.
+  async function maybeAutoRollover(): Promise<boolean> {
+    const s = session.value;
+    if (!sessionActive.value || !s) return false;
+    if (s.isPaused || s.endTime) return false;
+    if (getActiveSeconds() < SESSION_MAX_ACTIVE_SECONDS) return false;
+
+    // Nothing collected yet — leave it; it'll roll the moment real activity
+    // lands and pushes it over the cap again.
+    const input = await buildSessionInput(false);
+    if (isEmptyInput(input)) return false;
+
+    const name = s.name;
+    await endSession(); // persists the capped session (updates its row in place)
+    reset();
+    startSession(name); // fresh session, same name; timers + autosave restart
+    console.log("[farming] Session auto-rolled after", SESSION_MAX_ACTIVE_SECONDS, "s of activity");
+    return true;
   }
 
   // Persist the current session snapshot, updating the existing row when one
