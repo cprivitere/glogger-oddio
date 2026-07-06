@@ -1,11 +1,7 @@
-## What's Changed since v0.11.23
+## What's Changed since v0.11.24
 
 ### Features
-- feat(farming): make the 2h session cap configurable in App Settings (`a8e3eac`)
-- feat(sessions): auto-roll survey + farming sessions past 2h (`bea3cda`)
-
-### Fixes
-- fix(build-planner): resolve ability names past monster-ability collisions (`91f4166`)
+- feat(crafting): add Recipe Book tab — unlocked vs missing recipes per skill (`8e82a6d`)
 
 ---
-*5 commits since v0.11.23*
+*2 commits since v0.11.24*
