@@ -1,7 +1,7 @@
-## What's Changed since v0.11.24
+## What's Changed since v0.11.25
 
-### Features
-- feat(crafting): add Recipe Book tab — unlocked vs missing recipes per skill (`8e82a6d`)
+### Fixes
+- fix(farming): stop session history fragmenting for 12-hour-clock users (`c5a055d`)
 
 ---
-*2 commits since v0.11.24*
+*2 commits since v0.11.25*
