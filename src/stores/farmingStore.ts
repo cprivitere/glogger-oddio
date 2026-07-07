@@ -94,7 +94,10 @@ export const useFarmingStore = defineStore("farming", () => {
     if (s.isPaused || s.endTime) return false;
     const capMinutes = useSettingsStore().settings.farmingSessionCapMinutes;
     if (!capMinutes || capMinutes <= 0) return false; // cap disabled / invalid
-    if (getActiveSeconds() < capMinutes * 60) return false;
+    // Never roll on a non-finite elapsed value — a NaN would make `< cap` false
+    // and fire the rollover every active tick (the 12-hour-clock bug above).
+    const activeSeconds = getActiveSeconds();
+    if (!Number.isFinite(activeSeconds) || activeSeconds < capMinutes * 60) return false;
 
     // Nothing collected yet — leave it; it'll roll the moment real activity
     // lands and pushes it over the cap again.
@@ -842,9 +845,23 @@ function recordGathered(
   s.gathered[sourceName][itemName] = tally;
 }
 
+// Parse a session timestamp (as produced by getCurrentTimestamp) into
+// seconds-of-day. getCurrentTimestamp goes through formatTimeFull, which honors
+// the user's 12/24-hour display setting — so this MUST accept both "14:30:05"
+// (24h) and "2:30:05 PM" (12h). Naively splitting a 12h string on ":" yields
+// Number("05 PM") === NaN, which made getActiveSeconds() return NaN for every
+// 12-hour-clock user: the live timer showed "—", pause math broke, and the
+// session-cap rollover (whose `< cap` comparison is false for NaN) fired on the
+// next active tick, fragmenting history into odd 1-minute-to-cap sessions.
+// Returns NaN only for genuinely unparseable input.
 function tsToSeconds(ts: string): number {
-  const [h, m, s] = ts.split(":").map(Number);
-  return h * 3600 + m * 60 + s;
+  const m = ts.trim().match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
+  if (!m) return NaN;
+  let h = Number(m[1]);
+  const period = m[4]?.toUpperCase();
+  if (period === "PM" && h !== 12) h += 12;
+  else if (period === "AM" && h === 12) h = 0;
+  return h * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
 
 function getCurrentTimestamp(): string {
