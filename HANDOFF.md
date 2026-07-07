@@ -1,5 +1,45 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-06 (Session 29 — Fix farming history fragmenting for 12-hour-clock users)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `c5a055d` on top of `8e82a6d`. PR [#70](https://github.com/crisp-oddio/glogger-oddio/pull/70) (`dev → main`). (Session 28's PR #66 already merged.)
+**Status:** ✅ `vue-tsc --noEmit` clean; `tsToSeconds` validated against 24h/12h/midnight-edges/bad-input/elapsed-diff. No Rust changes.
+
+## TL;DR — Session 29 (12-hour-clock fragmentation bug)
+
+**User report:** farming **session history** was saving in "odd increments from 1 minute to 2 hours,
+nothing consistent" — happening **during a single continuous run** (no crash, no app close), and
+**even with an 8-hour cap** set. (Not survey — the user confirmed farming.)
+
+**Root cause:** the farming store's internal timestamps come from `getCurrentTimestamp()` →
+`formatTimeFull`, which **honors the user's 12/24-hour display setting**. For 12-hour users those
+render as `"2:30:00 PM"`, but [`tsToSeconds`](src/stores/farmingStore.ts) split on `":"` and did
+`Number("00 PM")` → **`NaN`**. So `getActiveSeconds()` was `NaN` for every 12-hour-clock user (also
+silently breaking the live timer — it showed `—` — and pause math). Session 28's cap rollover guard
+`getActiveSeconds() < capMinutes*60` is **`false` when the left side is `NaN`**, so the cap check
+**failed open** and rolled the session over on the next active tick — fragmenting history at
+irregular points, independent of the cap value. A latent bug that the rollover surfaced.
+
+**Fix ([farmingStore.ts](src/stores/farmingStore.ts), commit `c5a055d`):**
+- `tsToSeconds` now parses **both** `"14:30:05"` (24h) and `"2:30:05 PM"` (12h) via regex + AM/PM
+  handling (incl. `12:00 AM`→0, `12:00 PM`→43200) — restoring correct elapsed/timer/pause for all
+  users, so the rollover fires only at the real cap.
+- Rollover guard is now **`NaN`-safe**: `if (!Number.isFinite(activeSeconds) || activeSeconds < capMinutes*60) return false;`.
+- Display unchanged (the card passes bare `HH:MM:SS` through `formatAnyTimestamp`). Survey rollover
+  unaffected — it uses 24h log timestamps in Rust.
+
+**Investigation dead-ends worth remembering** (ruled out before finding the real cause): app
+restart/crash/close (user said none); character-login/zone restarts (no farming restart wired);
+autosave duplicate rows (upsert via `currentSessionId` → one row per session); the cap value itself
+(fragments below 8h ⇒ cap-independent). The "cap-independent" clue is what pointed at a `NaN`
+comparison rather than a timing threshold.
+
+**Possible follow-up:** the deeper smell is that internal duration math consumes a *display-formatted*
+string at all. A cleaner refactor would have `getCurrentTimestamp()` emit machine-format 24h and
+apply 12/24h only at render — not done here to keep the fix minimal/low-risk.
+
+---
+
 **Date:** 2026-07-05 (Session 28 — Cap runaway survey & farming sessions at 2h)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `bea3cda` (auto-roll) + `a8e3eac` (configurable farming cap) on top of `91f4166`.
