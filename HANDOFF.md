@@ -1,5 +1,73 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-07 (Session 30 — Quest tabs, uncompleted work-order backlog + board tracking, crafting delete fix)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `6e99705`, pushed to `origin/dev` (on top of `31c23be`).
+**Status:** ✅ `vue-tsc --noEmit` clean; `cargo check --lib` + `cargo test --lib character` clean. Verified
+live in `npm run tauri dev` (oddio@Arisetsu): the new `completed` category populated **323 rows** in the DB
+on re-import (matches the export). `src-tauri/Cargo.toml` LF↔CRLF noise left uncommitted as usual.
+
+## TL;DR — Session 30
+
+Three things, all around the Character → Quests screen and the crafting-project system.
+
+### 1. Completed quests + tabbed Quest screen
+The VIP character export (`Reports/Character_*.json`) gained a new top-level **`CompletedQuests`** array
+(flat quest internal-names, same shape as `ActiveQuests`). It's **optional** — only newer game clients write
+it, so characters not re-exported since the update omit it (parsed with `#[serde(default)]`).
+- **Backend** ([character_commands.rs](src-tauri/src/db/character_commands.rs)): `CharacterReport.completed_quests`
+  + insert loop storing each with **`category='completed'`**. **No migration** — `character_active_quests.category`
+  already existed and `get_snapshot_active_quests` returns every category. Comment updated in
+  [migrations.rs](src-tauri/src/db/migrations.rs).
+- **Frontend** ([QuestsScreen.vue](src/components/Character/QuestsScreen.vue)): reworked into **5 tabs** —
+  Active / Work Orders / **Uncompleted WOs** / Uncompleted / Completed. Quest details now resolve from the
+  cached full quest list (`gameData.allQuestsCache`, newly exposed with `loadAllQuests` from
+  [gameDataStore.ts](src/stores/gameDataStore.ts)) instead of ~150 per-quest `resolve_quest` invokes.
+  - **Uncompleted** = every CDN quest that isn't a work order, isn't active, and isn't permanently completed;
+    **repeatable** completed quests re-surface (doable again). ~1,264 rows for oddio.
+  - [QuestListPanel.vue](src/components/Character/QuestListPanel.vue) defaults to **By Area (zone)** grouping;
+    catch-all groups ("Unknown Area"…) sort last; new `completed`/`available`/`repeatable` badges.
+    `SnapshotActiveQuest.category` widened in [database.ts](src/types/database.ts).
+
+### 2. Uncompleted work-order backlog tab (+ board tracking + batch project)
+New tab **"Uncompleted WOs"** ([WorkOrdersTodoPanel.vue](src/components/Character/WorkOrdersTodoPanel.vue)):
+every CDN work order (`WorkOrderSkill` set, excluding `"Unknown"` = Fitz gathering turn-ins) for a crafting
+skill the player HAS (`gameState.skillsByName[skill].level ≥ 1`), minus `CompletedWorkOrders`. ~1,097 rows for
+oddio (only 3 CompletedWorkOrders in the export — the completed set is small, so it's really "all WOs for my
+skills"). Work-order `Requirements` are all `Industry MinSkillLevel 0` — **no real per-quest level gate
+exists** — so eligibility is just "a craftable recipe exists."
+- **Selection + batch project**: per-row checkboxes + select-all; **Create Project** builds a crafting project
+  from the **selected** set via new **`createProjectFromWorkOrders`** ([craftingStore.ts](src/stores/craftingStore.ts))
+  — resolves item→recipe **lazily** (only at click, 40-wide concurrency batches, since the backlog is ~1,000
+  rows), merges by recipe, skips non-craftable (gathering WOs have no recipe), reports added/skipped. New
+  `WorkOrderTodo` type in [types/crafting.ts](src/types/crafting.ts).
+- **Board tracking**: every WO has a **fixed turn-in board (1 of 9)** — Fitz the Boatman/Serbule, Sheyna/Rahu,
+  Irkima/Red Wing Casino, Ogamboe/Fae Realm, Thimble Pete/Eltibule, Viedesi/Sun Vale, Gremix/Amulna,
+  Laura Neth/Kur Mountains, Korbok/Vidaria. **Not a structured field** — NPC from the Scripted "Deliver to X"
+  objective, location parsed from the flavor `Description` via `parseWorkOrderBoard` in QuestsScreen
+  (`/\bto (.+?) (?:in|on|at) (.+?)\.(?:\s|$)/`, verified 100% of all 1,299 WOs). Shown inline per row + a board
+  `<select>` filter.
+- **Perf**: rows use rich `ItemInline` (2 IPC each on mount) only when the filtered list ≤250, else plain text
+  — keeps the ~1,000-row backlog snappy.
+
+### 3. fix(crafting): craftingStore HMR staleness broke the Delete Project button
+User reported "delete crafting project button isn't working now." Root cause was **not a code bug** —
+`craftingStore` lacked `acceptHMRUpdate`, so this session's repeated store edits left the running singleton
+stale in `tauri dev`; the disconnected `activeProject` made `deleteProject`'s `if (!store.activeProject) return`
+bail silently. Fix: added the `acceptHMRUpdate` block ([craftingStore.ts](src/stores/craftingStore.ts)),
+mirroring `buildPlannerStore`. Needs one full app reload (Ctrl+R) to shed the already-stale instance. (Delete
+itself is fine — button emits `@delete` → confirm → `delete_crafting_project`, which cascades entries via the
+`ON DELETE CASCADE` FK with `foreign_keys=ON`.)
+
+### Notes / next
+- Not click-driven through the native window by me (Tauri can't mount in the browser-only preview); verified
+  via type/compile checks, a DB read confirming the 323 completed rows imported, and HMR applying cleanly.
+  A live click-test of the tabs + Create Project + Delete is the remaining manual step.
+- Gathering-skill work orders (Fishing/Mining/Surveying/…) appear in the backlog but have no recipe, so
+  they're skipped at project creation (reported) — intentional.
+
+---
+
 **Date:** 2026-07-06 (Session 29 — Fix farming history fragmenting for 12-hour-clock users)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `c5a055d` on top of `8e82a6d`. PR [#70](https://github.com/crisp-oddio/glogger-oddio/pull/70) (`dev → main`). (Session 28's PR #66 already merged.)
