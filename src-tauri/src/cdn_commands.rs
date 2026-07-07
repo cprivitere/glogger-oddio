@@ -2326,6 +2326,27 @@ fn parse_attacks_deal(body: &str) -> Option<(String, f64, bool)> {
     Some((caps[1].to_string(), value, pct))
 }
 
+/// Parse a skill-wide "<Skill> Base Damage +N[%]" prose mod — the primary per-skill damage boost
+/// some mods grant as prose rather than a `{MOD_<SKILL>}` token (e.g. the Necromancer's mod's
+/// "Necromancy Base Damage +60%; Summoned Skeletons deal +12% direct damage"). Returns
+/// `(skill_word, value, is_percent)`; the caller gates the skill against the target ability.
+/// Conditional/temporal variants never match: they don't *begin* with the "<Skill> Base Damage"
+/// clause — they're prefixed by their trigger ("Shadow Feint raises your Lycanthropy Base Damage
+/// +79% until …", "Combo: … boosts Giant Bat Base Damage +60% for 10 seconds") — and a trailing
+/// conditional rider is rejected outright.
+fn parse_base_damage(body: &str) -> Option<(String, f64, bool)> {
+    static RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"^([A-Za-z]+) Base Damage \+(\d+)(%)?").unwrap());
+    let caps = RE.captures(body)?;
+    let value: f64 = caps[2].parse().ok()?;
+    let pct = caps.get(3).is_some();
+    if conditional_tail(&body[caps.get(0).unwrap().end()..]) {
+        return None;
+    }
+    let value = if pct { value / 100.0 } else { value };
+    Some((caps[1].to_string(), value, pct))
+}
+
 /// Pick the token to feed a prose-granted damage bonus through: prefer the ability-specific
 /// token (`*_ABILITY_*`) so the breakdown label reads naturally, falling back to the bucket's
 /// first entry. Any token from the bucket is arithmetically equivalent — the effects list is
@@ -2668,18 +2689,30 @@ fn resolve_direct_add(
 
     let body = ICON.replace(desc.trim(), "").to_string();
 
-    // Skill/keyword-wide form first ("Kick attacks deal …" would otherwise be consumed as the
-    // ability name "Kick" by the named path).
-    if let Some((subject, value, pct)) = parse_attacks_deal(&body) {
-        let subj = subject.to_lowercase();
-        let applies = ability.skill.as_deref().is_some_and(|s| s.to_lowercase() == subj)
-            || ability.keywords.iter().any(|k| k.to_lowercase() == subj);
-        if applies {
-            let bucket = if pct { &stats.attributes_that_mod_damage } else { &stats.attributes_that_delta_damage };
-            if let Some(token) = pick_bucket_token(bucket) {
-                push(&token.clone(), value, effects);
+    // Skill/keyword-wide boosts, gated on the target ability's skill or keyword. Two prose shapes:
+    //   "<Skill> attacks deal +N[%] damage"  (Kick/Hammer/Unarmed…)
+    //   "<Skill> Base Damage +N[%]"          (Necromancy — the per-skill boost some mods grant as
+    //                                          prose instead of a {MOD_<SKILL>} token)
+    // Checked before the named-ability path so a leading skill word ("Kick", "Necromancy") isn't
+    // mis-consumed as an ability name.
+    let apply_skill_wide =
+        |subject: String, value: f64, pct: bool, effects: &mut Vec<crate::game_data::ability_stats::ModEffect>| {
+            let subj = subject.to_lowercase();
+            let applies = ability.skill.as_deref().is_some_and(|s| s.to_lowercase() == subj)
+                || ability.keywords.iter().any(|k| k.to_lowercase() == subj);
+            if applies {
+                let bucket = if pct { &stats.attributes_that_mod_damage } else { &stats.attributes_that_delta_damage };
+                if let Some(token) = pick_bucket_token(bucket) {
+                    push(&token.clone(), value, effects);
+                }
             }
-        }
+        };
+    if let Some((subject, value, pct)) = parse_attacks_deal(&body) {
+        apply_skill_wide(subject, value, pct, effects);
+        return;
+    }
+    if let Some((subject, value, pct)) = parse_base_damage(&body) {
+        apply_skill_wide(subject, value, pct, effects);
         return;
     }
 
@@ -4928,10 +4961,10 @@ pub async fn get_gardening_product_chain(
 #[cfg(test)]
 mod build_stats_parsing_tests {
     use super::{
-        category_attack_tokens, parse_attacks_deal, parse_conditional_direct_text,
-        parse_conditional_indirect_text, parse_dot_apply, parse_dot_clause,
-        parse_named_damage_rest, parse_named_type_conversion, parse_names_deal_direct,
-        parse_skill_type_conversion, parse_token_value, sniff_damage_type,
+        category_attack_tokens, parse_attacks_deal, parse_base_damage,
+        parse_conditional_direct_text, parse_conditional_indirect_text, parse_dot_apply,
+        parse_dot_clause, parse_named_damage_rest, parse_named_type_conversion,
+        parse_names_deal_direct, parse_skill_type_conversion, parse_token_value, sniff_damage_type,
     };
 
     #[test]
@@ -5071,6 +5104,30 @@ mod build_stats_parsing_tests {
         assert_eq!(
             parse_attacks_deal("Your Unarmed attacks deal +7 damage and have +5 Accuracy"),
             Some(("Unarmed".to_string(), 7.0, false))
+        );
+    }
+
+    #[test]
+    fn parse_base_damage_skill_wide_and_rejects_conditional() {
+        // Necromancer's mod: percent boost; the benign "; Summoned Skeletons …" pet-damage tail
+        // is ignored (that clause is intentionally excluded).
+        assert_eq!(
+            parse_base_damage("Necromancy Base Damage +60%; Summoned Skeletons deal +12% direct damage"),
+            Some(("Necromancy".to_string(), 0.6, true))
+        );
+        // Flat low tier.
+        assert_eq!(
+            parse_base_damage("Necromancy Base Damage +5; Summoned Skeletons deal +1% direct damage"),
+            Some(("Necromancy".to_string(), 5.0, false))
+        );
+        // Trailing temporal rider rejected.
+        assert_eq!(parse_base_damage("Bat Base Damage +60% for 10 seconds"), None);
+        // Trigger-prefixed conditional never begins with the clause, so it can't match.
+        assert_eq!(
+            parse_base_damage(
+                "Shadow Feint raises your Lycanthropy Base Damage +79% until you trigger the teleport"
+            ),
+            None
         );
     }
 
