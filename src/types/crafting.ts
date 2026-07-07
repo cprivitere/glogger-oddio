@@ -367,3 +367,24 @@ export interface EnrichedWorkOrder {
   recipe_id: number | null
   recipe_name: string | null
 }
+
+/**
+ * Lean, un-enriched work order for the "uncompleted work orders" backlog view.
+ * Recipe resolution is deferred to project-creation time (the backlog can be
+ * ~1,000 rows, so we never resolve recipes for the whole set up front).
+ */
+export interface WorkOrderTodo {
+  quest_key: string
+  name: string
+  craft_skill: string | null
+  item_internal_name: string | null
+  quantity: number
+  industry_xp: number
+  gold_reward: number
+  /** Player has this work order accepted right now */
+  is_active: boolean
+  /** Turn-in board NPC, e.g. "Fitz the Boatman" (parsed from quest text) */
+  board_npc: string | null
+  /** Turn-in board location, e.g. "Serbule docks" (parsed from quest text) */
+  board_location: string | null
+}

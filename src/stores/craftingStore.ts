@@ -1,4 +1,4 @@
-import { defineStore } from "pinia";
+import { defineStore, acceptHMRUpdate } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -27,6 +27,7 @@ import type {
   TrackedRecipeEntry,
   WorkOrderSnapshotData,
   EnrichedWorkOrder,
+  WorkOrderTodo,
   LevelingPlanLevel,
 } from "../types/crafting";
 import type { RecipeInfo } from "../types/gameData/recipes";
@@ -1547,6 +1548,60 @@ export const useCraftingStore = defineStore("crafting", () => {
   }
 
   /**
+   * Create a crafting project from a set of (un-enriched) work orders.
+   *
+   * Recipes are resolved lazily here — the backlog can be ~1,000 rows, so we only
+   * pay the item→recipe lookup for the orders the user actually turns into a
+   * project. Orders that map to the same recipe are merged (quantities summed);
+   * orders with no craftable recipe are skipped and reported.
+   */
+  async function createProjectFromWorkOrders(
+    orders: WorkOrderTodo[],
+    projectName: string,
+    notes?: string,
+  ): Promise<{ projectId: number; added: number; skipped: number }> {
+    // Resolve item→recipe for each order, in bounded-concurrency batches so we
+    // don't fire ~1,000 IPC calls at once.
+    const CHUNK = 40;
+    const resolved: ({ recipeId: number; recipeName: string; quantity: number } | null)[] = [];
+    for (let i = 0; i < orders.length; i += CHUNK) {
+      const batch = orders.slice(i, i + CHUNK);
+      const batchResults = await Promise.all(
+        batch.map(async (wo) => {
+          if (!wo.item_internal_name) return null;
+          const item = await gameData.resolveItem(wo.item_internal_name);
+          if (!item) return null;
+          const recipes = filterRecipes(await getCachedRecipesForItem(item.id));
+          if (recipes.length === 0) return null;
+          return { recipeId: recipes[0].id, recipeName: recipes[0].name, quantity: wo.quantity };
+        }),
+      );
+      resolved.push(...batchResults);
+    }
+
+    // Merge by recipe, summing desired quantities.
+    const byRecipe = new Map<number, { recipe_name: string; quantity: number }>();
+    let skipped = 0;
+    for (const r of resolved) {
+      if (!r) {
+        skipped++;
+        continue;
+      }
+      const existing = byRecipe.get(r.recipeId);
+      if (existing) existing.quantity += r.quantity;
+      else byRecipe.set(r.recipeId, { recipe_name: r.recipeName, quantity: r.quantity });
+    }
+
+    const projectId = await createProject(projectName, notes);
+    for (const [recipeId, d] of byRecipe) {
+      await addEntry(projectId, recipeId, d.recipe_name, d.quantity);
+    }
+    await loadProjects();
+
+    return { projectId, added: byRecipe.size, skipped };
+  }
+
+  /**
    * Export material needs as a shareable text file via save dialog.
    */
   async function exportMaterialList(
@@ -1641,5 +1696,14 @@ export const useCraftingStore = defineStore("crafting", () => {
     adjustTrackedOutput,
     // Work orders
     getWorkOrders,
+    createProjectFromWorkOrders,
   };
 });
+
+// Enable proper Pinia hot-module replacement: without this, editing a store action
+// during `tauri dev` leaves the already-instantiated singleton running the old code
+// (and can disconnect reactive state like activeProject, breaking actions such as
+// delete/duplicate until a full reload).
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useCraftingStore, import.meta.hot))
+}

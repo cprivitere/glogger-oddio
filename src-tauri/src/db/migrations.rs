@@ -1675,7 +1675,8 @@ fn migration_v1_unified_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX idx_character_currencies_snapshot ON character_currencies(snapshot_id);
         CREATE INDEX idx_character_currencies_key ON character_currencies(currency_key, snapshot_id);
 
-        -- Active quests per snapshot (from /outputcharacter ActiveQuests + ActiveWorkOrders + CompletedWorkOrders)
+        -- Active quests per snapshot (from /outputcharacter ActiveQuests + ActiveWorkOrders + CompletedWorkOrders + CompletedQuests)
+        -- category is one of: 'active', 'work_order', 'completed_work_order', 'completed'
         CREATE TABLE character_active_quests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             snapshot_id INTEGER NOT NULL,
