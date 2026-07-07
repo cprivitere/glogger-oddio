@@ -124,7 +124,7 @@
           <span class="text-sm font-bold text-[#e87e7e] ml-1">{{ store.totalKills }}</span>
         </div>
         <div v-if="s.vendorGold > 0" class="text-center">
-          <span class="text-[0.6rem] text-text-muted uppercase tracking-wide">Gold</span>
+          <span class="text-[0.6rem] text-text-muted uppercase tracking-wide">Councils</span>
           <span class="text-sm font-bold text-value-gold ml-1">{{ s.vendorGold.toLocaleString() }}g</span>
         </div>
       </div>

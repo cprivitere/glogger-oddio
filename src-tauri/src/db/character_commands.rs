@@ -30,6 +30,10 @@ pub struct CharacterReport {
     pub active_work_orders: Vec<String>,
     #[serde(default)]
     pub completed_work_orders: Vec<String>,
+    /// Completed (non-work-order) quests. Only present in newer VIP exports;
+    /// older exports omit the field entirely, hence `default`.
+    #[serde(default)]
+    pub completed_quests: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -316,9 +320,15 @@ pub fn import_character_report_internal(
                 ])
                 .map_err(|e| format!("Failed to insert completed work order {quest_key}: {e}"))?;
         }
+        for quest_key in &report.completed_quests {
+            quest_stmt
+                .execute(rusqlite::params![snapshot_id, quest_key, "completed"])
+                .map_err(|e| format!("Failed to insert completed quest {quest_key}: {e}"))?;
+        }
         let quests_imported = report.active_quests.len()
             + report.active_work_orders.len()
-            + report.completed_work_orders.len();
+            + report.completed_work_orders.len()
+            + report.completed_quests.len();
 
         // 13. Seed game state from snapshot (timestamp deconfliction: only overwrite if newer)
         seed_game_state_from_snapshot(&conn, &report, game_data)?;

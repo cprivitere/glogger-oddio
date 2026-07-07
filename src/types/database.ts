@@ -376,7 +376,7 @@ export interface SnapshotCurrency {
 
 export interface SnapshotActiveQuest {
   quest_key: string
-  category: 'active' | 'work_order' | 'completed_work_order'
+  category: 'active' | 'work_order' | 'completed_work_order' | 'completed'
 }
 
 export interface ImportResult {

@@ -599,6 +599,8 @@ export const useGameDataStore = defineStore("gameData", () => {
     getQuestsForNpc,
     getQuestsForSkill,
     getQuestsByMoonPhase,
+    loadAllQuests,
+    allQuestsCache,
     getRecipesForKeyword,
     getTsysForAbility,
     getAbilitiesForTsys,
