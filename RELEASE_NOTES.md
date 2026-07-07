@@ -1,7 +1,8 @@
-## What's Changed since v0.11.25
+## What's Changed since v0.11.26
 
-### Fixes
-- fix(farming): stop session history fragmenting for 12-hour-clock users (`c5a055d`)
+### Features
+- feat(quests): tabbed quest screen, work-order backlog, and board tracking (`6e99705`)
+- feat(farming): relabel session "Gold" stat to "Councils" (`31c23be`)
 
 ---
-*2 commits since v0.11.25*
+*5 commits since v0.11.26*
