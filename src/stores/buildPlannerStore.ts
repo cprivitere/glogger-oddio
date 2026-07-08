@@ -12,6 +12,9 @@ import type {
   BuildPresetCpRecipe,
   CpRecipeOption,
   SlotTsysPower,
+  EquippedSlotCandidates,
+  EquippedCandidatesResult,
+  EquippedSelection,
 } from "../types/buildPlanner"
 import {
   EQUIPMENT_SLOTS,
@@ -628,6 +631,84 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     }
   }
 
+  /**
+   * Fetch the character's equippable items (from their latest items report),
+   * grouped by planner slot and ordered best-guess first, for the loadout picker.
+   * The report can't flag which item is actually worn, so the user confirms.
+   */
+  async function fetchEquippedCandidates(): Promise<EquippedCandidatesResult> {
+    if (!activePreset.value) return { reason: "no-preset", slots: [] }
+    const settings = useSettingsStore()
+    const characterName = settings.settings.activeCharacterName
+    const serverName = settings.settings.activeServerName
+    if (!characterName) return { reason: "no-character", slots: [] }
+
+    const slots = await invoke<EquippedSlotCandidates[]>("get_equipped_gear_candidates", {
+      characterName,
+      serverName: serverName || undefined,
+    })
+    if (slots.length === 0) return { reason: "no-gear", slots: [] }
+    return { reason: null, slots }
+  }
+
+  /**
+   * Apply a user-confirmed loadout from the picker. For each chosen slot this sets
+   * the base item (id, name, level, rarity, crafted flag) and replaces that slot's
+   * mods with the item's TSys powers plus any imbued augment. Slots the user left
+   * unselected are untouched. Returns the number of slots applied.
+   */
+  async function applyEquippedGear(selections: EquippedSelection[]): Promise<number> {
+    if (!activePreset.value || selections.length === 0) return 0
+    const presetId = activePreset.value.id
+    const targetSlots = new Set(selections.map(s => s.equip_slot))
+
+    // Set the base item for each chosen slot.
+    for (const { equip_slot, item } of selections) {
+      await invoke("set_build_preset_slot_item", {
+        input: {
+          preset_id: presetId,
+          equip_slot,
+          item_id: item.item_id,
+          item_name: item.item_name,
+          slot_level: item.slot_level,
+          slot_rarity: item.slot_rarity,
+          is_crafted: item.is_crafted,
+          is_masterwork: false,
+        },
+      })
+    }
+
+    // Rebuild the full mod list: keep mods on untouched slots, replace the
+    // chosen slots' mods with the selected item's powers.
+    const newMods: BuildPresetModInput[] = presetMods.value
+      .filter(m => !targetSlots.has(m.equip_slot))
+      .map(m => ({
+        equip_slot: m.equip_slot,
+        power_name: m.power_name,
+        tier: m.tier,
+        is_augment: m.is_augment,
+        sort_order: m.sort_order,
+      }))
+    for (const { equip_slot, item } of selections) {
+      item.mods.forEach((mod, i) => {
+        newMods.push({
+          equip_slot,
+          power_name: mod.power_name,
+          tier: mod.tier,
+          is_augment: mod.is_augment,
+          sort_order: i,
+        })
+      })
+    }
+    await invoke("set_build_preset_mods", { presetId, mods: newMods })
+
+    // Reload slot items (+ resolve icons/keywords) and mods from the DB.
+    await loadSlotItems()
+    presetMods.value = await invoke<BuildPresetMod[]>("get_build_preset_mods", { presetId })
+
+    return selections.length
+  }
+
   /** Clear the base item for a specific slot */
   async function clearSlotItem(slotId?: string) {
     if (!activePreset.value) return
@@ -842,6 +923,8 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     getMaxModsForSlot,
     setSlotItem,
     updateSlotProps,
+    fetchEquippedCandidates,
+    applyEquippedGear,
     clearSlotItem,
     getBarAbilities,
     selectBar,

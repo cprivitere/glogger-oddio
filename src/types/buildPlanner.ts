@@ -92,6 +92,45 @@ export interface BuildPresetCpRecipe {
   sort_order: number
 }
 
+/** A mod pulled from an equipped item (a TSys power or its imbued augment) */
+export interface EquippedGearMod {
+  power_name: string
+  tier: number | null
+  is_augment: boolean
+}
+
+/** One candidate item that could be worn in a planner slot (from the latest items report) */
+export interface EquippedCandidate {
+  item_id: number
+  item_name: string | null
+  slot_level: number
+  slot_rarity: string
+  is_crafted: boolean
+  /** Item has a durability value (has been used) — a hint it's actually worn */
+  is_worn: boolean
+  /** Item is attuned/bound to this character — another worn hint */
+  is_attuned: boolean
+  mods: EquippedGearMod[]
+}
+
+/** All candidate items for one planner slot, ordered best-guess first */
+export interface EquippedSlotCandidates {
+  equip_slot: string
+  candidates: EquippedCandidate[]
+}
+
+/** Result of fetching equipped-gear candidates for the loadout picker */
+export interface EquippedCandidatesResult {
+  reason: 'no-preset' | 'no-character' | 'no-gear' | null
+  slots: EquippedSlotCandidates[]
+}
+
+/** A user-confirmed slot→item choice to apply from the loadout picker */
+export interface EquippedSelection {
+  equip_slot: string
+  item: EquippedCandidate
+}
+
 /** A TSys power eligible for a slot, returned from the backend query */
 export interface TsysTierSummary {
   tier_id: string

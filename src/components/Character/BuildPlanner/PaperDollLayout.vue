@@ -49,8 +49,17 @@
         @click="showImport = true">
         Import
       </button>
+      <button
+        v-if="store.activePreset"
+        class="px-2 py-1 text-xs bg-surface-elevated border border-border-default text-text-secondary rounded cursor-pointer hover:bg-surface-hover disabled:opacity-50 disabled:cursor-wait"
+        :disabled="importingEquipped"
+        title="Fill slots from your character's equipped gear (latest items report)"
+        @click="openImportEquipped">
+        {{ importingEquipped ? 'Loading…' : 'Import Equipped' }}
+      </button>
       <span v-if="exportMessage" class="text-xs text-accent-gold">{{ exportMessage }}</span>
       <span v-if="importError" class="text-xs text-red-400">{{ importError }}</span>
+      <span v-if="equipMessage" class="text-xs" :class="equipError ? 'text-red-400' : 'text-accent-gold'">{{ equipMessage }}</span>
     </div>
 
     <!-- Set Defaults (collapsible) -->
@@ -176,6 +185,12 @@
       @update:show="showImport = $event"
       @confirm="handleImport" />
 
+    <ImportEquippedDialog
+      :show="showImportEquipped"
+      :slots="equipCandidates"
+      @update:show="showImportEquipped = $event"
+      @confirm="handleImportEquipped" />
+
     <ModalDialog
       :show="showDelete"
       title="Delete Build"
@@ -198,6 +213,8 @@ import ModalDialog from '../../Shared/ModalDialog.vue'
 import PaperDollSlot from './PaperDollSlot.vue'
 import PaperDollStats from './PaperDollStats.vue'
 import AbilityBarSummary from './AbilityBarSummary.vue'
+import ImportEquippedDialog from './ImportEquippedDialog.vue'
+import type { EquippedSlotCandidates, EquippedSelection } from '../../../types/buildPlanner'
 
 const store = useBuildPlannerStore()
 
@@ -242,8 +259,13 @@ const showRename = ref(false)
 const showClone = ref(false)
 const showDelete = ref(false)
 const showImport = ref(false)
+const showImportEquipped = ref(false)
+const importingEquipped = ref(false)
+const equipCandidates = ref<EquippedSlotCandidates[]>([])
 const exportMessage = ref('')
 const importError = ref('')
+const equipMessage = ref('')
+const equipError = ref(false)
 
 function onPresetChange(val: string) {
   const id = Number(val)
@@ -293,6 +315,46 @@ async function handleImport(code: string) {
 async function handleDelete() {
   if (!store.activePreset) return
   await store.deletePreset(store.activePreset.id)
+}
+
+async function openImportEquipped() {
+  if (!store.activePreset || importingEquipped.value) return
+  importingEquipped.value = true
+  equipMessage.value = ''
+  equipError.value = false
+  try {
+    const result = await store.fetchEquippedCandidates()
+    if (result.reason === 'no-character') {
+      equipError.value = true
+      equipMessage.value = 'No active character selected.'
+    } else if (result.reason === 'no-gear') {
+      equipError.value = true
+      equipMessage.value = 'No equippable items found — import an items report first.'
+    } else if (result.reason === null) {
+      equipCandidates.value = result.slots
+      showImportEquipped.value = true
+    }
+  } catch (e) {
+    equipError.value = true
+    equipMessage.value = `Load failed: ${e}`
+  } finally {
+    importingEquipped.value = false
+    if (equipError.value) setTimeout(() => { equipMessage.value = '' }, 5000)
+  }
+}
+
+async function handleImportEquipped(selections: EquippedSelection[]) {
+  equipMessage.value = ''
+  equipError.value = false
+  try {
+    const count = await store.applyEquippedGear(selections)
+    equipMessage.value = `Imported ${count} slot${count === 1 ? '' : 's'}.`
+  } catch (e) {
+    equipError.value = true
+    equipMessage.value = `Import failed: ${e}`
+  } finally {
+    setTimeout(() => { equipMessage.value = '' }, 5000)
+  }
 }
 
 async function onRarityChange(val: string) {
