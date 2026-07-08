@@ -7,4 +7,4 @@
 - fix(build-planner): apply skill-wide "<Skill> Base Damage +N%" prose mods (`42813aa`)
 
 ---
-*4 commits since v0.11.27*
+*6 commits since v0.11.27*
