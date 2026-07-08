@@ -499,6 +499,236 @@ pub fn get_build_preset_slot_items(
     Ok(items)
 }
 
+// ── Import equipped gear ────────────────────────────────────────────────────
+
+/// A mod pulled from an equipped item's TSys powers (or its imbued augment).
+#[derive(Serialize)]
+pub struct EquippedGearMod {
+    pub power_name: String,
+    pub tier: Option<i32>,
+    pub is_augment: bool,
+}
+
+/// One candidate item that could be worn in a given planner slot.
+///
+/// The Storage report has no "currently equipped" flag — worn gear and spare
+/// equippables are both just inventory items with an equip slot. We surface every
+/// candidate per slot (best-first) so the user confirms the loadout, and expose the
+/// two signals that hint at which is actually worn: `is_worn` (the item has a
+/// durability value, i.e. it has been used) and `is_attuned` (bound to this character).
+#[derive(Serialize)]
+pub struct EquippedCandidate {
+    pub item_id: i64,
+    pub item_name: Option<String>,
+    pub slot_level: i32,
+    pub slot_rarity: String,
+    pub is_crafted: bool,
+    pub is_worn: bool,
+    pub is_attuned: bool,
+    pub mods: Vec<EquippedGearMod>,
+}
+
+/// All candidate items for one build-planner slot, ordered best-guess first.
+#[derive(Serialize)]
+pub struct EquippedSlotCandidates {
+    /// Build-planner slot id (e.g. "Belt", not the game's "Waist").
+    pub equip_slot: String,
+    pub candidates: Vec<EquippedCandidate>,
+}
+
+/// Map a game equipment-slot name to the build planner's slot id.
+/// Slots the planner doesn't model (mount, banner, racial, saddle…) return None.
+fn planner_slot_for(game_slot: &str) -> Option<&'static str> {
+    Some(match game_slot {
+        "Head" => "Head",
+        "Chest" => "Chest",
+        "Legs" => "Legs",
+        "Hands" => "Hands",
+        "Feet" => "Feet",
+        "MainHand" => "MainHand",
+        "OffHand" => "OffHand",
+        "Ring" => "Ring",
+        "Necklace" => "Necklace",
+        "Waist" => "Belt",
+        _ => return None,
+    })
+}
+
+fn rarity_rank(rarity: &str) -> i32 {
+    match rarity {
+        "Uncommon" => 1,
+        "Rare" => 2,
+        "Exceptional" => 3,
+        "Epic" => 4,
+        "Legendary" => 5,
+        _ => 0, // Common / unknown
+    }
+}
+
+/// Collect every equippable item from the character's latest items snapshot,
+/// grouped by build-planner slot, for the "Import Equipped" loadout picker.
+///
+/// Equipped/equippable items are those with an equip slot and no storage vault
+/// (worn or carried, not stashed in a chest). The report can't tell worn gear from
+/// spares, so we return all candidates per slot ordered best-guess first
+/// (worn → attuned → level → rarity → mod count) and let the user confirm.
+#[tauri::command]
+pub fn get_equipped_gear_candidates(
+    db: State<'_, DbPool>,
+    character_name: String,
+    server_name: Option<String>,
+) -> Result<Vec<EquippedSlotCandidates>, String> {
+    use super::inventory_commands::TsysPower;
+    use std::collections::HashMap;
+
+    let conn = db
+        .get()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+
+    // Latest snapshot id for this character (optionally scoped to a server).
+    let snapshot_id: Option<i64> = if let Some(ref server) = server_name {
+        conn.query_row(
+            "SELECT id FROM character_item_snapshots
+             WHERE character_name = ?1 AND server_name = ?2
+             ORDER BY snapshot_timestamp DESC LIMIT 1",
+            rusqlite::params![character_name, server],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT id FROM character_item_snapshots
+             WHERE character_name = ?1
+             ORDER BY snapshot_timestamp DESC LIMIT 1",
+            rusqlite::params![character_name],
+            |row| row.get(0),
+        )
+    }
+    .ok();
+
+    let Some(snapshot_id) = snapshot_id else {
+        return Ok(Vec::new());
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT type_id, item_name, rarity, slot, level, is_crafted,
+                    tsys_powers, tsys_imbue_power, tsys_imbue_power_tier,
+                    durability, attuned_to
+             FROM character_snapshot_items
+             WHERE item_snapshot_id = ?1
+               AND slot IS NOT NULL
+               AND (storage_vault IS NULL OR storage_vault = '')",
+        )
+        .map_err(|e| format!("Failed to prepare query: {e}"))?;
+
+    struct RawRow {
+        type_id: i64,
+        item_name: Option<String>,
+        rarity: Option<String>,
+        slot: String,
+        level: Option<i64>,
+        is_crafted: bool,
+        tsys_powers: Option<String>,
+        imbue_power: Option<String>,
+        imbue_tier: Option<i64>,
+        durability: Option<f64>,
+        attuned_to: Option<String>,
+    }
+
+    let rows = stmt
+        .query_map([snapshot_id], |row| {
+            Ok(RawRow {
+                type_id: row.get(0)?,
+                item_name: row.get(1)?,
+                rarity: row.get(2)?,
+                slot: row.get(3)?,
+                level: row.get(4)?,
+                is_crafted: row.get::<_, i32>(5).map(|v| v != 0)?,
+                tsys_powers: row.get(6)?,
+                imbue_power: row.get(7)?,
+                imbue_tier: row.get(8)?,
+                durability: row.get(9)?,
+                attuned_to: row.get(10)?,
+            })
+        })
+        .map_err(|e| format!("Query failed: {e}"))?;
+
+    let mut by_slot: HashMap<&'static str, Vec<EquippedCandidate>> = HashMap::new();
+
+    for row in rows {
+        let row = row.map_err(|e| format!("Row parse error: {e}"))?;
+        let Some(planner_slot) = planner_slot_for(&row.slot) else {
+            continue;
+        };
+
+        let slot_rarity = row.rarity.clone().unwrap_or_else(|| "Epic".to_string());
+        let slot_level = row.level.unwrap_or(90) as i32;
+        let is_attuned = row
+            .attuned_to
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(&character_name));
+
+        let mut mods: Vec<EquippedGearMod> = Vec::new();
+        if let Some(ref json) = row.tsys_powers {
+            if let Ok(powers) = serde_json::from_str::<Vec<TsysPower>>(json) {
+                for p in powers {
+                    mods.push(EquippedGearMod {
+                        power_name: p.power,
+                        tier: Some(p.tier as i32),
+                        is_augment: false,
+                    });
+                }
+            }
+        }
+        if let Some(imbue) = row.imbue_power.clone() {
+            if !imbue.is_empty() {
+                mods.push(EquippedGearMod {
+                    power_name: imbue,
+                    tier: row.imbue_tier.map(|t| t as i32),
+                    is_augment: true,
+                });
+            }
+        }
+
+        by_slot.entry(planner_slot).or_default().push(EquippedCandidate {
+            item_id: row.type_id,
+            item_name: row.item_name,
+            slot_level,
+            slot_rarity,
+            is_crafted: row.is_crafted,
+            is_worn: row.durability.is_some(),
+            is_attuned,
+            mods,
+        });
+    }
+
+    // Order candidates best-guess first so the picker can default to candidates[0]:
+    // worn items first, then attuned, then higher level / rarity / mod count.
+    let mut out: Vec<EquippedSlotCandidates> = by_slot
+        .into_iter()
+        .map(|(slot, mut candidates)| {
+            candidates.sort_by(|a, b| {
+                let key = |c: &EquippedCandidate| {
+                    (
+                        c.is_worn,
+                        c.is_attuned,
+                        c.slot_level,
+                        rarity_rank(&c.slot_rarity),
+                        c.mods.len() as i32,
+                    )
+                };
+                key(b).cmp(&key(a))
+            });
+            EquippedSlotCandidates {
+                equip_slot: slot.to_string(),
+                candidates,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.equip_slot.cmp(&b.equip_slot));
+    Ok(out)
+}
+
 // ── Ability bar commands ───────────────────────────────────────────────────
 
 /// Replace all abilities for a specific bar in a build preset.
@@ -1016,4 +1246,50 @@ pub fn import_build_preset(
     }
 
     Ok(new_id)
+}
+
+#[cfg(test)]
+mod equipped_gear_tests {
+    use super::*;
+    use crate::db::inventory_commands::TsysPower;
+
+    #[test]
+    fn maps_game_slots_to_planner_slots() {
+        assert_eq!(planner_slot_for("Waist"), Some("Belt"));
+        assert_eq!(planner_slot_for("MainHand"), Some("MainHand"));
+        assert_eq!(planner_slot_for("Ring"), Some("Ring"));
+        // Slots the planner doesn't model are skipped.
+        assert_eq!(planner_slot_for("MountGlamour"), None);
+        assert_eq!(planner_slot_for("Banner"), None);
+        assert_eq!(planner_slot_for("Racial"), None);
+        assert_eq!(planner_slot_for("Saddle"), None);
+    }
+
+    #[test]
+    fn rarity_rank_orders_ascending() {
+        assert!(rarity_rank("Legendary") > rarity_rank("Epic"));
+        assert!(rarity_rank("Epic") > rarity_rank("Rare"));
+        assert!(rarity_rank("Rare") > rarity_rank("Uncommon"));
+        assert_eq!(rarity_rank("Common"), 0);
+        assert_eq!(rarity_rank("nonsense"), 0);
+    }
+
+    /// The tsys_powers column is written by the inventory importer via
+    /// serde_json::to_string(&Vec<TsysPower>). Guard that the equipped-gear
+    /// reader parses that exact PascalCase shape back.
+    #[test]
+    fn parses_stored_tsys_powers_json() {
+        let stored = serde_json::to_string(&vec![
+            TsysPower { tier: 4, power: "AgonizeShortenReset".to_string() },
+            TsysPower { tier: 9, power: "GenericBoostAcid".to_string() },
+        ])
+        .unwrap();
+        assert!(stored.contains("\"Tier\":4"));
+        assert!(stored.contains("\"Power\":\"AgonizeShortenReset\""));
+
+        let parsed: Vec<TsysPower> = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].power, "AgonizeShortenReset");
+        assert_eq!(parsed[1].tier, 9);
+    }
 }

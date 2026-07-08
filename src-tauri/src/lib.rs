@@ -160,7 +160,8 @@ use db::build_planner_commands::{
     clear_build_preset_slot_item, clone_build_preset, create_build_preset, delete_build_preset,
     export_build_preset, get_build_preset_abilities, get_build_preset_cp_recipes,
     get_build_preset_mods, get_build_preset_slot_items, get_build_presets,
-    import_build_preset, set_build_preset_abilities, set_build_preset_cp_recipes,
+    get_equipped_gear_candidates, import_build_preset, set_build_preset_abilities,
+    set_build_preset_cp_recipes,
     set_build_preset_mods, set_build_preset_slot_item, update_build_preset,
     update_build_preset_slot_props,
 };
@@ -889,6 +890,7 @@ pub fn run() {
             set_build_preset_slot_item,
             clear_build_preset_slot_item,
             get_build_preset_slot_items,
+            get_equipped_gear_candidates,
             update_build_preset_slot_props,
             set_build_preset_abilities,
             get_build_preset_abilities,
