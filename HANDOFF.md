@@ -1,5 +1,27 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-08 (Session 32 — hotfix: Flatpak GNOME 47 runtime EOL)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` at `9db9bb6` (pushed). Same fix cherry-picked to `hotfix/flatpak-gnome-50` (`78328ef`, off `origin/main`) → **PR #81 open, not yet merged** — this is the release path.
+**Status:** ✅ Fix committed + pushed on both branches; **CI-unverified** — the GNOME 50 build is only provable by the Flatpak workflow on the next release run.
+
+## TL;DR — Session 32
+
+A user reported the v0.11.29 Flatpak warning `runtime org.gnome.Platform branch 47 is end-of-life` (EOL'd 2025-10-15; GNOME **48** also died 2026-03-24 — we were two bumps behind; EOL runtimes can even fail to install for new users). Bumped to **GNOME 50** (current, supported ~March 2027; 49 EOLs ~Sept 2026):
+
+- [flatpak/io.github.crisp_oddio.glogger.yml](flatpak/io.github.crisp_oddio.glogger.yml) — `runtime-version: '50'`.
+- [.github/workflows/flatpak.yml](.github/workflows/flatpak.yml) — builder image → `ghcr.io/flathub-infra/flatpak-github-actions:gnome-50`; the old `bilelmoussaoui/…` registry path is dead (no new runtime tags) — the rename was mandatory.
+- [docs/flatpak-build.md](docs/flatpak-build.md) — local-build runtime `//50`, SDK extensions `//25.08` (freedesktop base under GNOME 49/50), + note on the yearly EOL cadence: next bump must touch all three files together. Manifest `sdk-extensions` are unversioned — flatpak-builder resolves the matching branch automatically.
+
+### Gotchas / open ends
+- **v0.11.29 was NOT actually removed from GitHub** — release still exists, marked *Latest*, still serving the GNOME-47 flatpak; tag still on origin. (**v0.11.28** is the one that's missing.) Deliberately left untouched. To remove: `gh release delete v0.11.29 --repo crisp-oddio/glogger-oddio` + `git push origin :refs/tags/v0.11.29`.
+- **Re-running the Flatpak workflow against v0.11.29 cannot fix it** — the workflow checks out the *tag*, which contains the old manifest. The fix only ships via a new tag: **merge PR #81 → trigger Release workflow (patch → v0.11.30)**.
+- If GNOME 50's webkitgtk misbehaves in CI, the fallback is `runtime-version: '49'` + the `gnome-49` image.
+
+**Next session:** merge #81 + release v0.11.30.
+
+---
+
 **Date:** 2026-07-07 (Session 30 — Quest tabs, uncompleted work-order backlog + board tracking, crafting delete fix)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `6e99705`, pushed to `origin/dev` (on top of `31c23be`).
