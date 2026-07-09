@@ -66,9 +66,39 @@ export type ChatStatusEvent =
       verb: string
       zone: string | null
     }
+  | { kind: 'RouletteResult'; timestamp: string; number: number }
+
+// ── Currency Estimate ─────────────────────────────────────────────────────
+// Matches Rust CurrencyEstimate (db/game_state_commands.rs). Running estimate
+// of the council wallet (GOLD): last export's balance + live chat deltas.
+
+export interface CurrencyEstimate {
+  currency_name: string
+  anchor_amount: number
+  anchor_at: string | null
+  delta_since: number
+  estimated: number
+  has_anchor: boolean
+}
 
 // ── Combat Wisdom Types ──────────────────────────────────────────────────
 // Matches Rust CombatWisdomMonster (db/combat_wisdom_commands.rs).
+
+// ── Roulette Types ───────────────────────────────────────────────────────
+// Matches Rust RouletteStats (db/roulette_commands.rs).
+
+export interface RouletteNumberCount {
+  number: number
+  count: number
+}
+
+export interface RouletteStats {
+  total: number
+  counts: RouletteNumberCount[]
+  last_spun_at: string | null
+  last_number: number | null
+  recent: number[]
+}
 
 export interface CombatWisdomMonster {
   name: string
@@ -170,6 +200,19 @@ export const useGameStateStore = defineStore('gameState', () => {
 
   /** Persisted per-monster Combat Wisdom cooldown data (from the DB). */
   const combatWisdomMonsters = ref<CombatWisdomMonster[]>([])
+
+  /** Persisted casino roulette outcome history (from the DB). Drives the
+   *  Roulette widget's outcome-percentage pie chart. */
+  const rouletteStats = ref<RouletteStats>({
+    total: 0,
+    counts: [],
+    last_spun_at: null,
+    last_number: null,
+    recent: [],
+  })
+
+  // ── Council-wallet estimate (anchored on last export + live deltas) ───
+  const currencyEstimate = ref<CurrencyEstimate | null>(null)
 
   /** Display names of combat skills (from CDN). Used to filter the
    *  non-prodigy combat XP line. Loaded lazily on first loadAll. */
@@ -542,6 +585,41 @@ export const useGameStateStore = defineStore('gameState', () => {
     }
   }
 
+  /** Fetch persisted casino roulette outcome history. */
+  async function fetchRouletteStats() {
+    try {
+      rouletteStats.value = await invoke<RouletteStats>('get_roulette_stats')
+    } catch (e) {
+      console.error('[gameStateStore] Failed to load roulette stats:', e)
+    }
+  }
+
+  /** Reconcile the council-wallet estimate from the DB (anchor + delta_since).
+   *  Call on load/login and after a fresh export re-anchors it. */
+  async function fetchCurrencyEstimate() {
+    const characterName = getCharacterName()
+    const serverName = getServerName()
+    if (!characterName || !serverName) return
+    try {
+      currencyEstimate.value = await invoke<CurrencyEstimate | null>(
+        'get_currency_estimate', { characterName, serverName },
+      )
+    } catch (e) {
+      console.error('[gameStateStore] Failed to load currency estimate:', e)
+    }
+  }
+
+  /** Optimistically apply a live wallet delta so the council figure ticks
+   *  without a round-trip. The backend applies the same delta to delta_since;
+   *  fetchCurrencyEstimate() reconciles on the next load. No-op until anchored
+   *  (mirrors the backend guard) and only while live (post-catch-up). */
+  function applyWalletDelta(amount: number) {
+    const e = currencyEstimate.value
+    if (!e || !e.has_anchor || amount === 0) return
+    e.delta_since += amount
+    e.estimated += amount
+  }
+
   /** Lazily load the set of combat-skill display names from the CDN. */
   async function loadCombatSkillNames() {
     if (combatSkillNames.value.size > 0) return
@@ -830,6 +908,7 @@ export const useGameStateStore = defineStore('gameState', () => {
           label: event.amount > 0 ? 'Received' : 'Spent',
           amount: event.amount,
         })
+        applyWalletDelta(event.amount)
         break
 
       case 'CoinsLooted':
@@ -838,6 +917,7 @@ export const useGameStateStore = defineStore('gameState', () => {
           label: 'Looted from corpse',
           amount: event.amount,
         })
+        applyWalletDelta(event.amount)
         break
 
       case 'XpGained':
@@ -866,6 +946,12 @@ export const useGameStateStore = defineStore('gameState', () => {
         if (event.source_name) void fetchCombatWisdomMonsters()
         break
       }
+
+      case 'RouletteResult':
+        // A new casino spin landed — refresh the persisted outcome stats so
+        // the Roulette widget's pie chart and last-number update live.
+        void fetchRouletteStats()
+        break
     }
   }
 
@@ -918,6 +1004,8 @@ export const useGameStateStore = defineStore('gameState', () => {
       loadTrackedSkills()
       // Load combat-skill names for the XP-rate widget (non-blocking)
       loadCombatSkillNames()
+      // Load the council-wallet estimate (anchor + live deltas) (non-blocking)
+      fetchCurrencyEstimate()
     } catch (e) {
       console.error('[gameStateStore] Failed to load game state:', e)
     } finally {
@@ -1091,6 +1179,14 @@ export const useGameStateStore = defineStore('gameState', () => {
     combatWisdomSession,
     combatWisdomMonsters,
     fetchCombatWisdomMonsters,
+
+    // Casino roulette outcome history
+    rouletteStats,
+    fetchRouletteStats,
+
+    // Council-wallet estimate
+    currencyEstimate,
+    fetchCurrencyEstimate,
 
     // Tracked skills
     trackedSkillNames,

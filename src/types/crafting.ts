@@ -19,6 +19,8 @@ export interface CraftingProjectEntry {
   sort_order: number
   expanded_ingredient_ids: number[]
   target_stock: number | null
+  /** Item IDs pinned to the recipe's variable slots, in slot order. Empty = generic. */
+  slot_item_ids: number[]
 }
 
 export interface CraftingProject {
@@ -116,6 +118,19 @@ export interface IntermediateCraft {
   item_id: number
   crafts_needed: number
   quantity_produced: number
+}
+
+/** How much of one item a crafting project needs (Data Browser cross-reference) */
+export interface ProjectItemNeed {
+  project_id: number
+  project_name: string
+  group_name: string | null
+  /** Expected quantity needed as a raw material (post-buffer) */
+  quantity: number
+  /** Quantity needed as an expanded intermediate (crafted within the project) */
+  intermediate_quantity: number
+  /** Dynamic keyword slots this item can fill, with quantities */
+  keyword_needs: { keyword: string; quantity: number }[]
 }
 
 // ── Inventory integration types ──────────────────────────────────────────────
@@ -351,4 +366,25 @@ export interface EnrichedWorkOrder {
   /** Recipe that produces the required item (if found) */
   recipe_id: number | null
   recipe_name: string | null
+}
+
+/**
+ * Lean, un-enriched work order for the "uncompleted work orders" backlog view.
+ * Recipe resolution is deferred to project-creation time (the backlog can be
+ * ~1,000 rows, so we never resolve recipes for the whole set up front).
+ */
+export interface WorkOrderTodo {
+  quest_key: string
+  name: string
+  craft_skill: string | null
+  item_internal_name: string | null
+  quantity: number
+  industry_xp: number
+  gold_reward: number
+  /** Player has this work order accepted right now */
+  is_active: boolean
+  /** Turn-in board NPC, e.g. "Fitz the Boatman" (parsed from quest text) */
+  board_npc: string | null
+  /** Turn-in board location, e.g. "Serbule docks" (parsed from quest text) */
+  board_location: string | null
 }

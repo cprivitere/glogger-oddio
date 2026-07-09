@@ -43,6 +43,9 @@ export interface AppSettings {
   uiScale: number;
   autoDetectPathsOnStartup: boolean;
   autoIngestPlayerPrev: boolean;
+  farmingAutosaveMinutes: number;
+  autoStartFarmingSessions: boolean;
+  farmingSessionCapMinutes: number;
   viewPreferences: Record<string, Record<string, unknown>>;
 }
 
@@ -87,6 +90,9 @@ interface BackendSettings {
   ui_scale: number;
   auto_detect_paths_on_startup: boolean;
   auto_ingest_player_prev: boolean;
+  farming_autosave_minutes: number;
+  auto_start_farming_sessions: boolean;
+  farming_session_cap_minutes: number;
   view_preferences: Record<string, Record<string, unknown>>;
 }
 
@@ -132,6 +138,9 @@ function toBackendSettings(settings: AppSettings): BackendSettings {
     ui_scale: settings.uiScale,
     auto_detect_paths_on_startup: settings.autoDetectPathsOnStartup,
     auto_ingest_player_prev: settings.autoIngestPlayerPrev,
+    farming_autosave_minutes: settings.farmingAutosaveMinutes,
+    auto_start_farming_sessions: settings.autoStartFarmingSessions,
+    farming_session_cap_minutes: settings.farmingSessionCapMinutes,
     view_preferences: settings.viewPreferences,
   };
 }
@@ -248,6 +257,9 @@ function fromBackendSettings(settings: BackendSettings): AppSettings {
     uiScale: settings.ui_scale ?? DEFAULT_UI_SCALE,
     autoDetectPathsOnStartup: settings.auto_detect_paths_on_startup ?? false,
     autoIngestPlayerPrev: settings.auto_ingest_player_prev ?? true,
+    farmingAutosaveMinutes: settings.farming_autosave_minutes ?? 5,
+    autoStartFarmingSessions: settings.auto_start_farming_sessions ?? false,
+    farmingSessionCapMinutes: settings.farming_session_cap_minutes ?? 120,
     viewPreferences: settings.view_preferences ?? {},
   };
 }
@@ -294,6 +306,9 @@ function getDefaultSettings(): AppSettings {
     uiScale: DEFAULT_UI_SCALE,
     autoDetectPathsOnStartup: false,
     autoIngestPlayerPrev: true,
+    farmingAutosaveMinutes: 5,
+    autoStartFarmingSessions: false,
+    farmingSessionCapMinutes: 120,
     viewPreferences: {},
   };
 }

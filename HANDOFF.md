@@ -1,5 +1,691 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-07 (Session 30 — Quest tabs, uncompleted work-order backlog + board tracking, crafting delete fix)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `6e99705`, pushed to `origin/dev` (on top of `31c23be`).
+**Status:** ✅ `vue-tsc --noEmit` clean; `cargo check --lib` + `cargo test --lib character` clean. Verified
+live in `npm run tauri dev` (oddio@Arisetsu): the new `completed` category populated **323 rows** in the DB
+on re-import (matches the export). `src-tauri/Cargo.toml` LF↔CRLF noise left uncommitted as usual.
+
+## TL;DR — Session 30
+
+Three things, all around the Character → Quests screen and the crafting-project system.
+
+### 1. Completed quests + tabbed Quest screen
+The VIP character export (`Reports/Character_*.json`) gained a new top-level **`CompletedQuests`** array
+(flat quest internal-names, same shape as `ActiveQuests`). It's **optional** — only newer game clients write
+it, so characters not re-exported since the update omit it (parsed with `#[serde(default)]`).
+- **Backend** ([character_commands.rs](src-tauri/src/db/character_commands.rs)): `CharacterReport.completed_quests`
+  + insert loop storing each with **`category='completed'`**. **No migration** — `character_active_quests.category`
+  already existed and `get_snapshot_active_quests` returns every category. Comment updated in
+  [migrations.rs](src-tauri/src/db/migrations.rs).
+- **Frontend** ([QuestsScreen.vue](src/components/Character/QuestsScreen.vue)): reworked into **5 tabs** —
+  Active / Work Orders / **Uncompleted WOs** / Uncompleted / Completed. Quest details now resolve from the
+  cached full quest list (`gameData.allQuestsCache`, newly exposed with `loadAllQuests` from
+  [gameDataStore.ts](src/stores/gameDataStore.ts)) instead of ~150 per-quest `resolve_quest` invokes.
+  - **Uncompleted** = every CDN quest that isn't a work order, isn't active, and isn't permanently completed;
+    **repeatable** completed quests re-surface (doable again). ~1,264 rows for oddio.
+  - [QuestListPanel.vue](src/components/Character/QuestListPanel.vue) defaults to **By Area (zone)** grouping;
+    catch-all groups ("Unknown Area"…) sort last; new `completed`/`available`/`repeatable` badges.
+    `SnapshotActiveQuest.category` widened in [database.ts](src/types/database.ts).
+
+### 2. Uncompleted work-order backlog tab (+ board tracking + batch project)
+New tab **"Uncompleted WOs"** ([WorkOrdersTodoPanel.vue](src/components/Character/WorkOrdersTodoPanel.vue)):
+every CDN work order (`WorkOrderSkill` set, excluding `"Unknown"` = Fitz gathering turn-ins) for a crafting
+skill the player HAS (`gameState.skillsByName[skill].level ≥ 1`), minus `CompletedWorkOrders`. ~1,097 rows for
+oddio (only 3 CompletedWorkOrders in the export — the completed set is small, so it's really "all WOs for my
+skills"). Work-order `Requirements` are all `Industry MinSkillLevel 0` — **no real per-quest level gate
+exists** — so eligibility is just "a craftable recipe exists."
+- **Selection + batch project**: per-row checkboxes + select-all; **Create Project** builds a crafting project
+  from the **selected** set via new **`createProjectFromWorkOrders`** ([craftingStore.ts](src/stores/craftingStore.ts))
+  — resolves item→recipe **lazily** (only at click, 40-wide concurrency batches, since the backlog is ~1,000
+  rows), merges by recipe, skips non-craftable (gathering WOs have no recipe), reports added/skipped. New
+  `WorkOrderTodo` type in [types/crafting.ts](src/types/crafting.ts).
+- **Board tracking**: every WO has a **fixed turn-in board (1 of 9)** — Fitz the Boatman/Serbule, Sheyna/Rahu,
+  Irkima/Red Wing Casino, Ogamboe/Fae Realm, Thimble Pete/Eltibule, Viedesi/Sun Vale, Gremix/Amulna,
+  Laura Neth/Kur Mountains, Korbok/Vidaria. **Not a structured field** — NPC from the Scripted "Deliver to X"
+  objective, location parsed from the flavor `Description` via `parseWorkOrderBoard` in QuestsScreen
+  (`/\bto (.+?) (?:in|on|at) (.+?)\.(?:\s|$)/`, verified 100% of all 1,299 WOs). Shown inline per row + a board
+  `<select>` filter.
+- **Perf**: rows use rich `ItemInline` (2 IPC each on mount) only when the filtered list ≤250, else plain text
+  — keeps the ~1,000-row backlog snappy.
+
+### 3. fix(crafting): craftingStore HMR staleness broke the Delete Project button
+User reported "delete crafting project button isn't working now." Root cause was **not a code bug** —
+`craftingStore` lacked `acceptHMRUpdate`, so this session's repeated store edits left the running singleton
+stale in `tauri dev`; the disconnected `activeProject` made `deleteProject`'s `if (!store.activeProject) return`
+bail silently. Fix: added the `acceptHMRUpdate` block ([craftingStore.ts](src/stores/craftingStore.ts)),
+mirroring `buildPlannerStore`. Needs one full app reload (Ctrl+R) to shed the already-stale instance. (Delete
+itself is fine — button emits `@delete` → confirm → `delete_crafting_project`, which cascades entries via the
+`ON DELETE CASCADE` FK with `foreign_keys=ON`.)
+
+### Notes / next
+- Not click-driven through the native window by me (Tauri can't mount in the browser-only preview); verified
+  via type/compile checks, a DB read confirming the 323 completed rows imported, and HMR applying cleanly.
+  A live click-test of the tabs + Create Project + Delete is the remaining manual step.
+- Gathering-skill work orders (Fishing/Mining/Surveying/…) appear in the backlog but have no recipe, so
+  they're skipped at project creation (reported) — intentional.
+
+---
+
+**Date:** 2026-07-06 (Session 29 — Fix farming history fragmenting for 12-hour-clock users)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `c5a055d` on top of `8e82a6d`. PR [#70](https://github.com/crisp-oddio/glogger-oddio/pull/70) (`dev → main`). (Session 28's PR #66 already merged.)
+**Status:** ✅ `vue-tsc --noEmit` clean; `tsToSeconds` validated against 24h/12h/midnight-edges/bad-input/elapsed-diff. No Rust changes.
+
+## TL;DR — Session 29 (12-hour-clock fragmentation bug)
+
+**User report:** farming **session history** was saving in "odd increments from 1 minute to 2 hours,
+nothing consistent" — happening **during a single continuous run** (no crash, no app close), and
+**even with an 8-hour cap** set. (Not survey — the user confirmed farming.)
+
+**Root cause:** the farming store's internal timestamps come from `getCurrentTimestamp()` →
+`formatTimeFull`, which **honors the user's 12/24-hour display setting**. For 12-hour users those
+render as `"2:30:00 PM"`, but [`tsToSeconds`](src/stores/farmingStore.ts) split on `":"` and did
+`Number("00 PM")` → **`NaN`**. So `getActiveSeconds()` was `NaN` for every 12-hour-clock user (also
+silently breaking the live timer — it showed `—` — and pause math). Session 28's cap rollover guard
+`getActiveSeconds() < capMinutes*60` is **`false` when the left side is `NaN`**, so the cap check
+**failed open** and rolled the session over on the next active tick — fragmenting history at
+irregular points, independent of the cap value. A latent bug that the rollover surfaced.
+
+**Fix ([farmingStore.ts](src/stores/farmingStore.ts), commit `c5a055d`):**
+- `tsToSeconds` now parses **both** `"14:30:05"` (24h) and `"2:30:05 PM"` (12h) via regex + AM/PM
+  handling (incl. `12:00 AM`→0, `12:00 PM`→43200) — restoring correct elapsed/timer/pause for all
+  users, so the rollover fires only at the real cap.
+- Rollover guard is now **`NaN`-safe**: `if (!Number.isFinite(activeSeconds) || activeSeconds < capMinutes*60) return false;`.
+- Display unchanged (the card passes bare `HH:MM:SS` through `formatAnyTimestamp`). Survey rollover
+  unaffected — it uses 24h log timestamps in Rust.
+
+**Investigation dead-ends worth remembering** (ruled out before finding the real cause): app
+restart/crash/close (user said none); character-login/zone restarts (no farming restart wired);
+autosave duplicate rows (upsert via `currentSessionId` → one row per session); the cap value itself
+(fragments below 8h ⇒ cap-independent). The "cap-independent" clue is what pointed at a `NaN`
+comparison rather than a timing threshold.
+
+**Possible follow-up:** the deeper smell is that internal duration math consumes a *display-formatted*
+string at all. A cleaner refactor would have `getCurrentTimestamp()` emit machine-format 24h and
+apply 12/24h only at render — not done here to keep the fix minimal/low-risk.
+
+---
+
+**Date:** 2026-07-05 (Session 28 — Cap runaway survey & farming sessions at 2h)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `bea3cda` (auto-roll) + `a8e3eac` (configurable farming cap) on top of `91f4166`.
+**Status:** ✅ `cargo test --lib survey::aggregator::tests` **22 pass** (incl. 2 new rollover tests);
+`cargo check` + `vue-tsc --noEmit` clean. Verified live in `tauri dev`: the new App Settings
+dropdown renders under **Settings → App Settings → Farming**, defaulting to 2 hours.
+
+## TL;DR — Session 28 (session length cap)
+
+**User request:** users were "accidentally forming dozens of hour-long sessions, causing them to
+crash the program." Fix: cap any single survey **or** farming session at 2h, then roll it over to a
+fresh one so no one session grows into an enormous record the UI can't handle. Follow-up: make the
+farming duration user-configurable.
+
+### Surveys — backend, log-time driven ([survey/aggregator.rs](src-tauri/src/survey/aggregator.rs))
+- `SESSION_MAX_DURATION_SECS = 2*60*60`. New **`maybe_roll_over_session`** runs at the **top** of
+  `process_event` (before the event is handled): if the active session's span — `started_at` → the
+  current event, both log-derived UTC — has reached the cap, it `end_session` +
+  `recompute_session_bounds_and_end` and emits **`SessionEnded { reason: "rollover" }`**.
+- The **replacement session auto-starts on the next survey craft/use** via the normal path, so the
+  triggering event lands in the fresh session and **no empty sessions** are ever created.
+- **Gated on `auto_start_enabled`** — the automatic regime is exactly the "sessions forming
+  accidentally" case; a manually-managed session is the user's to end, so it's left untouched.
+- Pending loot windows are intentionally **not** severed — loot that arrives after the roll keeps
+  attributing to its (now-closed) use as before.
+- `event_iso` is hoisted to the top of `process_event` and reused by the crafting auto-end sweep.
+- Tests: `test_session_rolls_over_after_max_duration`, `test_no_rollover_when_auto_start_disabled`.
+- **Survey cap is a fixed constant** (deliberately not tied to the new farming setting).
+
+### Farming — frontend, store-driven ([stores/farmingStore.ts](src/stores/farmingStore.ts))
+- **`maybeAutoRollover`** rides the existing 60s autosave ticker (so the cap is enforced ~within a
+  minute of the mark, no new timer). Past the cap (`getActiveSeconds()`), it `endSession()` (saves
+  the capped row in place) → `reset()` → `startSession(name)` — a fresh session with the **same
+  name**; timers + autosave restart.
+- Guards: skips paused / already-ended sessions, and **only rolls a non-empty session** (an empty
+  one is no burden and shouldn't spawn a blank history row — it'll roll the moment real activity
+  pushes it back over the cap). Applies to **manual** sessions too, and is **independent of the
+  autosave setting** (this is a safety cap, not a convenience).
+
+### Configurable farming cap (`a8e3eac`)
+- New setting **`farming_session_cap_minutes`** (default **120**), full plumbing:
+  [settings.rs](src-tauri/src/settings.rs) (serde default so old settings files load) →
+  [settingsStore.ts](src/stores/settingsStore.ts) (camelCase + backend interfaces, to/fromBackend,
+  defaults) → read in `maybeAutoRollover` **each tick** so a change takes effect with no restart.
+  **`0`/invalid ⇒ cap disabled** (defensive — prevents a bad value causing runaway rollovers).
+- UI: **"Auto-reset session after"** `<select>` in the Farming section of
+  [AppSettingsTab.vue](src/components/Settings/AppSettingsTab.vue) — 1 / 2 / 3 / 4 / 6 / 8 hours,
+  mirroring the "Auto-save active session" control right above it.
+
+### Notes / possible follow-ups
+- The survey cap could be wired to this same setting (or its own) if desired — currently fixed 2h.
+- `src-tauri/Cargo.toml` shows a phantom LF→CRLF-only modification in `git status` (0 insertions/
+  deletions); left uncommitted on purpose.
+
+---
+
+**Date:** 2026-07-02 (Session 27 — Surveying tab: only track items actually collected from surveys)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `9a8d59c` (windows) + `ea33aa6` (identity fallback) on top of `610b63c`.
+**Status:** ✅ `cargo test --lib` **490 pass**. Both ignored accuracy replays run locally again:
+`accuracy_report` (player.log path) **103/103 exact**; the new **`chat_only_accuracy_report`**
+captures **100.0%** with zero undercounts (identity fallback adds a small, codified wild-node
+overcount — see below). No frontend changes (`vue-tsc` untouched surface).
+
+### ⚠️ Live-test result → item-identity fallback (`ea33aa6`)
+The window gating alone **did not attribute loot on the user's live setup** (the windows need
+Player.log timing signals — mining delay loops / StartInteraction — which evidently don't reach the
+user's live log the way the captured datasets suggest). Per the user's direction, a
+**timing-independent identity fallback** now runs after the windows in `attribute_chat_gain`:
+while a session is active, gains whose item is identifiable as survey yield attribute to the
+session's **latest use** (`latest_use_id_for_session` reinstated). Identity
+(`is_survey_loot_item`): CDN keyword **`Ore`** (rhodium, stibnite, silver/gold/copper ore, paladium,
+iridium, pyrite, cinnabar, tungsten, orichalcum, molybdenum, gold nugget, …) or **`MetalSlab`**
+(every slab tier), the **six color-crystal family keywords** (`BlueCrystal`/`GreenCrystal`/
+`WhiteCrystal`/`OrangeCrystal`/`YellowCrystal`/`RedCrystal` — the base crystal types the
+color-named mineral surveys yield, incl. Massive/Maximized; Rubywall Crystal is internally
+`RedCrystal`; deliberately NOT the bare `Crystal` keyword, which would drag in emotion pearls /
+mind gems / gem fragments), plus **Semi-Real Hassium** (keyword) and **Magic Sand / Sulfur /
+Saltpeter** (internal names — the dusts carry `MagicDust`, not `Ore`). Extension commit `705813d`.
+**Accepted trade-off (user's explicit choice):** wild-node ore/gems mined during a session count as
+session loot. The chat-only report's assertions encode the contract: undercount >2 = hard failure
+(zero observed), overcount bounded at 2% of expected (observed +15/2400, all wild-node ore in
+50x-povus; the five basic datasets stay exact even with the crystal families active).
+
+## TL;DR — Session 27 (survey chat-loot gating)
+
+**User request:** the Surveying tab counted *every* drop during a session — kill loot, foraging,
+even freshly-crafted survey maps. Root cause: Session 9's chat-authoritative path
+(`attribute_chat_gain`) attributed ANY `[Status] "X added to inventory"` line to the session's
+latest use whenever a session was active. Now only items actually collected from surveys count.
+
+### The gate — per-kind collection windows ([survey/aggregator.rs](src-tauri/src/survey/aggregator.rs))
+- **Basic** (loot lands same game tick as the map's DeleteItem): chat gains attribute only within
+  ±5s (`CHAT_BASIC_WINDOW_SECS`) of a recently-consumed Basic use (`recent_basic_uses` queue).
+  Because Chat.log and Player.log are tailed independently, either stream can be processed first —
+  `claim_unlinked_chat_loot_near` ([survey/persistence.rs](src-tauri/src/survey/persistence.rs))
+  retroactively tags untagged `chat_status` rows in the window at DeleteItem time (live gate covers
+  the other ordering). First chat attribution also marks the use Completed (helps crafting-session
+  auto-end for chat-only users, whose uses previously lingered `pending_loot`).
+- **Motherlode/Multihit** (loot lands at mining-swing completion on the spawned node): a `Mining...`
+  delay loop opens/refreshes a **swing window** `[loop start, start + ceil(duration) + 5s]`
+  (`ChatMiningState`); gains attribute only inside it. Node identity comes from the most recent
+  `InteractionStarted` (≤10s before the loop — mirrors the parser's `pending_interaction`).
+  Engagement opens from: a pending use within the existing 60s walk grace (skipping uses already
+  chat-adopted — `chat_adopted_uses`), a previously-bound node (`known_survey_nodes`, multihit
+  resume after mining something else), or a **"FromSurvey"-named** interaction (grace expired on a
+  long walk; motherlodes are often nameless so grace is their main path). A swing on a provably
+  different node closes the engagement (+marks the use Completed).
+- **Foreign-interaction clip** (the last leak, found via ground truth): corpse loot collected
+  seconds after a swing completes fell inside the trailing slack (3 single items leaked in the
+  50x-povus capture — Ratkin corpse searches at swing+8..10s). An `InteractionStarted` on a
+  different entity while a window is open **clips** it (same-second gains count as the
+  interaction's). Real swing loot lands exactly at start+duration, so nothing legitimate is lost.
+- **Survey maps are never loot** — crafting a map emits the identical chat line; excluded by
+  `lookup_survey_kind` in the live gate and by `internal_name NOT LIKE 'GeologySurvey%'/'MiningSurvey%'`
+  in the retro-claim SQL.
+- `attribute_chat_gain` signature changed: takes `internal_name: Option<&str>` instead of
+  character/server (no longer session-scoped — the window state is the gate);
+  [coordinator.rs](src-tauri/src/coordinator.rs) passes the already-resolved internal name.
+  `persistence::latest_use_id_for_session` removed (was only used by the old ungated path).
+
+### Validation — new chat-only replay harness ([survey/replay_tests.rs](src-tauri/src/survey/replay_tests.rs))
+`chat_only_accuracy_report` (ignored, like the others) replays all six datasets as a **chat-only
+user**: non-survey-map `ProcessAddItem` lines dropped (map lines kept — real chat-only users do get
+uses recorded; it's loot lines that vanish), every chat gain routed through the gate exactly as the
+coordinator wires it (gate → insert tagged/untagged row → retro-claim can pick it up). Result:
+**100.0%, zero extra items** — the fix captures exactly the survey loot. Also fixed the stale CDN
+fixture path (`docs/samples/CDN-full-examples` → [docs/CDN-full-examples](docs/CDN-full-examples)) —
+the Session-9 note "survey-test can't run locally" no longer applies:
+`cargo test --lib survey::replay_tests::accuracy_report -- --ignored --nocapture` (and the
+`chat_only_` variant) both work on this checkout.
+
+### Notes / caveats
+- The **Player.log gain-attribution path is untouched** (Case 0/1/2 in `maybe_inject_survey_use_id`,
+  pending-use pops, multihit rows) — chat gating is parallel state, so verbose-logging users keep
+  their provenance pipeline; the loot summary's chat-wins-per-use dedup is unchanged.
+- Historical sessions keep their previously over-attributed rows (no retroactive cleanup).
+- Speed-bonus flags on the chat path remain lost (`bonus_qty = 0`, Session-9 caveat) — unchanged.
+- Not yet click-tested in `npm run tauri dev` (needs a live surveying run in-game); the ground-truth
+  replays are the strongest available offline verification.
+- The `src-tauri/Cargo.toml` LF↔CRLF artifact persists — intentionally left uncommitted, as usual.
+
+---
+
+# glogger — Session Handoff
+
+**Date:** 2026-07-01 → 07-02 (Session 26 — Build Planner: prose damage mods + damage-type conversions)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed + pushed on top of `bd348bd` (a parallel session's roulette/brewery/settings
+line; see gotchas). Earlier same-day commits `0b1b7f9` (HSD direct-hit fix) + `b5f9e3b`
+(health/armor-specific damage components, landed via the parallel session) are ancestors.
+**Status:** ✅ `cargo test --lib` **485 pass** (~30 new parser/engine tests this arc), `vue-tsc` clean.
+Verified live in `npm run tauri dev` against in-game tooltips: Mindworm (Mentalism), Headcracker + all
+crushing attacks with Viper Halberd, the six Vanquisher's Blade sword abilities, Icesnake knife bar.
+
+## TL;DR — Session 26 (effective-stats tooltip: the damage model grew up)
+
+User-driven arc: "Mindworm's direct damage missing" → "other skills not converting" → "crush→slash items
+ignored" → item-by-item verification. Everything below is in `cdn_commands.rs` (prose/token resolution) +
+`game_data/ability_stats.rs` (pure formula engine) unless noted.
+
+### 1. Mindworm & the three direct-damage shapes (commits `0b1b7f9`, `b5f9e3b`)
+Up-front damage has **3 CDN shapes**: `Damage`, `HealthSpecificDamage` (armor-bypassing —
+Mentalism/Psychology/Vampirism, ~235 abilities; Mindworm's 369 lives HERE, no `Damage` field at all), and
+`ArmorSpecificDamage` (~188). All share the ability's single set of direct-mod arrays. Parser types all
+three; engine emits `direct_damages: Vec<DirectDamageBreakdown>` (kind `normal`/`health`/`armor`), each
+folded with the same buckets. Frontend renders one line per component.
+
+### 2. Deep-dive audit → prose damage mods (coverage 43% → 65%)
+Audited all ~31k damage-relevant mod/item effect lines (scan tsysclientinfo+items EffectDescs, diff granted
+tokens/prose against ability arrays ∪ injected tokens — scratchpad scripts, method worth repeating after CDN
+updates). tsys tiers have **NO structured attribute data** — EffectDescs (display prose) is all there is, so
+prose parsing is the only route. New resolvers:
+- **`resolve_direct_add`** — named-ability prose (**the biggest gap, ~4,500 lines**: "Many Cuts and
+  Debilitating Blow Damage +39", "Aimed Shot deals +25% damage…", "damage is +45"), family-gated like
+  `resolve_dot_add`, fed through the ability's own bucket token (`pick_bucket_token`); folds trailing
+  "and Power Cost -N". Plus skill/keyword-wide "X attacks deal +N[%] damage" (Hammer/Bomb/Bite/Kick).
+- **`parse_conditional_direct_text`** — "Direct Poison and Acid Damage +9 and Indirect Poison and Acid +5
+  (per tick) while Archery skill active" + the Direct-%-list Hammer form → `BOOST/MOD_<TYPE>_DIRECT`
+  tokens gated on equipped skills (chained into `resolve_mod_effects`).
+- **Engine**: dual-scope bare `BOOST/MOD_<TYPE>` tokens ("X Damage (Direct & Per-Tick)", e.g.
+  `{MOD_ELECTRICITY}`) now injected into BOTH direct buckets and matching-type DoT ticks. `Smiting` added
+  to `DAMAGE_TYPES`. Keyword groups `Kick`/`BardBlast`/`Melee`/`Bite` added to `ATTACK_CATEGORY_KEYWORDS`.
+- **Excluded BY DESIGN (the remaining ~35%)**: conditional/temporal prose — "for N seconds", "when you have
+  N% or less Armor", "+N damage to Elite enemies/Elves/…", pet damage. `conditional_tail()` is the
+  gatekeeper; the tooltip shows **unconditional** numbers only. Don't "fix" these into the tooltip.
+
+### 3. Damage-type conversions (Viper Halberd, Icesnake, Vanquisher's Blade, …)
+`harvest_type_rules` pre-pass collects rules from all mod tiers + equipped items; the converted type feeds
+`compute()` so the typed-token injection flips automatically (Crushing gear stops applying, Slashing gear
+starts) and the tooltip header badge shows "Slashing *(was Crushing)*" (new `damageTypeOverride` prop on
+[AbilityTooltip.vue](src/components/Shared/Ability/AbilityTooltip.vue), passed only by
+[AbilityBarSummary.vue](src/components/Character/BuildPlanner/AbilityBarSummary.vue)).
+- **Skill-scoped** ("Staff abilities that normally deal Crushing damage instead deal Slashing damage" —
+  Viper/Tactician's Halberd, Icesnake, Autofreeze Knife): ⚠️ **applies to EVERY ability of the from-type
+  regardless of skill** — user verified against live in-game tooltips that the second combat skill's
+  crushing attacks convert too. The prose's skill word just names the weapon's own skill. Deliberate
+  deviation from the text; don't re-add the skill gate.
+- **Named forms, all 6 data variants**: "damage type becomes X" / "is changed to X", "direct damage becomes
+  X damage" (Horns of Hate), "its damage becomes X instead of Y" (Pixie Flare), "Damage becomes X instead
+  of Y" (Infuriating Fist), "deals X damage instead of Y" (Embrace of Despair — becomes a *Sonic* ability
+  but deals *Nature*), and the **name-list** form "Sword Slash, Riposte, Windstrike, … deal direct Fire
+  damage" (Vanquisher's Blade / Flaming Gazluk Sword). ⚠️ The list form is matched by **normalized name
+  segments** (`parse_names_deal_direct`, lowercase alphanumerics, tier-stripped) because item text spells
+  "Windstrike" while the ability is "Wind Strike" — index-walking stopped at the first unresolvable name
+  and silently killed the conversion for the WHOLE list. Possessive names ("Fairy Fire's") handled by
+  `'s`-stripping in `extract_leading_abilities_rest`.
+- **DoT riders** ("All slashing abilities apply Poison Slice damage for 10 seconds" / "Sword abilities
+  apply Psychic scream…"): gate on the **converted** type or skill, synthesize a DoT fed by the granting
+  item's own `BOOST_DOT_*` token — "(Per Second)" semantics → one tick/second (`sniff_damage_type` maps
+  "Poison Slice"→Poison, "Flaming"→Fire alias).
+
+### 4. Gotchas hit this session (avoid future hiccups)
+- **Two glogger windows, identical titles**: the user's "conversion stopped working" was them hovering the
+  **portable** build (`A:\PortableApps\GLogger\glogger.exe`) instead of the dev build. Check
+  `Get-Process glogger | select Path,StartTime` before debugging "regressions".
+- **Parallel session moved the branch under the running `tauri dev`**: dev jumped to `bd348bd` mid-session
+  → webview hot-reloaded (frontend = new branch) while the Rust backend stayed the pre-move binary until
+  the next watcher rebuild. Uncommitted work survived (git refuses checkouts that would clobber). If
+  tooltips look inconsistent after a branch move, touch a `src-tauri` file to force a rebuild.
+- The in-game tooltip folds skill-level passives/active buffs too — glogger states this in-tooltip and
+  stays gear-only (~2% off is expected, type/mod-applicability should match exactly).
+
+---
+
+# glogger — Session Handoff
+
+**Date:** 2026-06-25 (Session 25 — Farming Database: SQLite share format)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — feature committed (`50343e3`) + this `docs(handoff)` commit; pushed to `origin/dev`
+(a fast-forward that also syncs 14 pre-existing release-merge commits, v0.11.1–v0.11.5).
+**Status:** ✅ `cargo test --lib kill_tracking_commands` green (11 tests incl. new
+`sqlite_export_round_trips`), `cargo build --lib` clean (no warnings), `vue-tsc --noEmit` clean. Not yet
+exercised in `tauri dev` — export/import run through native file dialogs + Rust `invoke`, which a
+frontend-only preview can't drive; the round-trip is covered by the unit test and the CSV path is unchanged.
+
+## TL;DR — Session 25
+
+### 1. SQLite `.db` as a share format for the drop-rate database
+The Farming → **Database** share feature ("Export My Data" / "Import Database" in
+[DatabaseTab.vue](src/components/Farming/DatabaseTab.vue)) gained a portable **SQLite** file format
+**alongside** the existing CSV / JSON / friend-format raw-event support — nothing removed, and both Tauri
+command signatures are unchanged (no other callers affected). Note this is the *share/backup* file format:
+the drop-rate data itself was always SQLite (tables `enemy_kills`, `enemy_kill_loot`,
+`imported_enemy_kill*_agg`, … in the primary `glogger.db`); it was never CSV-backed.
+
+- **Backend** ([kill_tracking_commands.rs](src-tauri/src/db/kill_tracking_commands.rs)):
+  `export_kill_loot_database` now builds the aggregate once (`collect_export_enemies`) and dispatches on the
+  **destination extension** — `.db`/`.sqlite`/`.sqlite3` → `write_sqlite_export`, else `write_csv_export`.
+  The CSV output is **byte-for-byte unchanged** (same columns, derived `drop_rate`, empty-item placeholder
+  row for lootless enemies, most-dropped-first sort).
+- **Export schema:** a standalone DB with `meta(key, value)` (`format`/`format_version`/`exported_at`) plus
+  `enemies(enemy_name, zone, total_kills)` and `loot(enemy_name, zone, item_name, total_quantity,
+  times_dropped)`; `zone` is `NULL` for the unknown-zone bucket. Any existing file at the path is removed
+  first so a prior export's tables can't linger.
+- **Import** (`import_kill_loot_database`): detects SQLite by the **16-byte file-header magic**
+  (`file_is_sqlite`), then `parse_sqlite_drop_data` (read-only open, validates the `enemies` table exists,
+  attaches loot per (enemy, zone), errors clearly on a non-glogger DB). Everything else still flows through
+  the text path (`parse_drop_data` → CSV aggregated / raw-event / legacy JSON). The idempotent,
+  `source_label`-tagged merge into the `imported_*` tables is unchanged.
+- **Deliberate asymmetry:** export chooses format by **extension** (we create the file, so the extension is
+  the user's intent); import chooses by **header magic** (a received file's name can't be trusted, and
+  reading a binary DB as UTF-8 text would fail/garble).
+- **Frontend:** a CSV/SQLite `<select>` next to *Export My Data*, persisted in the `database` view prefs
+  (`exportFormat`, default `csv`); the choice drives the save-dialog filter and the suggested filename
+  extension (`oddio-0001.csv` vs `oddio-0001.db`). The import dialog now also accepts
+  `.db`/`.sqlite`/`.sqlite3`.
+
+### 2. Verification
+`cargo test --lib kill_tracking_commands` → **11 passed** including the new `sqlite_export_round_trips`
+(lossless round-trip through write→read: a lootless enemy, the NULL-zone bucket, and most-dropped-first loot
+order). `cargo build --lib` clean. `vue-tsc --noEmit` clean.
+
+### 3. Notes for next session
+- This push fast-forwards `origin/dev` and also carries 14 pre-existing **release-sync merge commits**
+  (v0.11.1–v0.11.5) that local `dev` was ahead by — expected, not from today's work.
+- `src-tauri/Cargo.toml` shows as modified in `git status` but it's **pure LF→CRLF line-ending noise** (no
+  content diff under `--ignore-space-at-eol`) — intentionally left uncommitted.
+- Possible follow-ups (not done): extend the same SQLite option to the **Brewery** discoveries import and the
+  **Words of Power** CSV export; and a live `tauri dev` click-through of an actual export→import.
+
+---
+
+**Date:** 2026-06-24 (Session 24 — Build Planner: effective ability stats + indirect-DoT rules)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed + pushed (`2cd8bfa`, `df944df`, `69a3f34`); **[PR #22 `dev → main`](https://github.com/crisp-oddio/glogger-oddio/pull/22) open**.
+**Status:** ✅ `cargo test --lib` green (8 `ability_stats` formula tests), `vue-tsc` clean. Effective-stats
+tooltip + slot toggle verified live in `npm run tauri dev`; the indirect-DoT correction is pushed and the
+dev build hot-rebuilds — user is verifying the numbers against the in-game tooltip.
+
+## TL;DR — Session 24
+
+### 1. Effective ability stats on hover (Build Planner)
+Hovering an equipped ability now shows its full combat data folded with the build's assigned gear mods —
+mirroring the in-game tooltip — for **damage, DoTs, heals/special values, and power/rage costs**.
+- **Engine (Rust, all formula logic, unit-tested):** new
+  [game_data/ability_stats.rs](src-tauri/src/game_data/ability_stats.rs) — `compute(stats, damage_type,
+  &[ModEffect]) -> AbilityBuildStats`. PG direct-damage formula:
+  `final = base·(1 + ΣModBaseDamage% + ΣModDamage%) + ΣDeltaDamage·(1 + ΣModDamage%)`. Each mod token is
+  classified by **exact membership** in the ability's attribute arrays (no fuzzy matching).
+- **Typed combat stats:** [game_data/abilities.rs](src-tauri/src/game_data/abilities.rs) now parses
+  `DoTs[]` and `SpecialValues[]` into typed `CombatStats.dots` / `.special_values` (added to the known-keys
+  list so they leave `extra`).
+- **Command:** `compute_ability_build_stats(ability_id, mods, pvp)` in
+  [cdn_commands.rs](src-tauri/src/cdn_commands.rs) (registered in [lib.rs](src-tauri/src/lib.rs)) resolves
+  each preset mod's `{TOKEN}{VALUE}` effects to raw tokens (factored `parse_token_value` helper) and calls
+  the engine.
+- **Frontend:** [useAbilityBuildStats.ts](src/composables/useAbilityBuildStats.ts) (cached per ability +
+  mods signature), [abilityStats.ts](src/types/abilityStats.ts), and
+  [AbilityEffectiveStats.vue](src/components/Character/BuildPlanner/AbilityEffectiveStats.vue) rendered in
+  the bar-hover tooltip in
+  [AbilityBarSummary.vue](src/components/Character/BuildPlanner/AbilityBarSummary.vue) (replaced the old
+  `AbilityModBreakdown.vue`, deleted). Known limit stated in-tooltip: only gear mods are modeled, not
+  skill-level passives / active buffs — so it's "base + this build's gear," ~2% off the live number.
+
+### 2. DoT (indirect) damage rule — the important subtlety
+DoT damage is **indirect** damage, moved **only** by indirect-damage modifiers — **never** by
+base-skill-damage % or the ability's *direct*-damage arrays. (Two earlier wrong cuts: first applied
+ability-level direct mods per tick; corrected after the user confirmed against the in-game tooltip.)
+Indirect modifiers = the DoT's own per-ability tokens **plus** the generic per-damage-type and universal
+indirect attributes, applied globally by the DoT's `DamageType`:
+`per-tick = (DamagePerTick + Σ flat-indirect) · (1 + Σ %-indirect)`, where flat = `dot.AttributesThatDelta`
+∪ `{BOOST_<TYPE>_INDIRECT, BOOST_UNIVERSAL_INDIRECT}`, % = `dot.AttributesThatMod` ∪
+`{MOD_<TYPE>_INDIRECT, MOD_UNIVERSAL_INDIRECT}` (`indirect_tokens()` helper; `<TYPE>` = `DamageType`
+upper-cased). **Applies to every DoT representation:** the `DoTs[]` array (covers all 1,188 hybrid
+direct-hit + DoT abilities — direct hit uses direct mods, each tick indirect) **and** DoTs encoded as
+SpecialValues (reflect-style, e.g. Tough Hoof — gated on an `ABILITYDOT`/`_INDIRECT` token so heals/armor-
+over-time stay out; damage type parsed from the effect text).
+
+### 3. Slot deselect toggle + Pinia HMR
+- Clicking the already-selected equipment slot now **deselects** it, collapsing the slot detail panel back
+  to the global "Search All Mods" catalog (`selectSlot` toggle in
+  [buildPlannerStore.ts](src/stores/buildPlannerStore.ts), shown when `selectedSlot` is null in
+  [BuildPlannerScreen.vue](src/components/Character/BuildPlanner/BuildPlannerScreen.vue)).
+- **Dev-env gotcha fixed:** added `acceptHMRUpdate` to `buildPlannerStore` — without it, editing a store
+  action during `tauri dev` left the already-instantiated singleton running stale code (the deselect toggle
+  appeared to do nothing until a full reload). Other stores still lack it.
+
+### 4. Build import (gorgonexplorer + PgBuilder) — BUILT, PARKED uncommitted
+Per the user's "ditch the import stuff for a moment," this is **complete on disk but intentionally NOT
+committed** (kept out of PR #22). Sitting in the working tree:
+`src-tauri/src/db/build_planner_commands.rs` (refactored shared `insert_exported_build` + the two import
+commands), import hunks in `lib.rs` + `buildPlannerStore.ts`, `PaperDollLayout.vue` (auto-detecting import
++ unmatched report), `ModalDialog.vue` (multiline). Formats (both fully reverse-engineered):
+- **PgBuilder** — JSON `{ "Build": {…} }` with **exact internal IDs**: `ability_<id>`, `item_<id>`,
+  `power_<id>`+`PowerTier_N` (the `power_<id>` is the tsys `client_info` key → `internal_name`). No fuzzy
+  matching. Slots: `Main Hand`→`MainHand`, `Neck`→`Necklace`, `Waist`→`Belt`, `Racial`→skip.
+- **gorgonexplorer** — `GET https://api.gorgonexplorer.com/api/builds/{id}` (accept a share URL or bare id).
+  `firstSkill`/`secondSkill`, `selectedGear` slot→`item_<id>`, abilities by exact name (incl. tier), and
+  `selectedMods` resolved **text** → fuzzy reverse-match to power+tier (skill-narrowed; unmatched reported
+  for manual add — user chose "best-effort + report").
+**Next:** finish/verify the import path (`cargo test` + a live import of both the gx URL and a PgBuilder
+export), then commit when the user wants it in the PR.
+
+---
+
+# glogger — Session Handoff
+
+**Date:** 2026-06-24 (Session 23 — Council-wallet estimator, Tier 1)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` (unreleased — committed + pushed, no release dispatched)
+**Status:** ✅ Backend `cargo test --lib` **437 pass** (5 new parser tests), `vue-tsc` clean. Migration
+v56 is `CREATE TABLE IF NOT EXISTS` (idempotent). **Not yet click-tested in the live app** — needs a
+`npm run tauri dev` run + a character export to see the council figure populate (browser preview can't
+mount Tauri `invoke()`, the usual limitation).
+
+## TL;DR — Session 23 (live council-balance estimate)
+
+**Problem the user raised:** the dashboard only shows "relevant" data right after a manual character +
+storage export; live tailing doesn't keep currency current. **Audit finding (the crux):** Player.log
+contains **no** absolute currency value anywhere (`ProcessVendorUpdateAvailableGold` is the *vendor's*
+budget; the login `ProcessSetAttributes` dump has no gold field; NPC dialog "costs N councils" is a
+quoted price, not a debit). The wallet is one currency — internal **`GOLD`**, shown as "councils" =
+"coins". **Gains are well-visible in chat; spends are almost entirely invisible** (vendor buys,
+training, vault slots, hiring, trades produce no log line). So the only viable model is **anchor on the
+last export + accumulate visible chat deltas**, which **drifts high** until the next export re-anchors.
+
+### What shipped (Tier 1)
+1. **Parser** ([chat_status_parser.rs](src-tauri/src/chat_status_parser.rs)) — new `try_councils_misc`
+   adds 5 previously-dropped wallet lines, all → signed `CouncilsChanged`: `You receive N coins.` (+,
+   ~776 in the user's 61 logs — the big gap), `You recovered N Councils stolen by <mob>.` (+),
+   `You retrieve N stolen coins.` (+), `You were given N coins by <player>!` (+),
+   `<mob> stole N Councils!` (−). 5 unit tests. Existing `CoinsLooted` (corpse, 6851 events) +
+   `CouncilsChanged` (received/used) already covered the rest.
+2. **Migration v56** ([migrations.rs](src-tauri/src/db/migrations.rs)) — `currency_estimate` table
+   (PK char/server/currency): `anchor_amount`, `anchor_at`, `delta_since`. Estimate = anchor + delta.
+3. **Anchor seeding** ([character_commands.rs](src-tauri/src/db/character_commands.rs)
+   `seed_game_state_from_snapshot`) — on export import, upsert anchor from `report.currencies["GOLD"]`
+   at the export `Timestamp` (Z-stripped to "%Y-%m-%d %H:%M:%S" UTC), **resetting `delta_since=0`**.
+   Guarded so an older re-imported export can't clobber a fresher anchor.
+4. **Live accrual** ([coordinator.rs](src-tauri/src/coordinator.rs)) — new match arms for `CoinsLooted`
+   / `CouncilsChanged` call `accrue_currency_delta(amount, event_ts)`, which adds the signed delta to
+   `delta_since` for the active char **only when an anchor exists AND `event_ts > anchor_at`** (so
+   replaying pre-export chat during catch-up can't double-count).
+5. **Command + store** — `get_currency_estimate` ([game_state_commands.rs](src-tauri/src/db/game_state_commands.rs),
+   registered in [lib.rs](src-tauri/src/lib.rs)) returns `{anchor_amount, anchor_at, delta_since,
+   estimated, has_anchor}`. [gameStateStore.ts](src/stores/gameStateStore.ts) gains `currencyEstimate`
+   + `fetchCurrencyEstimate()` (called in `loadAll`), with **optimistic** `applyWalletDelta()` on live
+   `CoinsLooted`/`CouncilsChanged` so the figure ticks without a round-trip.
+   [characterStore.ts](src/stores/characterStore.ts) re-fetches the estimate after a fresh export
+   re-anchors it.
+6. **UI** ([CouncilsWidget.vue](src/components/Dashboard/widgets/CouncilsWidget.vue)) — header shows
+   `estimated.toLocaleString()` councils + "≈ est. · anchored Nh ago" (or "no export yet — import to
+   anchor"), with a tooltip stating income is tracked but spends drift it high. Activity feed unchanged.
+
+### Validated on real data
+Ran the 5 patterns over a busy real log (`Chat-26-04-08.log`): net **+27,436** councils for the day
+(29,273 gains across 220 events, −1,837 from 5 mugger thefts). The 12 `receive coins` that day were
+previously dropped.
+
+### Known limitation / Tier 2 (deferred, by design)
+Spends are invisible in both logs, so the estimate **overestimates** between exports — fine for a
+farmer (gains ≫ spends), drifts fast for a merchant/crafter. Re-anchoring on each export bounds the
+error. **Tier 2** (not built): infer purchases by correlating `ProcessVendorScreen` item prices with
+the matching `ProcessAddItem(…, True)` — fragile, separate follow-up. Also: the optimistic client
+counter isn't idempotent against a chat re-scan (same caveat as `item_transactions`); a re-export fixes
+it. **Next:** click-test in `npm run tauri dev` — export a character, confirm the figure anchors and
+ticks on coin loot.
+
+---
+
+# glogger — Session Handoff
+
+**Date:** 2026-06-23 (Session 22 — Build Planner UX batch → v0.11.1)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` (reconciled onto v0.11.0; releasing **v0.11.1**)
+**Status:** ✅ Build-planner enhancements, verified live in `npm run tauri dev` (HMR through the whole
+session) + `vue-tsc` clean. Committed, pushed, release dispatched.
+
+## TL;DR — Session 22 (Build Planner UX)
+
+All in the Character → Build Planner. v0.11.0 (PR #20) merged first; this batch ships as v0.11.1.
+
+### 1. Ability hover tooltip — applied mods + effects
+Hovering an ability in the bars beneath the equipment now shows, below the base ability info, an
+**"Applied mods (N)"** section listing each mod that targets that ability and its effects.
+- **New** [useBuildModEffects.ts](src/composables/useBuildModEffects.ts) — module-level singleton
+  (detached `effectScope` + watch on `presetMods`) that resolves each mod's structured effects and
+  the TSys↔Ability map **once**, exposing `effectsForAbility(id)` / `modsForAbility(id)`.
+- **New** [AbilityModBreakdown.vue](src/components/Character/BuildPlanner/AbilityModBreakdown.vue) —
+  the tooltip section. Added into the existing `EntityTooltipWrapper` in
+  [AbilityBarSummary.vue](src/components/Character/BuildPlanner/AbilityBarSummary.vue).
+- [BuildSummary.vue](src/components/Character/BuildPlanner/BuildSummary.vue) refactored to consume the
+  composable (its "By Ability" view is now a reactive computed off the same source — no dup logic).
+
+### 2. Collapsible left-pane sections (persisted)
+[PaperDollLayout.vue](src/components/Character/BuildPlanner/PaperDollLayout.vue) — **Equipment** and
+**Abilities** got chevron show/hide headers matching the existing **Set Defaults** one. All three
+states persist via `useViewPrefs('build-planner', { showDefaults, showEquipment, showAbilities })`
+(distinct from `SidePane`'s `build-planner.pane.*` keys). Also added Skill 1 / Skill 2 default
+dropdowns to Set Defaults earlier in the day (v0.11.0).
+
+### 3. "Search All Mods" → full catalog search + apply
+[GlobalModSearch.vue](src/components/Character/BuildPlanner/GlobalModSearch.vue) — was only filtering
+mods already in the build; now searches the **entire mod catalog**:
+- Backed by the existing `search_tsys` command; shown whenever **no slot is selected**
+  ([BuildPlannerScreen.vue](src/components/Character/BuildPlanner/BuildPlannerScreen.vue) dropped the
+  `presetMods.length > 0` gate). Grouped by skill (Generic last), debounced, capped 300.
+- **Inline effects:** each result shows its highest-tier effect text, batch-resolved in one
+  `get_tsys_power_info_batch` call per search.
+- **Click-to-apply:** each result's slots are clickable `+ Slot` buttons. Clicking applies the mod to
+  that slot via new store action
+  **`addCatalogModToSlot(slotId, internalName)`** ([buildPlannerStore.ts](src/stores/buildPlannerStore.ts))
+  — loads that slot's level-appropriate powers, enforces capacity/dup/skill-rarity constraints
+  (`computeSlotConstraints`), picks the tier, and adds **without** switching away from the search.
+  Transient success/failure message shown.
+
+### Verification / release
+`vue-tsc` clean throughout; exercised live via the running dev build (HMR). Released via the two-phase
+flow: reconciled `dev` onto `main` (v0.11.0), dispatched `release.yml --ref dev -f version=0.11.1`.
+
+---
+
+# glogger — Session Handoff
+
+**Date:** 2026-06-23 (Session 21 — four-part feature batch; committing per step)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` (reconciled to v0.10.1 base; **v0.11.0 release PR open**)
+**Status:** ✅ All four tasks done, each committed + pushed individually. `vue-tsc` + `cargo check`
+green after every step; farming upsert covered by 2 passing unit tests; CI **validate** (build +
+`cargo test`) green. UI changes (planner dropdowns, dashboard resize) still need a `npm run tauri
+dev` click-test — computer-use couldn't drive the dev window (grant resolves to the *portable* exe
+path, masking the dev build), and the browser preview can't mount the app (needs Tauri `invoke()`).
+
+## Release — v0.11.0 (Session 21)
+
+Repo uses a **two-phase release flow** now (CLAUDE.md's old "push tag" note is stale):
+1. **Release** workflow (`release.yml`, workflow_dispatch) → validates, bumps version on a
+   `release/vX` branch, opens a **PR to `main`** (main is protected, no direct push).
+2. Merging that PR → **Release Publish** (`release-publish.yml`) tags + builds all installers +
+   GitHub Release, then Flatpak attaches.
+
+This session: `dev` had diverged from `main` — `main` was at **v0.10.1** (a version-only release,
+PR #19, *not* containing our features) while `dev` was at 0.10.0 + the 5 feature/test commits.
+Merged `origin/main` into `dev` (clean — our commits never touch version files, so no conflict;
+version baseline became 0.10.1), pushed `dev` (`e6b43d2`), then dispatched `release.yml --ref dev
+-f version=minor`. Validate + open-release-pr both green →
+**[release: v0.11.0 — PR #20](https://github.com/crisp-oddio/glogger-oddio/pull/20)** is OPEN.
+**Next action (user):** approve + merge PR #20 to publish v0.11.0.
+
+## TL;DR — Session 21 (in progress)
+
+A batch of four user-requested features. Each is committed & pushed individually. All four complete.
+
+### 1. ✅ Periodic farming-session auto-save (crash protection)
+Previously an active farming session lived only in the frontend Pinia store
+([farmingStore.ts](src/stores/farmingStore.ts)) and was persisted **only** when the user clicked
+"End Session" (`save_farming_session` INSERT). A crash/power-loss mid-session lost everything.
+- **Backend** ([farming_commands.rs](src-tauri/src/db/farming_commands.rs)) — `SaveFarmingSessionInput`
+  gained an optional `session_id`. `save_farming_session` is now an **upsert**: with `session_id`
+  set it UPDATEs that row and **replaces** its child rows (skills/items/favors/kills) from the
+  fresh snapshot (no double-count); without it, INSERTs as before. Returns the row id either way.
+- **Frontend** ([farmingStore.ts](src/stores/farmingStore.ts)) — extracted the snapshot builder into
+  `buildSessionInput(end)` shared by auto-save and `endSession`. New `currentSessionId` ref tracks
+  the in-progress row. A 60s ticker (`maybeAutoSave`) checks `settings.farmingAutosaveMinutes`
+  (so changing the setting takes effect live) and persists every N minutes; empty sessions are
+  skipped until they have data. `endSession` now updates the same row in place (no duplicate);
+  `startSession`/`reset` clear the id.
+- **Setting** — `farming_autosave_minutes: u32` (default **5**; 0 = off) in
+  [settings.rs](src-tauri/src/settings.rs) + [settingsStore.ts](src/stores/settingsStore.ts).
+  New **Farming** section in [AppSettingsTab.vue](src/components/Settings/AppSettingsTab.vue) with an
+  Off / 5 / 10 / 30 min dropdown.
+- **Recovery behaviour:** after a crash the partial session is already a row in the DB (end_time
+  NULL) and shows in Session History. The store does not auto-resume the session on next launch —
+  the *data* is preserved, which was the requirement. Verified via `vue-tsc` + `cargo check` clean.
+
+### 2. ✅ Serialized export filenames (`charname-NNNN.csv`)
+The Farming → Database **Export** previously defaulted to `glogger-drop-rates-<YYYY-MM-DD>.csv`.
+Now suggests `<charname>-<NNNN>.csv` — e.g. `oddio-0001`, `oddio-0002`, … — in
+[DatabaseTab.vue](src/components/Farming/DatabaseTab.vue).
+- Char name = `settings.activeCharacterName` (sanitized to `[a-z0-9_-]`, lowercased), falling back to
+  `glogger` when no character is loaded.
+- `NNNN` is a **global** 4-digit zero-padded serial persisted via `useViewPrefs("database",
+  { exportSerial })`. The next serial is offered as the default filename and only **advances after a
+  successful export** (cancelling the dialog or a failed export does not consume a number).
+- **Design note:** the counter is global (total exports), not per-character — matches "how many
+  times we've exported." Frontend-only change; `vue-tsc` clean.
+
+### 3. ✅ Build Planner — default combat-skill dropdowns
+The build planner already had `skill_primary`/`skill_secondary` on the preset (used as the per-slot
+fallback — SlotDetailPanel shows "X (default)"), but they were only settable indirectly. Added two
+**Skill 1 / Skill 2** dropdowns to the **Set Defaults** section in
+[PaperDollLayout.vue](src/components/Character/BuildPlanner/PaperDollLayout.vue), directly under the
+existing Rarity + Level row, so you can blanket-apply the two combat skills for the whole build
+while still overriding per item.
+- Options are `store.combatSkills` (loaded on mount) keyed by display `name` (matches the per-slot
+  picker), plus a **None** entry to clear the default.
+- Handlers call `updatePreset({ skill_primary|skill_secondary })` then `onBuildParamsChanged()` to
+  refresh available powers for the selected slot. Also added the missing `onBuildParamsChanged()`
+  to the rarity handler for consistency.
+- **Store fix** ([buildPlannerStore.ts](src/stores/buildPlannerStore.ts)) — `updatePreset` used `??`
+  for the nullable skill fields, which would have ignored an explicit `null` (the "None" clear).
+  Switched to an `in`-operator check so clearing actually persists. `vue-tsc` clean.
+
+### 4. ✅ Dashboard widget resize now reflows neighbours (column-span, not px)
+**Problem (the Session-20 known limitation, now fixed):** the right-edge resize set an explicit
+**pixel width** on the card while it still occupied its full grid-column track(s), so shrinking a
+widget left an unusable gap — no neighbour could move into the freed space.
+**Fix:** resize now changes the card's **grid-column span**, snapping to whole columns, so the grid
+genuinely frees tracks and subsequent widgets reflow into them (live, during the drag).
+- [DashboardCard.vue](src/components/Dashboard/DashboardCard.vue) — `width` prop → `span` prop;
+  applies `style="grid-column: span N"` (overrides the Tailwind `col-span-*` class) when a span is
+  set. The handle measures the grid geometry (`gridTemplateColumns` track count + `columnGap`) from
+  the card's parent grid, derives the current span from rendered width, and snaps the drag to
+  `[1, columnCount]`. Stray-click guard + double-click-to-reset preserved (`resize` 0 = reset).
+- [DashboardView.vue](src/components/Dashboard/DashboardView.vue) — `cardWidths` pref →
+  **`cardSpans`** (`Record<string, number>`); `setCardSpan` stores the override (0 = delete → revert
+  to the widget's default size class). Default `col-span-*` size classes still apply when no override.
+- **Migration note:** old per-widget `cardWidths` (px) are no longer read; affected widgets revert
+  to their default size until resized again — acceptable, clean break from the px approach.
+- **Verification:** `vue-tsc` clean. Not click-tested in-app this step — the browser-only preview
+  can't mount the dashboard (startup needs Tauri `invoke()`), same limitation noted in Session 20;
+  needs a `npm run tauri dev` drag-test to confirm the reflow visually.
+
+---
+
+# glogger — Session Handoff
+
 **Date:** 2026-06-22 (Session 20 — README refresh + screenshots, dev-sync hook, resizable widgets)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` (synced even with `main` at v0.9.24; widget-resize committed on top)

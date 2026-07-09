@@ -24,10 +24,12 @@
       :pricing-mode="pricingMode"
       :customer-provides="localCustomerProvides"
       :pricing-calculation="pricingCalculation"
+      :consume-buffer-pct="store.consumeBufferPct"
       @resolve="onResolve"
       @toggle-intermediate="toggleIntermediateGlobal"
       @set-all-intermediates="setAllIntermediates"
-      @update-customer-provides="onCustomerProvidesChange" />
+      @update-customer-provides="onCustomerProvidesChange"
+      @update-buffer="onBufferChange" />
 
     <template v-if="!store.activeGroupName" #right>
       <ProjectRecipePanel
@@ -79,6 +81,23 @@ const { prefs: selectionPrefs, update: updateSelectionPrefs } = useViewPrefs(
   "crafting-projects-selection",
   { lastProjectId: null as number | null, lastGroupName: null as string | null },
 );
+
+// Consume-chance safety buffer (%) — persisted via view-prefs and pushed into the
+// crafting store, which applies it during ingredient resolution.
+const { prefs: bufferPrefs, update: updateBufferPrefs } = useViewPrefs(
+  "crafting-buffer",
+  { consumeBufferPct: 10 },
+);
+store.consumeBufferPct = bufferPrefs.value.consumeBufferPct;
+
+function onBufferChange(pct: number) {
+  const clamped = Math.max(0, Math.min(100, Math.round(pct) || 0));
+  if (clamped === store.consumeBufferPct) return;
+  updateBufferPrefs({ consumeBufferPct: clamped });
+  store.consumeBufferPct = clamped;
+  store.clearCaches();
+  onResolve();
+}
 
 // ── Right pane config (hidden in group view) ────────────────────────────────
 
@@ -476,8 +495,13 @@ async function resolveGroup(groupName: string) {
       const quantity = targetInfo ? targetInfo.effectiveQty : entry.quantity;
       if (quantity <= 0) continue;
 
-      const recipe = await gameData.resolveRecipe(entry.recipe_name);
+      let recipe = await gameData.resolveRecipe(entry.recipe_name);
       if (!recipe) continue;
+      // Pin variable slots to this entry's chosen combo, if any, so the resolver
+      // reports the exact ingredients rather than generic keyword aggregates.
+      if (entry.slot_item_ids && entry.slot_item_ids.length > 0) {
+        recipe = store.pinRecipeSlots(recipe, entry.slot_item_ids);
+      }
 
       const resolved = await store.resolveRecipeIngredients(
         recipe,
@@ -566,6 +590,17 @@ async function resolveProject() {
       intermediateStockMap.value = new Map();
     }
 
+    // Memoize recipe lookups by name — a project can hold many entries of the
+    // same recipe (e.g. one per brewing combo), and re-resolving each over IPC
+    // is the main cost for large projects.
+    const recipeByName = new Map<string, Awaited<ReturnType<typeof gameData.resolveRecipe>>>();
+    const getRecipe = async (name: string) => {
+      if (recipeByName.has(name)) return recipeByName.get(name)!;
+      const r = await gameData.resolveRecipe(name);
+      recipeByName.set(name, r);
+      return r;
+    };
+
     for (const entry of store.activeProject.entries) {
       if (gen !== resolveGeneration) return;
 
@@ -573,38 +608,49 @@ async function resolveProject() {
       const quantity = targetInfo ? targetInfo.effectiveQty : entry.quantity;
       if (quantity <= 0) continue;
 
-      const recipe = await gameData.resolveRecipe(entry.recipe_name);
-      if (!recipe) continue;
-
-      const resolved = await store.resolveRecipeIngredients(
-        recipe,
-        quantity,
-        false,
-        new Set(),
-        expandItemIds.size > 0 ? expandItemIds : undefined,
-        intermediateStock,
-      );
-
-      const entryIntermediates = store.collectIntermediates(resolved.ingredients);
-      for (const inter of entryIntermediates) {
-        const existing = intermediateMap.get(inter.item_id);
-        if (existing) {
-          existing.quantity_produced += inter.quantity_produced;
-          existing.crafts_needed += inter.crafts_needed;
-        } else {
-          intermediateMap.set(inter.item_id, { ...inter });
+      // Resolve each entry independently — one malformed entry must not blank the
+      // whole project's material list.
+      try {
+        let recipe = await getRecipe(entry.recipe_name);
+        if (!recipe) continue;
+        // Pin variable slots to this entry's chosen combo, if any, so the resolver
+        // reports the exact ingredients rather than generic keyword aggregates.
+        if (entry.slot_item_ids && entry.slot_item_ids.length > 0) {
+          recipe = store.pinRecipeSlots(recipe, entry.slot_item_ids);
         }
-      }
 
-      const flat = store.flattenIngredients(resolved.ingredients);
-      for (const [key, mat] of flat) {
-        const existing = combinedMaterials.get(key);
-        if (existing) {
-          existing.quantity += mat.quantity;
-          existing.expected_quantity += mat.expected_quantity;
-        } else {
-          combinedMaterials.set(key, { ...mat });
+        const resolved = await store.resolveRecipeIngredients(
+          recipe,
+          quantity,
+          false,
+          new Set(),
+          expandItemIds.size > 0 ? expandItemIds : undefined,
+          intermediateStock,
+        );
+
+        const entryIntermediates = store.collectIntermediates(resolved.ingredients);
+        for (const inter of entryIntermediates) {
+          const existing = intermediateMap.get(inter.item_id);
+          if (existing) {
+            existing.quantity_produced += inter.quantity_produced;
+            existing.crafts_needed += inter.crafts_needed;
+          } else {
+            intermediateMap.set(inter.item_id, { ...inter });
+          }
         }
+
+        const flat = store.flattenIngredients(resolved.ingredients);
+        for (const [key, mat] of flat) {
+          const existing = combinedMaterials.get(key);
+          if (existing) {
+            existing.quantity += mat.quantity;
+            existing.expected_quantity += mat.expected_quantity;
+          } else {
+            combinedMaterials.set(key, { ...mat });
+          }
+        }
+      } catch (entryErr) {
+        console.warn(`[crafting] Failed to resolve project entry "${entry.recipe_name}":`, entryErr);
       }
     }
 
@@ -621,6 +667,7 @@ async function resolveProject() {
     }
   } catch (e) {
     console.error("[crafting] Project resolve failed:", e);
+    invoke("log_startup", { message: `[DIAG] resolveProject FAILED: ${e instanceof Error ? e.message : String(e)}` }).catch(() => {});
   } finally {
     if (gen === resolveGeneration) {
       resolvingAll.value = false;

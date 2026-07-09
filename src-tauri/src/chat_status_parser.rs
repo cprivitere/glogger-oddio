@@ -81,6 +81,12 @@ pub enum ChatStatusEvent {
         timestamp: String,
         file_path: String,
     },
+
+    /// "Roulette ball ended on N!" — the winning number of a casino roulette
+    /// spin (European single-zero wheel, so `number` is 0..=36). This is the
+    /// only roulette event written to the logs; the player's own bet is an
+    /// on-screen toast that is never logged, so only outcomes are trackable.
+    RouletteResult { timestamp: String, number: u32 },
 }
 
 /// Try to parse a Status channel ChatMessage into a structured event.
@@ -104,9 +110,22 @@ pub fn parse_status_message(msg: &ChatMessage) -> Option<ChatStatusEvent> {
         .or_else(|| try_anatomy_result(text, &ts))
         .or_else(|| try_coins_looted(text, &ts))
         .or_else(|| try_councils_changed(text, &ts))
+        .or_else(|| try_councils_misc(text, &ts))
         .or_else(|| try_summoned(text, &ts))
         .or_else(|| try_item_studied(text, &ts))
         .or_else(|| try_report_saved(text, &ts))
+        .or_else(|| try_roulette_result(text, &ts))
+}
+
+/// "Roulette ball ended on N!" — casino roulette spin outcome.
+fn try_roulette_result(text: &str, ts: &str) -> Option<ChatStatusEvent> {
+    let prefix = "Roulette ball ended on ";
+    let inner = text.strip_prefix(prefix)?.strip_suffix('!')?;
+    let number: u32 = inner.parse().ok()?;
+    Some(ChatStatusEvent::RouletteResult {
+        timestamp: ts.to_string(),
+        number,
+    })
 }
 
 /// "X added to inventory." or "X xN added to inventory."
@@ -314,6 +333,65 @@ fn try_councils_changed(text: &str, ts: &str) -> Option<ChatStatusEvent> {
             amount: -amount,
         });
     }
+    None
+}
+
+/// Wallet-affecting [Status] lines beyond the corpse-loot / received-Councils
+/// basics. The wallet is ONE currency (internal `GOLD`, shown in-game as
+/// "councils"), so these all map to a signed `CouncilsChanged`. Gains are
+/// positive; the mugger theft is negative. From a real-log audit, these are the
+/// remaining visible wallet deltas (spends are mostly invisible in the logs):
+///   "You receive N coins."                       (+)  autoloot / coin-sack open
+///   "You recovered N Councils stolen by <mob>."  (+)
+///   "You retrieve N stolen coins."               (+)
+///   "You were given N coins by <player>!"        (+)
+///   "<mob> stole N Councils!"                    (−)
+fn try_councils_misc(text: &str, ts: &str) -> Option<ChatStatusEvent> {
+    /// Parse a comma-grouped integer ("1,700" → 1700).
+    fn num(s: &str) -> Option<i64> {
+        s.replace(',', "").parse().ok()
+    }
+    let signed = |amount: i64| ChatStatusEvent::CouncilsChanged {
+        timestamp: ts.to_string(),
+        amount,
+    };
+
+    // "You receive N coins." — distinct from "You received N Councils." and from
+    // the corpse-search "found N coins." line (both handled earlier).
+    if let Some(rest) = text.strip_prefix("You receive ") {
+        if let Some(n) = rest.strip_suffix(" coins.") {
+            return num(n).map(signed);
+        }
+    }
+
+    // "You recovered N Councils stolen by <mob>."
+    if let Some(rest) = text.strip_prefix("You recovered ") {
+        if let Some(idx) = rest.find(" Councils stolen by ") {
+            return num(&rest[..idx]).map(signed);
+        }
+    }
+
+    // "You retrieve N stolen coins."
+    if let Some(rest) = text.strip_prefix("You retrieve ") {
+        if let Some(n) = rest.strip_suffix(" stolen coins.") {
+            return num(n).map(signed);
+        }
+    }
+
+    // "You were given N coins by <player>!"
+    if let Some(rest) = text.strip_prefix("You were given ") {
+        if let Some(idx) = rest.find(" coins by ") {
+            return num(&rest[..idx]).map(signed);
+        }
+    }
+
+    // "<mob> stole N Councils!" — a wallet loss (often partly recovered later).
+    if let Some(idx) = text.find(" stole ") {
+        if let Some(n) = text[idx + " stole ".len()..].strip_suffix(" Councils!") {
+            return num(n).map(|amount| signed(-amount));
+        }
+    }
+
     None
 }
 
@@ -669,6 +747,54 @@ mod tests {
     }
 
     #[test]
+    fn test_misc_receive_coins() {
+        // "You receive N coins." (autoloot / coin-sack open) — a gain, and must
+        // NOT be swallowed by "received N Councils" or the corpse-search parser.
+        let msg = status_msg("You receive 288 coins.");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::CouncilsChanged { amount, .. } => assert_eq!(amount, 288),
+            other => panic!("Expected CouncilsChanged(+288), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_misc_recovered_stolen_councils() {
+        let msg = status_msg("You recovered 1,250 Councils stolen by Ratkin Mugger.");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::CouncilsChanged { amount, .. } => assert_eq!(amount, 1250),
+            other => panic!("Expected CouncilsChanged(+1250), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_misc_retrieve_stolen_coins() {
+        let msg = status_msg("You retrieve 73 stolen coins.");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::CouncilsChanged { amount, .. } => assert_eq!(amount, 73),
+            other => panic!("Expected CouncilsChanged(+73), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_misc_given_coins_by_player() {
+        let msg = status_msg("You were given 500 coins by Lenia!");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::CouncilsChanged { amount, .. } => assert_eq!(amount, 500),
+            other => panic!("Expected CouncilsChanged(+500), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_misc_mugger_stole_councils() {
+        // The only visible wallet *loss* in chat — must be negative.
+        let msg = status_msg("Ratkin Mugger stole 320 Councils!");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::CouncilsChanged { amount, .. } => assert_eq!(amount, -320),
+            other => panic!("Expected CouncilsChanged(-320), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_coins_looted() {
         let msg = status_msg("You searched the corpse and found 42 coins.");
         let event = parse_status_message(&msg).unwrap();
@@ -728,6 +854,24 @@ mod tests {
         // "Saved book to ..." should NOT match ReportSaved
         let msg = status_msg("Saved book to C:/Users/TestUser/AppData/LocalLow/Elder Game/Project Gorgon/Books/HelpScreen_260419_185352.txt");
         assert!(parse_status_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_roulette_result() {
+        let msg = status_msg("Roulette ball ended on 25!");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::RouletteResult { number, .. } => assert_eq!(number, 25),
+            other => panic!("Expected RouletteResult(25), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_roulette_result_zero() {
+        let msg = status_msg("Roulette ball ended on 0!");
+        match parse_status_message(&msg).unwrap() {
+            ChatStatusEvent::RouletteResult { number, .. } => assert_eq!(number, 0),
+            other => panic!("Expected RouletteResult(0), got {:?}", other),
+        }
     }
 
     #[test]

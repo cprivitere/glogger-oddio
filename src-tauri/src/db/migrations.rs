@@ -302,6 +302,133 @@ pub fn run_migrations(conn: &Connection, tz_offset_seconds: Option<i32>) -> Resu
         super::record_migration(conn, 55)?;
     }
 
+    if current_version < 56 {
+        migration_v56_currency_estimate(conn)?;
+        super::record_migration(conn, 56)?;
+    }
+
+    if current_version < 57 {
+        migration_v57_fix_chat_fts_delete_triggers(conn)?;
+        super::record_migration(conn, 57)?;
+    }
+
+    if current_version < 58 {
+        migration_v58_roulette_results(conn)?;
+        super::record_migration(conn, 58)?;
+    }
+
+    if current_version < 59 {
+        migration_v59_project_entry_slot_pins(conn)?;
+        super::record_migration(conn, 59)?;
+    }
+
+    if current_version < 60 {
+        migration_v60_survey_use_id_index(conn)?;
+        super::record_migration(conn, 60)?;
+    }
+
+    Ok(())
+}
+
+/// Migration V60: index survey-attributed item transactions by their
+/// `survey_use_id`.
+///
+/// The survey tracker's loot/economics/analytics queries join
+/// `item_transactions` to `survey_uses` on
+/// `CAST(json_extract(source_details,'$.survey_use_id') AS INTEGER)`. That
+/// expression can't use any existing index, so every such query full-scanned
+/// the entire ledger computing JSON per row — and the loot-summary query's
+/// correlated `NOT EXISTS` sub-select made it effectively O(N²). On a real
+/// 53k-transaction / 1481-use session this took ~20s per call, run while the
+/// global coordinator mutex was held, which froze log ingestion and the UI.
+///
+/// We materialize the extracted id as a VIRTUAL generated column and index
+/// it (partial — only the survey-attributed rows). The column recomputes
+/// automatically whenever `source_details` changes, so it stays correct with
+/// no write-path changes. Measured: the loot-summary query drops from ~20s to
+/// ~25ms (identical results). The column is VIRTUAL (computed on read) so it
+/// costs no table storage; the index holds the small set of non-NULL ids.
+fn migration_v60_survey_use_id_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE item_transactions ADD COLUMN survey_use_id INTEGER
+             GENERATED ALWAYS AS
+             (CAST(json_extract(source_details, '$.survey_use_id') AS INTEGER))
+             VIRTUAL;
+         CREATE INDEX IF NOT EXISTS idx_item_tx_survey_use
+             ON item_transactions(survey_use_id)
+             WHERE survey_use_id IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+/// Migration V59: per-entry variable-slot ingredient pins for crafting projects.
+/// Keyword-slot recipes (e.g. brewing) have "variable" ingredient slots that the
+/// generic material resolver fills from global preferences. To let a single
+/// project entry represent one *specific* combination — such as a chosen Brewery
+/// discovery combo — we store the concrete item IDs picked for those slots, in
+/// slot order. Empty ('[]') means "resolve slots generically", preserving all
+/// existing entries' behavior.
+fn migration_v59_project_entry_slot_pins(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE crafting_project_entries ADD COLUMN slot_item_ids TEXT NOT NULL DEFAULT '[]';",
+    )?;
+    Ok(())
+}
+
+/// Migration V58: casino roulette spin outcomes (drives the Roulette dashboard
+/// widget's outcome-percentage pie chart). Only the winning number is logged
+/// (`[Status] Roulette ball ended on N!`); bets/payouts are never written to
+/// disk, so we store outcomes only. Idempotent via the unique index — the same
+/// spin re-ingested from chat backfill dedups on (spun_at, number).
+fn migration_v58_roulette_results(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS roulette_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            spun_at TEXT NOT NULL,
+            number INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_roulette_dedup
+            ON roulette_results(spun_at, number);",
+    )?;
+    Ok(())
+}
+
+/// Migration v57: fix the chat_messages FTS sync triggers.
+///
+/// `chat_messages_fts` is an **external-content** FTS5 table (`content=`). For
+/// such tables a row must be removed with the special
+/// `INSERT INTO ft(ft, rowid, …) VALUES('delete', …)` command, which supplies
+/// the original column values so FTS5 knows which tokens to drop. The original
+/// delete/update triggers (created with the table) used a plain
+/// `DELETE FROM chat_messages_fts WHERE rowid = old.id`; in an AFTER DELETE
+/// trigger the content row is already gone, so FTS5 can't read the old values
+/// and the index/`_docsize` shadow table accumulate orphaned entries (and can
+/// later report "database disk image is malformed").
+///
+/// This was latent because nothing deleted chat rows before — the new user-data
+/// purge does, so the triggers must be correct first. We also run a one-time
+/// `'rebuild'` to repair any drift already present.
+fn migration_v57_fix_chat_fts_delete_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS chat_messages_fts_delete;
+         DROP TRIGGER IF EXISTS chat_messages_fts_update;
+
+         CREATE TRIGGER chat_messages_fts_delete AFTER DELETE ON chat_messages BEGIN
+             INSERT INTO chat_messages_fts(chat_messages_fts, rowid, message, sender)
+             VALUES('delete', old.id, old.message, old.sender);
+         END;
+
+         CREATE TRIGGER chat_messages_fts_update AFTER UPDATE ON chat_messages BEGIN
+             INSERT INTO chat_messages_fts(chat_messages_fts, rowid, message, sender)
+             VALUES('delete', old.id, old.message, old.sender);
+             INSERT INTO chat_messages_fts(rowid, message, sender)
+             VALUES (new.id, new.message, new.sender);
+         END;
+
+         -- Rebuild the index from the content table to clear any orphaned
+         -- entries left by the previous (incorrect) delete idiom.
+         INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild');",
+    )?;
     Ok(())
 }
 
@@ -335,6 +462,29 @@ fn migration_v55_loadout_aware_drops(conn: &Connection) -> Result<()> {
              ON enemy_kills(enemy_name, zone, combat_skills);
          ALTER TABLE imported_enemy_kills_agg ADD COLUMN combat_skills TEXT;
          ALTER TABLE imported_enemy_kill_loot_agg ADD COLUMN combat_skills TEXT;",
+    )?;
+    Ok(())
+}
+
+/// Migration v56: running estimate of the council wallet (internal `GOLD`),
+/// per character+server. Anchored on the last character export
+/// (`anchor_amount` at `anchor_at`); `delta_since` accumulates live wallet
+/// gains/losses parsed from chat *after* the anchor. Estimate =
+/// `anchor_amount + delta_since`. A fresh export re-anchors (resets
+/// `delta_since` to 0). Income is captured well from the logs; most spends are
+/// invisible, so the estimate drifts high until the next export re-anchors it.
+fn migration_v56_currency_estimate(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS currency_estimate (
+            character_name TEXT NOT NULL,
+            server_name    TEXT NOT NULL,
+            currency_name  TEXT NOT NULL DEFAULT 'GOLD',
+            anchor_amount  INTEGER NOT NULL DEFAULT 0,
+            anchor_at      TEXT,
+            delta_since    INTEGER NOT NULL DEFAULT 0,
+            updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (character_name, server_name, currency_name)
+        );",
     )?;
     Ok(())
 }
@@ -1561,7 +1711,8 @@ fn migration_v1_unified_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX idx_character_currencies_snapshot ON character_currencies(snapshot_id);
         CREATE INDEX idx_character_currencies_key ON character_currencies(currency_key, snapshot_id);
 
-        -- Active quests per snapshot (from /outputcharacter ActiveQuests + ActiveWorkOrders + CompletedWorkOrders)
+        -- Active quests per snapshot (from /outputcharacter ActiveQuests + ActiveWorkOrders + CompletedWorkOrders + CompletedQuests)
+        -- category is one of: 'active', 'work_order', 'completed_work_order', 'completed'
         CREATE TABLE character_active_quests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             snapshot_id INTEGER NOT NULL,
@@ -2624,4 +2775,83 @@ fn migration_v50_corpse_extracts(conn: &Connection) -> Result<()> {
         CREATE INDEX idx_corpse_extracts_corpse ON corpse_extracts(corpse_name);"
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Recreate the original chat_messages + external-content FTS setup with the
+    /// *old, buggy* delete trigger, so we can prove v57 repairs it.
+    fn setup_legacy_chat_fts() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE chat_messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 message TEXT NOT NULL,
+                 sender TEXT
+             );
+             CREATE VIRTUAL TABLE chat_messages_fts USING fts5(
+                 message, sender, content=chat_messages, content_rowid=id
+             );
+             CREATE TRIGGER chat_messages_fts_insert AFTER INSERT ON chat_messages BEGIN
+                 INSERT INTO chat_messages_fts(rowid, message, sender)
+                 VALUES (new.id, new.message, new.sender);
+             END;
+             -- the buggy idiom v57 replaces
+             CREATE TRIGGER chat_messages_fts_delete AFTER DELETE ON chat_messages BEGIN
+                 DELETE FROM chat_messages_fts WHERE rowid = old.id;
+             END;",
+        )
+        .unwrap();
+        c
+    }
+
+    #[test]
+    fn v57_delete_trigger_removes_fts_and_docsize_entries() {
+        let c = setup_legacy_chat_fts();
+        c.execute(
+            "INSERT INTO chat_messages(message, sender) VALUES ('hello world', 'alice')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO chat_messages(message, sender) VALUES ('goodbye world', 'bob')",
+            [],
+        )
+        .unwrap();
+
+        migration_v57_fix_chat_fts_delete_triggers(&c).unwrap();
+
+        // Delete one message; the corrected trigger must purge it from the index.
+        c.execute("DELETE FROM chat_messages WHERE sender = 'alice'", [])
+            .unwrap();
+
+        // No orphan left behind in the docsize shadow table.
+        let docsize: i64 = c
+            .query_row("SELECT COUNT(*) FROM chat_messages_fts_docsize", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(docsize, 1, "deleted row must not leave a docsize orphan");
+
+        // The deleted message is no longer searchable; the survivor still is.
+        let hits_hello: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages_fts WHERE chat_messages_fts MATCH 'hello'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits_hello, 0);
+        let hits_goodbye: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages_fts WHERE chat_messages_fts MATCH 'goodbye'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits_goodbye, 1);
+    }
 }

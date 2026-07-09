@@ -54,6 +54,13 @@
       </div>
 
       <div class="flex items-center gap-2">
+        <select
+          v-model="exportFormat"
+          title="Export file format — CSV opens in a spreadsheet; SQLite is a portable, loss-free .db file."
+          class="px-2 py-1.5 text-xs bg-surface-card border border-border-light rounded text-text-secondary outline-none focus:border-entity-item cursor-pointer">
+          <option value="csv">CSV</option>
+          <option value="sqlite">SQLite</option>
+        </select>
         <button
           @click="doExport"
           :disabled="exporting"
@@ -267,6 +274,8 @@ import ExtractDetailTable from "./ExtractDetailTable.vue";
 import { formatDateTimeShort } from "../../composables/useTimestamp";
 import { useGameDataStore } from "../../stores/gameDataStore";
 import { useGameStateStore } from "../../stores/gameStateStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { useViewPrefs } from "../../composables/useViewPrefs";
 import type { SkillInfo } from "../../types/gameData/skills";
 
 const scope = ref<DatabaseScope>("combined");
@@ -369,6 +378,17 @@ function toggleHarvestedExpanded(name: string) {
 // ── Equipped Skills (combat loadout) filter ─────────────────────────────
 const gameDataStore = useGameDataStore();
 const gameStateStore = useGameStateStore();
+const settingsStore = useSettingsStore();
+
+// Persisted export prefs: the serial counter (drives the suggested filename) and
+// the chosen share format (CSV by default, or a portable SQLite .db file).
+type ExportFormat = "csv" | "sqlite";
+const { prefs: exportPrefs, update: updateExportPrefs } = useViewPrefs("database", {
+  exportSerial: 0,
+  exportFormat: "csv" as ExportFormat,
+});
+const exportFormat = ref<ExportFormat>(exportPrefs.value.exportFormat ?? "csv");
+watch(exportFormat, (f) => updateExportPrefs({ exportFormat: f }));
 
 const combatSkillOptions = ref<SkillInfo[]>([]);
 const selectedSkill1 = ref("");
@@ -490,17 +510,36 @@ async function loadImportedSources() {
   }
 }
 
+// Suggested export filename: "<charname>-<NNNN>.<ext>", where NNNN is a 4-digit
+// serial that increments each successful export (e.g. oddio-0001, oddio-0002) and
+// <ext> follows the chosen format (csv or db). The counter persists per-install in
+// view prefs; the character name is the active character (sanitized, lowercased)
+// or "glogger" when none is loaded.
+function exportFileName(serial: number): string {
+  const raw = settingsStore.settings.activeCharacterName || "glogger";
+  const name = raw.toLowerCase().replace(/[^a-z0-9_-]+/g, "") || "glogger";
+  const ext = exportFormat.value === "sqlite" ? "db" : "csv";
+  return `${name}-${String(serial).padStart(4, "0")}.${ext}`;
+}
+
 async function doExport() {
   errorMessage.value = "";
   importMessage.value = "";
   exporting.value = true;
   try {
+    const nextSerial = (exportPrefs.value.exportSerial ?? 0) + 1;
+    const filters =
+      exportFormat.value === "sqlite"
+        ? [{ name: "SQLite Database", extensions: ["db"] }]
+        : [{ name: "CSV", extensions: ["csv"] }];
     const filePath = await save({
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-      defaultPath: `glogger-drop-rates-${new Date().toISOString().slice(0, 10)}.csv`,
+      filters,
+      defaultPath: exportFileName(nextSerial),
     });
     if (!filePath) return;
     const count = await invoke<number>("export_kill_loot_database", { path: filePath });
+    // Only advance the serial once the export actually succeeds.
+    updateExportPrefs({ exportSerial: nextSerial });
     importMessage.value = `Exported ${count} enemies' drop data to ${filePath}.`;
   } catch (e) {
     errorMessage.value = `Export failed: ${e}`;
@@ -515,7 +554,7 @@ async function doImport() {
   importing.value = true;
   try {
     const filePath = await open({
-      filters: [{ name: "Drop data", extensions: ["csv", "json"] }],
+      filters: [{ name: "Drop data", extensions: ["csv", "json", "db", "sqlite", "sqlite3"] }],
       multiple: false,
     });
     if (!filePath) return;

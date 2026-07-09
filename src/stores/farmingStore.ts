@@ -10,12 +10,18 @@ import type {
 } from "../types/farming";
 import type { PlayerEvent, ItemProvenance } from "../types/playerEvents";
 import { useGameDataStore } from "./gameDataStore";
+import { useSettingsStore } from "./settingsStore";
 import { formatTimeFull, formatDuration } from "../composables/useTimestamp";
 
 export const useFarmingStore = defineStore("farming", () => {
   const sessionActive = ref(false);
   const session = ref<FarmingSession | null>(null);
   const log = ref<FarmingLogEntry[]>([]);
+
+  // DB row id of the in-progress session once it has been auto-saved at least
+  // once. Lets the periodic auto-save and the final endSession write update the
+  // same row instead of creating duplicates.
+  const currentSessionId = ref<number | null>(null);
 
   // All-time per-enemy loot stats, fetched lazily from the DB on hover and
   // cached by enemy name (shared across items that drop from the same enemy).
@@ -35,6 +41,151 @@ export const useFarmingStore = defineStore("farming", () => {
       clearInterval(timerInterval);
       timerInterval = null;
     }
+  }
+
+  // ── Auto-save ──────────────────────────────────────────────────────────────
+  // Periodically persists the active session to the DB so its data survives a
+  // crash/power loss before the session is ended. A 60s ticker checks the
+  // configured interval (settings.farmingAutosaveMinutes; 0 = disabled) so a
+  // changed setting takes effect without restarting the ticker.
+  let autosaveTicker: ReturnType<typeof setInterval> | null = null;
+  let lastAutoSaveMs = 0;
+
+  function startAutosaveTicker() {
+    stopAutosaveTicker();
+    lastAutoSaveMs = Date.now();
+    autosaveTicker = setInterval(() => {
+      void (async () => {
+        // Enforce the length cap first: a rollover ends+restarts the session
+        // (spinning up its own fresh ticker), so there's nothing left to
+        // auto-save on this tick afterward.
+        if (await maybeAutoRollover()) return;
+        await maybeAutoSave();
+      })();
+    }, 60_000);
+  }
+
+  function stopAutosaveTicker() {
+    if (autosaveTicker) {
+      clearInterval(autosaveTicker);
+      autosaveTicker = null;
+    }
+  }
+
+  async function maybeAutoSave() {
+    if (!sessionActive.value || !session.value) return;
+    const minutes = useSettingsStore().settings.farmingAutosaveMinutes;
+    if (!minutes || minutes <= 0) return;
+    if (Date.now() - lastAutoSaveMs < minutes * 60_000) return;
+    await autoSaveSession();
+  }
+
+  // End-and-restart the active session once it has been logging for the
+  // configured cap (settings.farmingSessionCapMinutes), so no single session
+  // grows without bound. Independent of the autosave setting (this is a safety
+  // cap, not a convenience); reading the setting each tick means a changed
+  // value takes effect without restarting anything. Skips paused/already-ended
+  // sessions, and only rolls a session that has actually collected something —
+  // capping an empty session would just spawn a blank history row, and an empty
+  // session is no burden anyway. Returns true when a rollover happened.
+  async function maybeAutoRollover(): Promise<boolean> {
+    const s = session.value;
+    if (!sessionActive.value || !s) return false;
+    if (s.isPaused || s.endTime) return false;
+    const capMinutes = useSettingsStore().settings.farmingSessionCapMinutes;
+    if (!capMinutes || capMinutes <= 0) return false; // cap disabled / invalid
+    // Never roll on a non-finite elapsed value — a NaN would make `< cap` false
+    // and fire the rollover every active tick (the 12-hour-clock bug above).
+    const activeSeconds = getActiveSeconds();
+    if (!Number.isFinite(activeSeconds) || activeSeconds < capMinutes * 60) return false;
+
+    // Nothing collected yet — leave it; it'll roll the moment real activity
+    // lands and pushes it over the cap again.
+    const input = await buildSessionInput(false);
+    if (isEmptyInput(input)) return false;
+
+    const name = s.name;
+    await endSession(); // persists the capped session (updates its row in place)
+    reset();
+    startSession(name); // fresh session, same name; timers + autosave restart
+    console.log("[farming] Session auto-rolled after", capMinutes, "min of activity");
+    return true;
+  }
+
+  // Persist the current session snapshot, updating the existing row when one
+  // already exists. Skips writing an empty session so we don't create blank
+  // rows before anything has been collected.
+  async function autoSaveSession() {
+    if (!session.value) return;
+    const input = await buildSessionInput(false);
+    if (currentSessionId.value == null && isEmptyInput(input)) return;
+    try {
+      const id = await invoke<number>("save_farming_session", {
+        input: { ...input, session_id: currentSessionId.value },
+      });
+      currentSessionId.value = id;
+      lastAutoSaveMs = Date.now();
+      console.log("[farming] Session auto-saved (id", id, ")");
+    } catch (e) {
+      console.error("[farming] Auto-save failed:", e);
+    }
+  }
+
+  function isEmptyInput(input: SaveFarmingSessionInput): boolean {
+    return (
+      input.skills.length === 0 &&
+      input.items.length === 0 &&
+      input.favors.length === 0 &&
+      input.kills.length === 0 &&
+      input.vendor_gold === 0
+    );
+  }
+
+  // Build the persistable snapshot from the live session. Shared by the
+  // periodic auto-save (end = false) and the final endSession write (end = true).
+  async function buildSessionInput(end: boolean): Promise<SaveFarmingSessionInput> {
+    const s = session.value!;
+    const gameData = useGameDataStore();
+    return {
+      name: s.name,
+      notes: s.notes,
+      start_time: s.startTime,
+      end_time: end ? s.endTime : null,
+      elapsed_seconds: getActiveSeconds(),
+      total_paused_seconds: s.totalPausedSeconds,
+      vendor_gold: s.vendorGold,
+      skills: await Promise.all(
+        Object.entries(s.skillXp)
+          .filter(([, v]) => v.gained > 0 || v.levelsGained > 0)
+          .map(async ([skillType, v]) => {
+            const resolved = await gameData.resolveSkill(skillType);
+            return {
+              skill_id: resolved?.id ?? 0,
+              skill_name: resolved?.name ?? skillType,
+              xp_gained: v.gained,
+              levels_gained: v.levelsGained,
+            };
+          })
+      ),
+      items: Object.entries(s.itemDeltas)
+        .filter(([name, qty]) => qty !== 0 && !s.ignoredItems.has(name))
+        .map(([item_name, net_quantity]) => ({ item_name, net_quantity })),
+      favors: await Promise.all(
+        Object.entries(s.favorDeltas)
+          .filter(([, v]) => v.delta !== 0)
+          .map(async ([npcName, v]) => {
+            const resolved = await gameData.resolveNpc(npcName);
+            return {
+              npc_key: resolved?.key ?? npcName,
+              npc_name: resolved?.name ?? npcName,
+              delta: v.delta,
+            };
+          })
+      ),
+      kills: Object.entries(s.kills)
+        .filter(([, v]) => v.count > 0)
+        .map(([enemy_name, v]) => ({ enemy_name, kill_count: v.count })),
+    };
   }
 
   // ── Event Handlers ──────────────────────────────────────────────────────
@@ -237,6 +388,7 @@ export const useFarmingStore = defineStore("farming", () => {
 
     const ts = getCurrentTimestamp();
     sessionActive.value = true;
+    currentSessionId.value = null;
     session.value = {
       name: name ?? "Farming Session",
       notes: "",
@@ -258,6 +410,7 @@ export const useFarmingStore = defineStore("farming", () => {
 
     pushLog("session-start", ts, "Farming session started");
     startTimer();
+    startAutosaveTicker();
   }
 
   async function endSession() {
@@ -267,57 +420,41 @@ export const useFarmingStore = defineStore("farming", () => {
     session.value.endTime = ts;
     pushLog("session-end", ts, "Farming session ended");
     stopTimer();
+    stopAutosaveTicker();
 
-    // Persist to database
+    // Persist to database — update the auto-saved row in place when one exists
+    // so the finished session doesn't duplicate an in-progress auto-save.
     try {
-      const s = session.value;
-      const input: SaveFarmingSessionInput = {
-        name: s.name,
-        notes: s.notes,
-        start_time: s.startTime,
-        end_time: s.endTime,
-        elapsed_seconds: getActiveSeconds(),
-        total_paused_seconds: s.totalPausedSeconds,
-        vendor_gold: s.vendorGold,
-        skills: await Promise.all(
-          Object.entries(s.skillXp)
-            .filter(([, v]) => v.gained > 0 || v.levelsGained > 0)
-            .map(async ([skillType, v]) => {
-              const gameData = useGameDataStore();
-              const resolved = await gameData.resolveSkill(skillType);
-              return {
-                skill_id: resolved?.id ?? 0,
-                skill_name: resolved?.name ?? skillType,
-                xp_gained: v.gained,
-                levels_gained: v.levelsGained,
-              };
-            })
-        ),
-        items: Object.entries(s.itemDeltas)
-          .filter(([name, qty]) => qty !== 0 && !s.ignoredItems.has(name))
-          .map(([item_name, net_quantity]) => ({ item_name, net_quantity })),
-        favors: await Promise.all(
-          Object.entries(s.favorDeltas)
-            .filter(([, v]) => v.delta !== 0)
-            .map(async ([npcName, v]) => {
-              const gameData = useGameDataStore();
-              const resolved = await gameData.resolveNpc(npcName);
-              return {
-                npc_key: resolved?.key ?? npcName,
-                npc_name: resolved?.name ?? npcName,
-                delta: v.delta,
-              };
-            })
-        ),
-        kills: Object.entries(s.kills)
-          .filter(([, v]) => v.count > 0)
-          .map(([enemy_name, v]) => ({ enemy_name, kill_count: v.count })),
-      };
-
-      await invoke("save_farming_session", { input });
+      const input = await buildSessionInput(true);
+      const id = await invoke<number>("save_farming_session", {
+        input: { ...input, session_id: currentSessionId.value },
+      });
+      currentSessionId.value = id;
       console.log("[farming] Session saved to database");
     } catch (e) {
       console.error("[farming] Failed to save session:", e);
+    }
+  }
+
+  // Enable/disable persistent auto-logging of farming sessions. Shared by the menu-bar status
+  // light and the farming-tab checkbox, so both stay in sync via the settings store. Enabling
+  // starts a fresh session immediately; disabling ends & saves the running session and clears
+  // the live view — mirroring the two live-tailing lights, where turning the light off stops
+  // the activity (the saved session lives on in the Historical tab).
+  async function setAutoStart(enabled: boolean) {
+    await useSettingsStore().updateSettings({ autoStartFarmingSessions: enabled });
+    if (enabled) {
+      // Only (re)start when nothing is actively logging. A finished session left on screen
+      // (sessionActive but with an endTime) is cleared first, since startSession() no-ops while
+      // any session is active.
+      const liveSession = sessionActive.value && !session.value?.endTime;
+      if (!liveSession) {
+        reset();
+        startSession("Auto Farming Session");
+      }
+    } else if (sessionActive.value) {
+      await endSession();
+      reset();
     }
   }
 
@@ -352,8 +489,10 @@ export const useFarmingStore = defineStore("farming", () => {
   function reset() {
     sessionActive.value = false;
     session.value = null;
+    currentSessionId.value = null;
     log.value = [];
     stopTimer();
+    stopAutosaveTicker();
   }
 
   // ── Computed ────────────────────────────────────────────────────────────
@@ -661,6 +800,7 @@ export const useFarmingStore = defineStore("farming", () => {
     handleEnemyKilled,
     startSession,
     endSession,
+    setAutoStart,
     togglePause,
     toggleIgnoreItem,
     updateName,
@@ -705,9 +845,23 @@ function recordGathered(
   s.gathered[sourceName][itemName] = tally;
 }
 
+// Parse a session timestamp (as produced by getCurrentTimestamp) into
+// seconds-of-day. getCurrentTimestamp goes through formatTimeFull, which honors
+// the user's 12/24-hour display setting — so this MUST accept both "14:30:05"
+// (24h) and "2:30:05 PM" (12h). Naively splitting a 12h string on ":" yields
+// Number("05 PM") === NaN, which made getActiveSeconds() return NaN for every
+// 12-hour-clock user: the live timer showed "—", pause math broke, and the
+// session-cap rollover (whose `< cap` comparison is false for NaN) fired on the
+// next active tick, fragmenting history into odd 1-minute-to-cap sessions.
+// Returns NaN only for genuinely unparseable input.
 function tsToSeconds(ts: string): number {
-  const [h, m, s] = ts.split(":").map(Number);
-  return h * 3600 + m * 60 + s;
+  const m = ts.trim().match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
+  if (!m) return NaN;
+  let h = Number(m[1]);
+  const period = m[4]?.toUpperCase();
+  if (period === "PM" && h !== 12) h += 12;
+  else if (period === "AM" && h === 12) h = 0;
+  return h * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
 
 function getCurrentTimestamp(): string {

@@ -10,6 +10,7 @@
         <CooksHelperTab v-else-if="activeTab === 'cooks-helper'" />
         <BreweryTab v-else-if="activeTab === 'brewery'" />
         <SkillsTab v-else-if="activeTab === 'skills'" />
+        <RecipeBookTab v-else-if="activeTab === 'recipe-book'" />
         <DynamicItemsTab v-else-if="activeTab === 'dynamic-items'" />
       </div>
     </div>
@@ -26,6 +27,7 @@ import WorkOrdersTab from "./WorkOrdersTab.vue";
 import CooksHelperTab from "./CooksHelperTab.vue";
 import BreweryTab from "./BreweryTab.vue";
 import SkillsTab from "./SkillsTab.vue";
+import RecipeBookTab from "./RecipeBookTab.vue";
 import DynamicItemsTab from "./DynamicItemsTab.vue";
 
 defineProps<{

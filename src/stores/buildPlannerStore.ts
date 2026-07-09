@@ -1,4 +1,4 @@
-import { defineStore } from "pinia"
+import { defineStore, acceptHMRUpdate } from "pinia"
 import { ref, computed } from "vue"
 import { invoke } from "@tauri-apps/api/core"
 import { useSettingsStore } from "./settingsStore"
@@ -12,6 +12,9 @@ import type {
   BuildPresetCpRecipe,
   CpRecipeOption,
   SlotTsysPower,
+  EquippedSlotCandidates,
+  EquippedCandidatesResult,
+  EquippedSelection,
 } from "../types/buildPlanner"
 import {
   EQUIPMENT_SLOTS,
@@ -19,6 +22,7 @@ import {
   AUGMENT_CP_COST,
   getRarityDef,
   getArmorTypeFromKeywords,
+  computeSlotConstraints,
 } from "../types/buildPlanner"
 import type { ArmorType } from "../types/buildPlanner"
 import type { SkillInfo } from "../types/gameData/skills"
@@ -290,8 +294,10 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     const input = {
       id: activePreset.value.id,
       name: updates.name ?? activePreset.value.name,
-      skill_primary: updates.skill_primary ?? activePreset.value.skill_primary,
-      skill_secondary: updates.skill_secondary ?? activePreset.value.skill_secondary,
+      // Skills are nullable: use the `in` check so an explicit null (clearing the
+      // default skill via the "None" option) is honored rather than coalesced back.
+      skill_primary: 'skill_primary' in updates ? updates.skill_primary ?? null : activePreset.value.skill_primary,
+      skill_secondary: 'skill_secondary' in updates ? updates.skill_secondary ?? null : activePreset.value.skill_secondary,
       target_level: updates.target_level ?? activePreset.value.target_level,
       target_rarity: updates.target_rarity ?? activePreset.value.target_rarity,
       notes: updates.notes ?? activePreset.value.notes,
@@ -317,6 +323,14 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
   }
 
   async function selectSlot(slotId: string) {
+    // Clicking the already-selected slot deselects it, collapsing the slot detail
+    // panel and revealing the global "Search All Mods" catalog in the center pane.
+    if (selectedSlot.value === slotId) {
+      selectedSlot.value = null
+      activeBar.value = null
+      modFilter.value = ""
+      return
+    }
     selectedSlot.value = slotId
     activeBar.value = null
     modFilter.value = ""
@@ -394,6 +408,78 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
   async function removeMod(mod: BuildPresetMod) {
     presetMods.value = presetMods.value.filter(m => m !== mod)
     await saveMods()
+  }
+
+  /**
+   * Apply a mod (by internal name) to an explicit slot from the global catalog
+   * search — without selecting the slot or disturbing the slot-detail view.
+   * Loads that slot's eligible powers for its level, then enforces the same
+   * capacity/duplicate/skill-rarity constraints the slot mod browser uses.
+   * Returns { ok } plus a reason code when it can't be applied.
+   */
+  async function addCatalogModToSlot(
+    slotId: string,
+    internalName: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    if (!activePreset.value) return { ok: false, reason: 'no-preset' }
+
+    let powers: SlotTsysPower[]
+    try {
+      powers = await invoke<SlotTsysPower[]>("get_tsys_powers_for_slot", {
+        skillPrimary: getSlotSkillPrimary(slotId),
+        skillSecondary: getSlotSkillSecondary(slotId),
+        equipSlot: slotId,
+        targetLevel: getSlotLevel(slotId),
+      })
+    } catch {
+      return { ok: false, reason: 'load-failed' }
+    }
+
+    const power = powers.find(p => (p.internal_name ?? p.key) === internalName)
+    if (!power) return { ok: false, reason: 'not-eligible' }
+
+    const powerName = power.internal_name ?? power.key
+    if (presetMods.value.some(m => m.equip_slot === slotId && m.power_name === powerName)) {
+      return { ok: false, reason: 'duplicate' }
+    }
+
+    const regularMods = presetMods.value.filter(m => m.equip_slot === slotId && !m.is_augment)
+    if (regularMods.length >= getMaxModsForSlot(slotId)) return { ok: false, reason: 'full' }
+
+    // Skill/rarity constraint check (mirrors the slot mod browser).
+    const skillCounts = new Map<string, number>()
+    let genCount = 0
+    for (const m of regularMods) {
+      const p = powers.find(sp => (sp.internal_name ?? sp.key) === m.power_name)
+      const s = p?.skill
+      if (!s || s === 'AnySkill' || s === 'Endurance') genCount++
+      else skillCounts.set(s, (skillCounts.get(s) ?? 0) + 1)
+    }
+    const isGeneric = !power.skill || power.skill === 'AnySkill' || power.skill === 'Endurance'
+    const constraints = computeSlotConstraints(getSlotRarity(slotId), skillCounts, genCount)
+    if (isGeneric) {
+      if (!constraints.canAddGeneric) return { ok: false, reason: 'no-room' }
+    } else if (skillCounts.has(power.skill!)) {
+      if (!constraints.canAddSkillMod) return { ok: false, reason: 'no-room' }
+    } else if (!constraints.canAddNewSkill) {
+      return { ok: false, reason: 'no-room' }
+    }
+
+    const nextOrder = Math.max(0, ...presetMods.value
+      .filter(m => m.equip_slot === slotId)
+      .map(m => m.sort_order)) + 1
+
+    presetMods.value.push({
+      id: -Date.now(),
+      preset_id: activePreset.value.id,
+      equip_slot: slotId,
+      power_name: powerName,
+      tier: power.tier_id ? parseInt(power.tier_id.replace("id_", "")) : null,
+      is_augment: false,
+      sort_order: nextOrder,
+    })
+    await saveMods()
+    return { ok: true }
   }
 
   /** Persist all mods to the database */
@@ -543,6 +629,84 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     )) {
       await loadSlotPowers()
     }
+  }
+
+  /**
+   * Fetch the character's equippable items (from their latest items report),
+   * grouped by planner slot and ordered best-guess first, for the loadout picker.
+   * The report can't flag which item is actually worn, so the user confirms.
+   */
+  async function fetchEquippedCandidates(): Promise<EquippedCandidatesResult> {
+    if (!activePreset.value) return { reason: "no-preset", slots: [] }
+    const settings = useSettingsStore()
+    const characterName = settings.settings.activeCharacterName
+    const serverName = settings.settings.activeServerName
+    if (!characterName) return { reason: "no-character", slots: [] }
+
+    const slots = await invoke<EquippedSlotCandidates[]>("get_equipped_gear_candidates", {
+      characterName,
+      serverName: serverName || undefined,
+    })
+    if (slots.length === 0) return { reason: "no-gear", slots: [] }
+    return { reason: null, slots }
+  }
+
+  /**
+   * Apply a user-confirmed loadout from the picker. For each chosen slot this sets
+   * the base item (id, name, level, rarity, crafted flag) and replaces that slot's
+   * mods with the item's TSys powers plus any imbued augment. Slots the user left
+   * unselected are untouched. Returns the number of slots applied.
+   */
+  async function applyEquippedGear(selections: EquippedSelection[]): Promise<number> {
+    if (!activePreset.value || selections.length === 0) return 0
+    const presetId = activePreset.value.id
+    const targetSlots = new Set(selections.map(s => s.equip_slot))
+
+    // Set the base item for each chosen slot.
+    for (const { equip_slot, item } of selections) {
+      await invoke("set_build_preset_slot_item", {
+        input: {
+          preset_id: presetId,
+          equip_slot,
+          item_id: item.item_id,
+          item_name: item.item_name,
+          slot_level: item.slot_level,
+          slot_rarity: item.slot_rarity,
+          is_crafted: item.is_crafted,
+          is_masterwork: false,
+        },
+      })
+    }
+
+    // Rebuild the full mod list: keep mods on untouched slots, replace the
+    // chosen slots' mods with the selected item's powers.
+    const newMods: BuildPresetModInput[] = presetMods.value
+      .filter(m => !targetSlots.has(m.equip_slot))
+      .map(m => ({
+        equip_slot: m.equip_slot,
+        power_name: m.power_name,
+        tier: m.tier,
+        is_augment: m.is_augment,
+        sort_order: m.sort_order,
+      }))
+    for (const { equip_slot, item } of selections) {
+      item.mods.forEach((mod, i) => {
+        newMods.push({
+          equip_slot,
+          power_name: mod.power_name,
+          tier: mod.tier,
+          is_augment: mod.is_augment,
+          sort_order: i,
+        })
+      })
+    }
+    await invoke("set_build_preset_mods", { presetId, mods: newMods })
+
+    // Reload slot items (+ resolve icons/keywords) and mods from the DB.
+    await loadSlotItems()
+    presetMods.value = await invoke<BuildPresetMod[]>("get_build_preset_mods", { presetId })
+
+    return selections.length
   }
 
   /** Clear the base item for a specific slot */
@@ -747,6 +911,7 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     loadSlotPowers,
     addMod,
     removeMod,
+    addCatalogModToSlot,
     changeModTier,
     saveMods,
     onBuildParamsChanged,
@@ -758,6 +923,8 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     getMaxModsForSlot,
     setSlotItem,
     updateSlotProps,
+    fetchEquippedCandidates,
+    applyEquippedGear,
     clearSlotItem,
     getBarAbilities,
     selectBar,
@@ -771,3 +938,9 @@ export const useBuildPlannerStore = defineStore("buildPlanner", () => {
     removeCpRecipe,
   }
 })
+
+// Enable proper Pinia hot-module replacement: without this, editing a store action
+// during `tauri dev` leaves the already-instantiated singleton running the old code.
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useBuildPlannerStore, import.meta.hot))
+}

@@ -17,6 +17,7 @@ macro_rules! startup_log {
 
 // ── Module declarations ──────────────────────────────────────────────────────
 mod abilities;
+pub mod ability_stats;
 mod ability_dynamic;
 mod ability_keywords;
 mod advancement_tables;
@@ -43,6 +44,7 @@ mod xp_tables;
 // ── Re-exports so cdn_commands.rs doesn't need updating ──────────────────────
 pub use abilities::AbilityFamily;
 pub use abilities::AbilityInfo;
+pub use abilities::{CombatStats, DotEffect};
 pub use areas::AreaInfo;
 pub use effects::EffectInfo;
 pub use item_uses::ItemUseInfo;
@@ -853,6 +855,54 @@ pub async fn load_from_cache_with_progress(
 
 // ── Index builder ──────────────────────────────────────────────────────────
 
+/// Build the display-name → ability-id index used to resolve ability names in combat logs and
+/// in prose gear-mod descs ("Withering Shroud deals 164 Psychic damage over 8 seconds").
+///
+/// Monster copies of player abilities share display names (the Orc/Ratkin "Wave of Darkness",
+/// Vampirism's "Withering Shroud" monster shroud), so a blind name → id collect can resolve a
+/// prose mod to the wrong family and silently drop it. Two rules fix that:
+/// 1. Player abilities win name collisions with `Lint_MonsterAbility` abilities.
+/// 2. Each player family's tier-stripped base name points at its first tier when no player
+///    ability owns the bare name (Vampirism's tiers run "Withering Shroud 1"–"13", so the bare
+///    name would otherwise resolve only to the monster ability).
+fn build_ability_name_index(
+    abilities: &HashMap<u32, abilities::AbilityInfo>,
+    ability_families: &HashMap<String, abilities::AbilityFamily>,
+) -> HashMap<String, u32> {
+    let is_monster = |a: &abilities::AbilityInfo| {
+        a.keywords.iter().any(|k| k == "Lint_MonsterAbility")
+    };
+    let mut index: HashMap<String, u32> = HashMap::new();
+    for (id, ability) in abilities {
+        match index.entry(ability.name.clone()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(*id);
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let existing_is_monster = abilities.get(e.get()).map(is_monster).unwrap_or(true);
+                if existing_is_monster && !is_monster(ability) {
+                    e.insert(*id);
+                }
+            }
+        }
+    }
+
+    for family in ability_families.values() {
+        if family.is_monster_ability {
+            continue;
+        }
+        let Some(&first_id) = family.tier_ids.first() else { continue };
+        let claimable = match index.get(&family.base_name) {
+            None => true,
+            Some(existing) => abilities.get(existing).map(is_monster).unwrap_or(true),
+        };
+        if claimable {
+            index.insert(family.base_name.clone(), first_id);
+        }
+    }
+    index
+}
+
 /// Build all derived indices from parsed game data.
 fn build_all_indices(
     items: &HashMap<u32, items::ItemInfo>,
@@ -1107,11 +1157,6 @@ fn build_all_indices(
         npc_keys.dedup();
     }
 
-    let ability_name_index: HashMap<String, u32> = abilities
-        .iter()
-        .map(|(id, ability)| (ability.name.clone(), *id))
-        .collect();
-
     // ── Build ability family index ──────────────────────────────────────
     // Map internal_name → ability_id for lookup
     let ability_internal_name_map: HashMap<&str, u32> = abilities
@@ -1224,6 +1269,8 @@ fn build_all_indices(
             ability_families.insert(internal_name, family);
         }
     }
+
+    let ability_name_index = build_ability_name_index(abilities, &ability_families);
 
     startup_log!(
         "Ability families built: {} families from {} abilities",
@@ -1512,4 +1559,107 @@ fn build_tsys_ability_index(
     }
 
     (tsys_to_abilities, ability_to_tsys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ability(id: u32, name: &str, monster: bool) -> abilities::AbilityInfo {
+        abilities::AbilityInfo {
+            id,
+            name: name.to_string(),
+            internal_name: None,
+            description: None,
+            icon_id: None,
+            skill: None,
+            level: None,
+            keywords: if monster { vec!["Lint_MonsterAbility".to_string()] } else { Vec::new() },
+            damage_type: None,
+            reset_time: None,
+            target: None,
+            prerequisite: None,
+            upgrade_of: None,
+            is_harmless: None,
+            animation: None,
+            special_info: None,
+            works_underwater: None,
+            works_while_falling: None,
+            pve: None,
+            pvp: None,
+            mana_cost: None,
+            power_cost: None,
+            armor_cost: None,
+            health_cost: None,
+            range: None,
+            raw_json: serde_json::Value::Null,
+        }
+    }
+
+    fn family(base: &str, base_name: &str, monster: bool, tiers: Vec<u32>) -> abilities::AbilityFamily {
+        abilities::AbilityFamily {
+            base_internal_name: base.to_string(),
+            base_name: base_name.to_string(),
+            icon_id: None,
+            skill: None,
+            damage_type: None,
+            is_monster_ability: monster,
+            tier_ids: tiers,
+        }
+    }
+
+    /// Wave of Darkness: the player base tier shares its exact name with two monster copies.
+    /// The player ability must win the collision regardless of HashMap iteration order.
+    #[test]
+    fn name_index_prefers_player_ability_on_collision() {
+        let abilities: HashMap<u32, abilities::AbilityInfo> = [
+            (12334, ability(12334, "Wave of Darkness", true)),
+            (3231, ability(3231, "Wave of Darkness", false)),
+            (13624, ability(13624, "Wave of Darkness", true)),
+        ]
+        .into();
+        let families = HashMap::from([(
+            "WaveOfDarkness".to_string(),
+            family("WaveOfDarkness", "Wave of Darkness", false, vec![3231]),
+        )]);
+        let index = build_ability_name_index(&abilities, &families);
+        assert_eq!(index.get("Wave of Darkness"), Some(&3231));
+    }
+
+    /// Withering Shroud: no player ability is named bare "Withering Shroud" (tiers run
+    /// "Withering Shroud 1"–"13") but a monster ability is. The family's base name must
+    /// resolve to the player family's first tier so DoT prose mods land on it.
+    #[test]
+    fn name_index_maps_family_base_name_over_monster_squatter() {
+        let abilities: HashMap<u32, abilities::AbilityInfo> = [
+            (12257, ability(12257, "Withering Shroud", true)),
+            (4926, ability(4926, "Withering Shroud 1", false)),
+            (4937, ability(4937, "Withering Shroud 12", false)),
+        ]
+        .into();
+        let families = HashMap::from([(
+            "WitheringShroud1".to_string(),
+            family("WitheringShroud1", "Withering Shroud", false, vec![4926, 4937]),
+        )]);
+        let index = build_ability_name_index(&abilities, &families);
+        assert_eq!(index.get("Withering Shroud"), Some(&4926));
+        // Tier names still resolve to themselves.
+        assert_eq!(index.get("Withering Shroud 12"), Some(&4937));
+    }
+
+    /// A monster-only family must not hijack a name owned by a real player ability.
+    #[test]
+    fn name_index_keeps_player_ability_over_monster_family() {
+        let abilities: HashMap<u32, abilities::AbilityInfo> = [
+            (100, ability(100, "Screech", false)),
+            (200, ability(200, "Screech 1", true)),
+        ]
+        .into();
+        let families = HashMap::from([
+            ("Screech".to_string(), family("Screech", "Screech", false, vec![100])),
+            ("MonsterScreech".to_string(), family("MonsterScreech", "Screech", true, vec![200])),
+        ]);
+        let index = build_ability_name_index(&abilities, &families);
+        assert_eq!(index.get("Screech"), Some(&100));
+    }
 }

@@ -83,6 +83,7 @@ use cdn_commands::{
     get_all_tsys,
     get_tsys_power_info,
     get_tsys_power_info_batch,
+    compute_ability_build_stats,
     get_tsys_powers_for_slot,
     get_tsys_profiles,
     get_tsys_for_ability,
@@ -151,13 +152,16 @@ use coordinator::{
     stop_chat_tailing, stop_player_tailing,
     spawn_polling_thread, DataIngestCoordinator, PollingHandle,
 };
-use db::admin_commands::{force_rebuild_cdn_tables, get_database_stats, purge_player_data};
+use db::admin_commands::{
+    compact_database, force_rebuild_cdn_tables, get_database_stats, purge_player_data,
+};
 use db::aggregate_commands::{get_aggregate_inventory, get_aggregate_skills, get_aggregate_vendor, get_aggregate_wealth};
 use db::build_planner_commands::{
     clear_build_preset_slot_item, clone_build_preset, create_build_preset, delete_build_preset,
     export_build_preset, get_build_preset_abilities, get_build_preset_cp_recipes,
     get_build_preset_mods, get_build_preset_slot_items, get_build_presets,
-    import_build_preset, set_build_preset_abilities, set_build_preset_cp_recipes,
+    get_equipped_gear_candidates, import_build_preset, set_build_preset_abilities,
+    set_build_preset_cp_recipes,
     set_build_preset_mods, set_build_preset_slot_item, update_build_preset,
     update_build_preset_slot_props,
 };
@@ -184,6 +188,7 @@ use db::kill_tracking_commands::{
     list_imported_sources, search_database_enemies, search_database_harvested, search_database_items,
 };
 use db::game_state_commands::{
+    get_currency_estimate,
     get_game_state_active_skills, get_game_state_attributes, get_game_state_currencies,
     get_game_state_effects, get_game_state_equipment, get_game_state_favor,
     get_game_state_inventory, get_game_state_recipes, get_game_state_skills,
@@ -510,6 +515,52 @@ pub fn run() {
                 });
             }
 
+            // Step 5d-ii: One-shot backfill of casino roulette outcomes from the
+            // historical ChatLogs so the Roulette widget's pie chart is populated
+            // immediately. Idempotent (unique index).
+            {
+                let sm = settings_manager.clone();
+                let dbp = db_pool.clone();
+                tauri::async_runtime::spawn(async move {
+                    match db::roulette_commands::backfill_from_chat_logs(&sm, &dbp) {
+                        Ok(n) => {
+                            startup_log!("Roulette backfill: {} new spin(s)", n);
+                        }
+                        Err(e) => eprintln!("Roulette backfill failed: {e}"),
+                    }
+                });
+            }
+
+            // Step 5e: Auto-purge old user data on startup, if enabled in
+            // settings. Bounds unbounded growth of the big append-only tables
+            // (item_transactions, chat_messages + its FTS index). Non-fatal —
+            // a failure here must never block startup.
+            {
+                let s = settings_manager.get();
+                if s.auto_purge_enabled {
+                    match db_pool.get() {
+                        Ok(conn) => {
+                            match db::admin_commands::check_auto_purge(&conn, Some(s.auto_purge_days)) {
+                                Ok(r) if r.bytes_reclaimed > 0 => {
+                                    startup_log!(
+                                        "Auto-purge reclaimed {} bytes (data older than {}d)",
+                                        r.bytes_reclaimed,
+                                        s.auto_purge_days
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    startup_log!("Auto-purge failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            startup_log!("Auto-purge skipped (no DB connection): {e}");
+                        }
+                    }
+                }
+            }
+
             // Step 6: Register managed state
             app.manage(settings_manager.clone());
             app.manage(db_pool.clone());
@@ -579,6 +630,8 @@ pub fn run() {
             // Combat Wisdom tracking
             db::combat_wisdom_commands::get_combat_wisdom_monsters,
             db::combat_wisdom_commands::backfill_combat_wisdom_from_chat_logs,
+            db::roulette_commands::get_roulette_stats,
+            db::roulette_commands::backfill_roulette_from_chat_logs,
             // CDN management
             get_cache_status,
             check_cdn_version,
@@ -647,6 +700,7 @@ pub fn run() {
             resolve_effect_descs,
             get_tsys_power_info,
             get_tsys_power_info_batch,
+            compute_ability_build_stats,
             // TSys browser queries
             get_all_tsys,
             search_tsys,
@@ -696,6 +750,7 @@ pub fn run() {
             get_recent_events,
             // Database admin
             get_database_stats,
+            compact_database,
             force_rebuild_cdn_tables,
             purge_player_data,
             // Settings
@@ -835,6 +890,7 @@ pub fn run() {
             set_build_preset_slot_item,
             clear_build_preset_slot_item,
             get_build_preset_slot_items,
+            get_equipped_gear_candidates,
             update_build_preset_slot_props,
             set_build_preset_abilities,
             get_build_preset_abilities,
@@ -855,6 +911,7 @@ pub fn run() {
             add_manual_gift,
             remove_last_gift,
             get_game_state_currencies,
+            get_currency_estimate,
             get_game_state_effects,
             get_game_state_storage,
             get_game_state_vendor,
@@ -899,6 +956,7 @@ pub fn run() {
             db::words_of_power_commands::get_words_of_power,
             db::words_of_power_commands::add_word_of_power,
             db::words_of_power_commands::delete_word_of_power,
+            db::words_of_power_commands::import_words_of_power_csv,
             // User timers
             get_user_timers,
             save_user_timer,

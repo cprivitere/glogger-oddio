@@ -115,7 +115,7 @@ defineEmits<{
 }>()
 
 const filter = ref('')
-const groupBy = ref<'category' | 'area' | 'npc' | 'level' | 'keyword' | 'none'>('category')
+const groupBy = ref<'category' | 'area' | 'npc' | 'level' | 'keyword' | 'none'>('area')
 const sortBy = ref<'name' | 'level'>('name')
 const collapsedGroups = ref(new Set<string>())
 
@@ -130,7 +130,10 @@ function categoryLabel(category: string): string {
   switch (category) {
     case 'active': return 'Active'
     case 'work_order': return 'Work Order'
-    case 'completed_work_order': return 'Completed'
+    case 'completed_work_order': return 'Done'
+    case 'completed': return 'Completed'
+    case 'available': return 'Available'
+    case 'repeatable': return 'Repeatable'
     default: return category
   }
 }
@@ -140,11 +143,21 @@ function categoryBadge(category: string): string {
     case 'active': return 'bg-accent-gold/20 border-accent-gold/40 text-accent-gold'
     case 'work_order': return 'bg-entity-area/20 border-entity-area/40 text-entity-area'
     case 'completed_work_order': return 'bg-green-400/20 border-green-400/40 text-green-300'
+    case 'completed': return 'bg-green-400/20 border-green-400/40 text-green-300'
+    case 'available': return 'bg-sky-400/15 border-sky-400/30 text-sky-300'
+    case 'repeatable': return 'bg-purple-400/15 border-purple-400/30 text-purple-300'
     default: return 'bg-surface-elevated border-border-default text-text-muted'
   }
 }
 
-const CATEGORY_ORDER = ['active', 'work_order', 'completed_work_order']
+const CATEGORY_ORDER = [
+  'active',
+  'work_order',
+  'completed_work_order',
+  'completed',
+  'available',
+  'repeatable',
+]
 
 // Build rows
 const allRows = computed<QuestRow[]>(() => {
@@ -261,8 +274,17 @@ const groupedQuests = computed<QuestGroup[]>(() => {
       .map(([label, quests]) => ({ label, quests }))
   }
 
+  // Catch-all buckets ("Unknown Area", "No NPC", …) always sort to the bottom.
+  const isCatchAll = (label: string) =>
+    label.startsWith('Unknown') || label.startsWith('No ') || label === 'Other'
+
   return Array.from(groupMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => {
+      const aCatch = isCatchAll(a)
+      const bCatch = isCatchAll(b)
+      if (aCatch !== bCatch) return aCatch ? 1 : -1
+      return a.localeCompare(b)
+    })
     .map(([label, quests]) => ({ label, quests }))
 })
 

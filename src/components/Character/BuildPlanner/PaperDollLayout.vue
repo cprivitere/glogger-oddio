@@ -49,8 +49,17 @@
         @click="showImport = true">
         Import
       </button>
+      <button
+        v-if="store.activePreset"
+        class="px-2 py-1 text-xs bg-surface-elevated border border-border-default text-text-secondary rounded cursor-pointer hover:bg-surface-hover disabled:opacity-50 disabled:cursor-wait"
+        :disabled="importingEquipped"
+        title="Fill slots from your character's equipped gear (latest items report)"
+        @click="openImportEquipped">
+        {{ importingEquipped ? 'Loading…' : 'Import Equipped' }}
+      </button>
       <span v-if="exportMessage" class="text-xs text-accent-gold">{{ exportMessage }}</span>
       <span v-if="importError" class="text-xs text-red-400">{{ importError }}</span>
+      <span v-if="equipMessage" class="text-xs" :class="equipError ? 'text-red-400' : 'text-accent-gold'">{{ equipMessage }}</span>
     </div>
 
     <!-- Set Defaults (collapsible) -->
@@ -79,12 +88,37 @@
             class="bg-surface-elevated border border-border-default rounded px-1.5 py-0.5 text-xs text-text-primary w-12 text-center"
             @change="onLevelChange" />
         </div>
+        <!-- Default combat skills — applied to every slot unless overridden per-item -->
+        <div class="flex items-center gap-2">
+          <label class="text-[10px] text-text-muted">Skill 1</label>
+          <StyledSelect
+            :model-value="store.activePreset.skill_primary ?? ''"
+            :options="combatSkillOptions"
+            size="xs"
+            class="flex-1"
+            @update:model-value="onPrimarySkillChange" />
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="text-[10px] text-text-muted">Skill 2</label>
+          <StyledSelect
+            :model-value="store.activePreset.skill_secondary ?? ''"
+            :options="combatSkillOptions"
+            size="xs"
+            class="flex-1"
+            @update:model-value="onSecondarySkillChange" />
+        </div>
       </div>
     </div>
 
-    <!-- Paper Doll Grid -->
+    <!-- Paper Doll Grid (collapsible) -->
     <div v-if="store.activePreset" class="shrink-0">
-      <div class="grid grid-cols-[auto_1fr_auto] gap-x-2 gap-y-1.5 items-start">
+      <button
+        class="flex items-center gap-1 text-[10px] font-semibold text-text-muted uppercase tracking-wider cursor-pointer hover:text-text-secondary w-full"
+        @click="showEquipment = !showEquipment">
+        <span class="transition-transform" :class="showEquipment ? 'rotate-90' : ''">&#9654;</span>
+        Equipment
+      </button>
+      <div v-if="showEquipment" class="grid grid-cols-[auto_1fr_auto] gap-x-2 gap-y-1.5 items-start mt-1">
         <!-- Left column: Armor slots -->
         <div class="flex flex-col gap-1.5 items-center">
           <PaperDollSlot v-for="slot in leftSlots" :key="slot.id" :slot="slot" />
@@ -100,9 +134,20 @@
       </div>
     </div>
 
-    <!-- Ability bars (always visible below equipment) -->
-    <div v-if="store.activePreset" class="flex-1 min-h-0 overflow-y-auto border-t border-border-default pt-2">
-      <AbilityBarSummary />
+    <!-- Ability bars (collapsible) -->
+    <div
+      v-if="store.activePreset"
+      class="flex flex-col border-t border-border-default pt-2"
+      :class="showAbilities ? 'flex-1 min-h-0' : 'shrink-0'">
+      <button
+        class="flex items-center gap-1 text-[10px] font-semibold text-text-muted uppercase tracking-wider cursor-pointer hover:text-text-secondary w-full"
+        @click="showAbilities = !showAbilities">
+        <span class="transition-transform" :class="showAbilities ? 'rotate-90' : ''">&#9654;</span>
+        Abilities
+      </button>
+      <div v-if="showAbilities" class="flex-1 min-h-0 overflow-y-auto mt-1">
+        <AbilityBarSummary />
+      </div>
     </div>
 
     <!-- Dialogs -->
@@ -140,6 +185,12 @@
       @update:show="showImport = $event"
       @confirm="handleImport" />
 
+    <ImportEquippedDialog
+      :show="showImportEquipped"
+      :slots="equipCandidates"
+      @update:show="showImportEquipped = $event"
+      @confirm="handleImportEquipped" />
+
     <ModalDialog
       :show="showDelete"
       title="Delete Build"
@@ -153,14 +204,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useBuildPlannerStore } from '../../../stores/buildPlannerStore'
 import { EQUIPMENT_SLOTS, RARITY_DEFS } from '../../../types/buildPlanner'
+import { useViewPrefs } from '../../../composables/useViewPrefs'
 import StyledSelect from '../../Shared/StyledSelect.vue'
 import ModalDialog from '../../Shared/ModalDialog.vue'
 import PaperDollSlot from './PaperDollSlot.vue'
 import PaperDollStats from './PaperDollStats.vue'
 import AbilityBarSummary from './AbilityBarSummary.vue'
+import ImportEquippedDialog from './ImportEquippedDialog.vue'
+import type { EquippedSlotCandidates, EquippedSelection } from '../../../types/buildPlanner'
 
 const store = useBuildPlannerStore()
 
@@ -180,14 +234,38 @@ const presetOptions = computed(() =>
 
 const rarityOptions = RARITY_DEFS.map(r => ({ value: r.id, label: r.label }))
 
-const showDefaults = ref(false)
+// Default combat skills for the whole build. "None" clears the default; each
+// equipment slot still falls back to these unless it sets its own skill.
+const combatSkillOptions = computed(() => [
+  { value: '', label: 'None' },
+  ...store.combatSkills.map(s => ({ value: s.name, label: s.name })),
+])
+
+// Collapsible section states, persisted per-install via view prefs so the
+// planner reopens with the same sections shown/hidden.
+const { prefs: sectionPrefs, update: updateSectionPrefs } = useViewPrefs('build-planner', {
+  showDefaults: false,
+  showEquipment: true,
+  showAbilities: true,
+})
+const showDefaults = ref(sectionPrefs.value.showDefaults)
+const showEquipment = ref(sectionPrefs.value.showEquipment)
+const showAbilities = ref(sectionPrefs.value.showAbilities)
+watch([showDefaults, showEquipment, showAbilities], ([d, e, a]) => {
+  updateSectionPrefs({ showDefaults: d, showEquipment: e, showAbilities: a })
+})
 const showCreate = ref(false)
 const showRename = ref(false)
 const showClone = ref(false)
 const showDelete = ref(false)
 const showImport = ref(false)
+const showImportEquipped = ref(false)
+const importingEquipped = ref(false)
+const equipCandidates = ref<EquippedSlotCandidates[]>([])
 const exportMessage = ref('')
 const importError = ref('')
+const equipMessage = ref('')
+const equipError = ref(false)
 
 function onPresetChange(val: string) {
   const id = Number(val)
@@ -239,8 +317,59 @@ async function handleDelete() {
   await store.deletePreset(store.activePreset.id)
 }
 
+async function openImportEquipped() {
+  if (!store.activePreset || importingEquipped.value) return
+  importingEquipped.value = true
+  equipMessage.value = ''
+  equipError.value = false
+  try {
+    const result = await store.fetchEquippedCandidates()
+    if (result.reason === 'no-character') {
+      equipError.value = true
+      equipMessage.value = 'No active character selected.'
+    } else if (result.reason === 'no-gear') {
+      equipError.value = true
+      equipMessage.value = 'No equippable items found — import an items report first.'
+    } else if (result.reason === null) {
+      equipCandidates.value = result.slots
+      showImportEquipped.value = true
+    }
+  } catch (e) {
+    equipError.value = true
+    equipMessage.value = `Load failed: ${e}`
+  } finally {
+    importingEquipped.value = false
+    if (equipError.value) setTimeout(() => { equipMessage.value = '' }, 5000)
+  }
+}
+
+async function handleImportEquipped(selections: EquippedSelection[]) {
+  equipMessage.value = ''
+  equipError.value = false
+  try {
+    const count = await store.applyEquippedGear(selections)
+    equipMessage.value = `Imported ${count} slot${count === 1 ? '' : 's'}.`
+  } catch (e) {
+    equipError.value = true
+    equipMessage.value = `Import failed: ${e}`
+  } finally {
+    setTimeout(() => { equipMessage.value = '' }, 5000)
+  }
+}
+
 async function onRarityChange(val: string) {
   await store.updatePreset({ target_rarity: val })
+  await store.onBuildParamsChanged()
+}
+
+async function onPrimarySkillChange(val: string) {
+  await store.updatePreset({ skill_primary: val || null })
+  await store.onBuildParamsChanged()
+}
+
+async function onSecondarySkillChange(val: string) {
+  await store.updatePreset({ skill_secondary: val || null })
+  await store.onBuildParamsChanged()
 }
 
 async function onLevelChange(e: Event) {
