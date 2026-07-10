@@ -1,5 +1,22 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-09/10 (Session 33 — 3D Model Viewer REMOVED from glogger; now a standalone app)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — **history rewritten + force-pushed** (user-approved): the three model-viewer commits (`89c207f`, `ce5a7b8`, `0f08746`) were dropped via `rebase --onto`; the Flatpak GNOME-50 fix and Import Equipped were kept. `dev` = `origin/dev` = `8a1ee73`. `main` never had the feature.
+**Status:** ✅ glogger tree clean; rewritten source identical to `8f34810` (a released, known-good state).
+
+## TL;DR — Session 33
+
+Per the user's direction, the entire 3D Model Viewer was **extracted into its own app and purged from glogger's history**:
+
+- **New home: [github.com/crisp-oddio/pg-model-viewer](https://github.com/crisp-oddio/pg-model-viewer)** (public), local at `A:\Claude\pg-model-viewer`. Standalone Tauri 2 + Vue 3 app with its own lean PG-CDN item layer; releases **v0.1.1** and **v0.1.2** shipped with Windows/macOS/Linux installers (frozen Python extractor sidecar bundled). See that repo's `HANDOFF.md` + auto-memory `project_model_viewer.md` for everything model-viewer related from now on.
+- **glogger:** no `model_assets.rs`, no `ModelViewer/` components, no `three` dep, no `EquipAppearance` fields on `ItemInfo` — the surface is exactly pre-feature. Session 31/32's handoff entries describing the feature were dropped with the commits (this entry is the record). Anyone with an old clone of `dev` must hard-reset to `origin/dev`.
+- Removed leftovers: the untracked `src-tauri/binaries/` sidecar dir; the (local-only) recovery tag `archive/model-viewer-20260709` was deleted after the standalone was verified.
+
+**Next session (glogger):** merge PR #81 + release v0.11.30 (the Flatpak GNOME-50 fix) is still the open item from Session 32.
+
+---
+
 **Date:** 2026-07-08 (Session 32 — hotfix: Flatpak GNOME 47 runtime EOL)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` at `9db9bb6` (pushed). Same fix cherry-picked to `hotfix/flatpak-gnome-50` (`78328ef`, off `origin/main`) → **PR #81 open, not yet merged** — this is the release path.
