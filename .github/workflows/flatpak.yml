@@ -58,11 +58,16 @@ jobs:
       # single-file URL now 404s — so install it from the git subdirectory, which
       # also handles newer nested node_modules layouts (e.g. Tailwind's oxide-wasi).
       # Use a venv so pip works regardless of the container's PEP 668 policy.
+      # No --quiet: on the gnome-50 image the install "succeeded" silently while
+      # the console script never appeared (v0.11.30) — keep pip output visible.
       - name: Install offline-source generators
         run: |
           python3 -m venv /tmp/gen
-          /tmp/gen/bin/pip install --quiet aiohttp tomlkit \
-            "git+https://github.com/flatpak/flatpak-builder-tools.git#subdirectory=node"
+          /tmp/gen/bin/pip install aiohttp tomlkit
+          /tmp/gen/bin/pip install "git+https://github.com/flatpak/flatpak-builder-tools.git#subdirectory=node"
+          # Sanity check: run as a module — where pip places console scripts
+          # varies across builder images (bin/ vs local/bin), the module doesn't.
+          /tmp/gen/bin/python -m flatpak_node_generator --help >/dev/null
 
       - name: Download flatpak-cargo-generator
         run: |
@@ -77,7 +82,7 @@ jobs:
 
       - name: Generate npm offline sources
         run: |
-          /tmp/gen/bin/flatpak-node-generator npm package-lock.json \
+          /tmp/gen/bin/python -m flatpak_node_generator npm package-lock.json \
             -o flatpak/generated-node-sources.json
 
       # ── Build Flatpak ───────────────────────────────────────────────────
