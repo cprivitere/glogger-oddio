@@ -752,7 +752,17 @@ async function recomputeMaterials() {
     const recipe = recipeMap.value.get(recipeId);
     if (!recipe) continue;
 
-    const resolved = await craftingStore.resolveRecipeIngredients(recipe, craftCount);
+    // Leveling plans are in crafts, not output items — pass quantityIsCrafts so
+    // multi-yield recipes (e.g. 2 items per craft) don't understate materials.
+    const resolved = await craftingStore.resolveRecipeIngredients(
+      recipe,
+      craftCount,
+      false,
+      new Set(),
+      undefined,
+      undefined,
+      true,
+    );
     const flat = craftingStore.flattenIngredients(resolved.ingredients);
 
     for (const [key, mat] of flat) {

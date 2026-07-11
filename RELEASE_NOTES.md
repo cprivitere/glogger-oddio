@@ -1,10 +1,8 @@
-## What's Changed since v0.11.30
-
-### Features
-- feat(brewery): collapsible + resizable discoveries and untried lists (`c54d2cb`)
+## What's Changed since v0.11.32
 
 ### Fixes
-- fix(flatpak): invoke node generator as a module, unsilence pip (exit-127 on gnome-50 image) (`5994ccb`)
+- fix(crafting): leveling planner understated materials for multi-yield recipes (`7b665b7`)
+- fix(release): only an open PR should suppress the release PR (`2a2ad8a`)
 
 ---
-*6 commits since v0.11.30*
+*5 commits since v0.11.32*
