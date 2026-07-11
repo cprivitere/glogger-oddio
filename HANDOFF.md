@@ -1,5 +1,32 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-11 (Session 35 — leveling planner multi-yield materials fix)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — fix `7b665b7` + merge `c6bf73e` (origin/main v0.11.32 baseline), pushed.
+**Status:** ✅ `vue-tsc --noEmit` clean (pre- and post-merge). Frontend-only change, no Rust touched. Verified live in `tauri dev` (user click-tested the leveling tab, "looks good"). Release v0.11.33 dispatched — see below.
+
+## TL;DR — Session 35
+
+**User report:** recipes yielding multiple items per craft understated materials in project planning — e.g. 5 planned crafts of Toasted Spriggan Nuts (2/craft) showed only 3 crafts' worth of materials (6 Spriggan Nuts instead of 10).
+
+**Root cause (units mismatch, one branch only):** `resolveRecipeIngredients` in [craftingStore.ts](src/stores/craftingStore.ts) takes a desired *output-item* quantity and derives crafts via `ceil(desired / (yield × chance))`. The **Leveling tab's materials panel** passed its plan *craft counts* straight into that parameter ([LevelingTab.vue](src/components/Crafting/LevelingTab.vue) `recomputeMaterials`), so multi-yield recipes got divided by yield a second time.
+
+### What shipped (`7b665b7`)
+- **[craftingStore.ts](src/stores/craftingStore.ts)** — new optional `quantityIsCrafts` param (7th, positional) on `resolveRecipeIngredients`: uses the count as the craft count directly. Ingredient-tree cache key gets a `c` marker so craft-count and item-count requests can't collide; `desired_quantity` in the result stays in item units (`craftCount × outputPerCraft` in crafts mode).
+- **[LevelingTab.vue](src/components/Crafting/LevelingTab.vue)** — `recomputeMaterials` resolves with `quantityIsCrafts=true`.
+
+### Audit — every other resolver caller passes item quantities correctly
+Projects tab (single + group resolve), ProjectEntryCard (expand/cost), project-needs index, stock targets (shortfall in items), QuickCalc (explicit crafts↔items round-trip UI), work orders→project (order qty = items), Cook's Helper & Brewery combos (qty 1, benign), live tracker (items target, crafts derived via `output_per_craft`). `createProjectFromLevelingPlan` already multiplied crafts × yield when creating entries — the created project's materials now agree exactly with the leveling panel. Rust backend is pure CRUD, no yield math.
+
+### Gotchas / notes
+- Local-only `dev-detached.cmd` (untracked, machine-specific) + `glogger-dev` scheduled task = MSIX-safe detached `tauri dev` launch (see `project_msix_sandbox_gotcha` memory). `schtasks /Run /TN glogger-dev`, log at `dev-detached.log`.
+- Another session merged [PR #88](https://github.com/crisp-oddio/glogger-oddio/pull/88) (release PR no longer suppressed by old MERGED PRs) and shipped v0.11.32 earlier today; dev was fast-forwarded to pick that up before this session's merge of main.
+
+### Release v0.11.33
+- Dispatched `release.yml --ref dev -f version=patch` from dev at `c6bf73e` (0.11.32 baseline → 0.11.33; no stale `release/v0.11.33` branch existed).
+
+---
+
 **Date:** 2026-07-10 (Session 34 — Words of Power widget: auto-remove spoken words)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `8cf9888` on top of `5cba37a`, pushed.
