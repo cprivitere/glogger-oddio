@@ -103,7 +103,10 @@ jobs:
           git commit -m "release: v${VERSION}"
           git push --force origin "$BRANCH"
 
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+          # Only an OPEN PR should suppress creation — `gh pr view` also matches
+          # closed/merged PRs, so a stale release/vX from an earlier (reverted or
+          # reused) version number would silently skip opening the new PR.
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
             echo "PR already open for $BRANCH — branch updated."
           else
             BODY=$(printf 'Automated version bump to **v%s**.\n\nApprove and merge this PR to publish the release. Once it lands on `main`, the **Release Publish** workflow tags `v%s` and builds the Windows / macOS / Linux installers + GitHub Release automatically, then attaches the Flatpak.\n\n---\n\n%s\n' "$VERSION" "$VERSION" "$(cat RELEASE_NOTES.md)")
