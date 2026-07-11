@@ -21,6 +21,7 @@ Projects tab (single + group resolve), ProjectEntryCard (expand/cost), project-n
 ### Gotchas / notes
 - Local-only `dev-detached.cmd` (untracked, machine-specific) + `glogger-dev` scheduled task = MSIX-safe detached `tauri dev` launch (see `project_msix_sandbox_gotcha` memory). `schtasks /Run /TN glogger-dev`, log at `dev-detached.log`.
 - Another session merged [PR #88](https://github.com/crisp-oddio/glogger-oddio/pull/88) (release PR no longer suppressed by old MERGED PRs) and shipped v0.11.32 earlier today; dev was fast-forwarded to pick that up before this session's merge of main.
+- Deleted the dead `origin/release/v0.11.31` branch (Session 34's leftover from the force-push incident; no tag, no open PR). Every remaining `release/*` branch matches a published tag.
 
 ### Release v0.11.33 — ✅ PUBLISHED (all installers + Flatpak, marked Latest)
 - Dispatched `release.yml --ref dev -f version=patch` from dev at `c6bf73e` (0.11.32 baseline → 0.11.33; no stale `release/v0.11.33` branch existed).
