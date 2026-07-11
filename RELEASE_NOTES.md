@@ -1,10 +1,10 @@
-## What's Changed since v0.11.27
+## What's Changed since v0.11.29
 
 ### Features
-- feat(build-planner): add "Import Equipped" gear loadout picker (`8f34810`)
+- feat(words-of-power): auto-remove words when spoken in-game (`8cf9888`)
 
 ### Fixes
-- fix(build-planner): apply skill-wide "<Skill> Base Damage +N%" prose mods (`42813aa`)
+- fix(flatpak): bump runtime to GNOME 50 (47 is EOL) (`c01c0ff`)
 
 ---
-*6 commits since v0.11.27*
+*7 commits since v0.11.29*
