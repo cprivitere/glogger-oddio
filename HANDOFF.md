@@ -25,10 +25,16 @@
 - **Real-data cross-check:** the Release DB (`%APPDATA%\glogger.Release\glogger.db`, the daily-driver build) had **56 saved words, 4 of which were already spoken** (e.g. `KACHZAVPLITQUAYZAOBLIYEAO` / Elemental Immunity, used 26-07-02) — exactly the reported bug. The startup backfill will remove those 4 on the next Release-build launch with this code. The **dev DB has 0 saved words**, so a `tauri dev` run won't visibly demonstrate removal — live confirmation needs the portable/release build or a fresh discovery+use in dev.
 - **Remaining manual step:** speak a word in-game with glogger running and watch it vanish from the widget.
 
-### Gotcha hit
+### Gotchas hit
 - PowerShell 5.1 mangles `git commit -m` here-strings containing double quotes (native-arg re-quoting splits the message into pathspecs) — use `git commit -F <file>`.
+- **Force-push incident on main (2026-07-09, discovered this session):** an accidental `git push --force` from a stale clone wiped `main` to June-22 state; PR #83 (superness) restored it to `769b4cc` (v0.11.29). Casualties: PR #79 (release v0.11.30), PR #82 (release v0.11.31), and PR #81 (GNOME-50 flatpak fix) were all "merged" into the doomed main and published nothing — no v0.11.30/31 tags exist. The GNOME-50 fix only survives on dev (`c01c0ff`).
+- **Release workflow idempotency bug:** re-dispatching release.yml for a version whose old PR was merged-but-lost silently skips `gh pr create` (`gh pr view` matches MERGED PRs, prints "PR already open"). The branch still gets force-updated; the PR must be opened manually.
 
-**Still open from Session 32:** merge PR #81 + release v0.11.30 (Flatpak GNOME-50 fix).
+### Release v0.11.30 — dispatched this session, PENDING MERGE
+- Merged `origin/main` into dev (`69a112a`, clean) — synced v0.11.29 version baseline + kaeus's survey perf fix (`92850dc`); 505 tests + vue-tsc green post-merge.
+- Dispatched `release.yml --ref dev -f version=patch` → validate green, branch `release/v0.11.30` regenerated (`671d9c0`: v0.11.30, flatpak runtime '50', WoP feature included).
+- PR creation was skipped (bug above) → **opened [PR #85](https://github.com/crisp-oddio/glogger-oddio/pull/85) manually**. **Next action (user): approve + merge PR #85** → Release Publish tags v0.11.30, builds installers, Flatpak attaches.
+- Stale leftover: `origin/release/v0.11.31` branch (dead, from the incident) can be deleted.
 
 ---
 
