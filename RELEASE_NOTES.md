@@ -1,10 +1,10 @@
-## What's Changed since v0.11.29
+## What's Changed since v0.11.30
 
 ### Features
-- feat(words-of-power): auto-remove words when spoken in-game (`8cf9888`)
+- feat(brewery): collapsible + resizable discoveries and untried lists (`c54d2cb`)
 
 ### Fixes
-- fix(flatpak): bump runtime to GNOME 50 (47 is EOL) (`c01c0ff`)
+- fix(flatpak): invoke node generator as a module, unsilence pip (exit-127 on gnome-50 image) (`5994ccb`)
 
 ---
-*7 commits since v0.11.29*
+*6 commits since v0.11.30*
