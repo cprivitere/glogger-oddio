@@ -801,6 +801,13 @@ impl SurveySessionAggregator {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("[survey-aggregator] insert_use failed: {e}");
+                // A cached active-session id can point at a session that was
+                // deleted out from under us (e.g. the user deleted it in the
+                // History UI, which operates directly on the DB). That makes
+                // the survey_uses → survey_sessions FK fail on every use.
+                // Drop the cache so the next use re-resolves and auto-starts a
+                // fresh session instead of failing forever.
+                self.cached_active_session_id = None;
                 return;
             }
         };
@@ -1431,6 +1438,16 @@ impl SurveySessionAggregator {
     }
 
     /// Cached active-session-id lookup.
+    /// Drop the cached active-session id so the next lookup re-resolves from
+    /// the DB. Call this when a session is removed by a path that bypasses the
+    /// aggregator's own start/end flow — notably the History UI's
+    /// `survey_tracker_delete_session`, which deletes rows directly. Without
+    /// this, the cache would keep handing out a now-missing session id and
+    /// every subsequent `insert_use` would fail the FK constraint.
+    pub fn invalidate_session_cache(&mut self) {
+        self.cached_active_session_id = None;
+    }
+
     fn fetch_active_session(
         &mut self,
         conn: &Connection,
@@ -1830,6 +1847,57 @@ mod tests {
             .start_manual_session(&conn, "Zenith", "Dreva", "2026-04-15 13:00:00")
             .unwrap();
         assert!(id2 > id);
+    }
+
+    /// Regression: the History UI's delete_session removes rows directly,
+    /// bypassing the aggregator's end flow. If the aggregator keeps the
+    /// deleted id in its active-session cache, every subsequent `insert_use`
+    /// fails the survey_uses → survey_sessions FK and no new surveys are
+    /// captured. Invalidating the cache must make it re-resolve.
+    #[test]
+    fn test_delete_session_out_from_under_aggregator_recovers() {
+        let conn = fresh_db();
+        let mut agg = SurveySessionAggregator::new(empty_game_data());
+
+        // Aggregator starts + caches a session.
+        let id = agg
+            .start_manual_session(&conn, "Zenith", "Dreva", "2026-04-15 12:00:00")
+            .unwrap();
+        assert_eq!(agg.fetch_active_session(&conn, "Zenith", "Dreva"), Some(id));
+
+        // Simulate survey_tracker_delete_session: rows removed directly.
+        conn.execute(
+            "DELETE FROM survey_uses WHERE session_id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM survey_sessions WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+
+        // The stale cached id would fail the FK if used for a new insert.
+        let fk = persistence::insert_use(
+            &conn,
+            Some(id),
+            "Zenith",
+            "Dreva",
+            "2026-04-15 12:05:00",
+            "GeologySurveySerbule1",
+            "Serbule Blue Mineral Survey",
+            crate::survey::types::SurveyUseKind::Basic,
+            Some("Serbule"),
+        );
+        assert!(
+            fk.is_err(),
+            "inserting a use against a deleted session must fail the FK"
+        );
+
+        // Fix: invalidation re-resolves to 'no active session' so the next
+        // use auto-starts a fresh one instead of reusing the missing id.
+        agg.invalidate_session_cache();
+        assert_eq!(agg.fetch_active_session(&conn, "Zenith", "Dreva"), None);
     }
 
     #[test]

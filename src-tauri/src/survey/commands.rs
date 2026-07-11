@@ -114,18 +114,21 @@ pub struct LootSummaryRow {
 pub fn survey_tracker_status(
     coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
 ) -> Result<SurveyTrackerStatus, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let (character, server) = match coord.active_character_server() {
-        Some((c, s)) => (c, s),
-        None => {
-            // No active character — there can be no active session either.
-            return Ok(SurveyTrackerStatus {
-                active_session: None,
-                open_multihit_nodes: Vec::new(),
-            });
-        }
+    let (character, server, conn) = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        let (character, server) = match coord.active_character_server() {
+            Some((c, s)) => (c, s),
+            None => {
+                // No active character — there can be no active session either.
+                return Ok(SurveyTrackerStatus {
+                    active_session: None,
+                    open_multihit_nodes: Vec::new(),
+                });
+            }
+        };
+        let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+        (character, server, conn)
     };
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
     let active_session = persistence::active_session(&conn, &character, &server)
         .map_err(|e| e.to_string())?;
     let open_multihit_nodes = list_multihit_summaries(&conn, &character, &server)
@@ -177,12 +180,15 @@ pub fn survey_tracker_recent_sessions(
     coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
     limit: Option<u32>,
 ) -> Result<Vec<SurveySession>, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let (character, server) = match coord.active_character_server() {
-        Some(cs) => cs,
-        None => return Ok(Vec::new()),
+    let (character, server, conn) = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        let (character, server) = match coord.active_character_server() {
+            Some(cs) => cs,
+            None => return Ok(Vec::new()),
+        };
+        let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+        (character, server, conn)
     };
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(20).min(200);
     list_recent_sessions(&conn, &character, &server, limit).map_err(|e| e.to_string())
 }
@@ -195,8 +201,15 @@ pub fn survey_tracker_session_detail(
     settings_manager: State<'_, Arc<SettingsManager>>,
     session_id: i64,
 ) -> Result<Option<SurveySessionDetail>, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    // Acquire a pooled connection, then release the coordinator lock before
+    // running the read queries. Log ingestion contends on the same
+    // coordinator mutex, so holding it across a large query would stall
+    // ingestion (and freeze the UI). WAL + the connection pool make
+    // concurrent reads safe without the lock.
+    let conn = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        coord.db_pool().get().map_err(|e| e.to_string())?
+    };
     let valuation_mode = settings_manager.get().item_valuation_mode.clone();
 
     let Some(session) = persistence::get_session(&conn, session_id).map_err(|e| e.to_string())?
@@ -309,7 +322,7 @@ fn loot_summary_for_session(
          FROM item_transactions t
          JOIN survey_uses u
            ON u.session_id = ?1
-          AND u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+          AND u.id = t.survey_use_id
          LEFT JOIN market_values mv
            ON mv.server_name = ?2 AND mv.item_type_id = t.item_type_id
          LEFT JOIN items i
@@ -325,7 +338,7 @@ fn loot_summary_for_session(
              OR NOT EXISTS (
                SELECT 1 FROM item_transactions c
                 WHERE c.source_kind = 'survey_chat'
-                  AND CAST(json_extract(c.source_details, '$.survey_use_id') AS INTEGER) = u.id
+                  AND c.survey_use_id = u.id
              )
            )
          GROUP BY t.item_name
@@ -560,12 +573,18 @@ pub fn survey_tracker_historical_sessions(
     settings_manager: State<'_, Arc<SettingsManager>>,
     limit: Option<u32>,
 ) -> Result<Vec<HistoricalSessionRow>, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let (character, server) = match coord.active_character_server() {
-        Some(cs) => cs,
-        None => return Ok(Vec::new()),
+    // See survey_tracker_session_detail: grab the connection + identity, then
+    // drop the coordinator lock before the (heavier) rollup queries so a slow
+    // read can't stall log ingestion.
+    let (character, server, conn) = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        let (character, server) = match coord.active_character_server() {
+            Some(cs) => cs,
+            None => return Ok(Vec::new()),
+        };
+        let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+        (character, server, conn)
     };
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(50).min(500);
     let valuation_mode = settings_manager.get().item_valuation_mode.clone();
     historical_session_rows(&conn, &character, &server, &valuation_mode, limit)
@@ -742,7 +761,7 @@ pub fn survey_tracker_delete_session(
     coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
     session_id: i64,
 ) -> Result<(), String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
+    let mut coord = coordinator.lock().map_err(|e| e.to_string())?;
     let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
     // Delete uses first (no cascade defined). Then delete the session header.
     conn.execute(
@@ -755,6 +774,12 @@ pub fn survey_tracker_delete_session(
         params![session_id],
     )
     .map_err(|e| e.to_string())?;
+    drop(conn);
+    // The aggregator caches the active-session id. If we just deleted that
+    // session, the cache is now stale — the next survey use would insert
+    // against a missing session id and fail the FK. Invalidate so it
+    // re-resolves (and auto-starts a fresh session) on the next use.
+    coord.survey_aggregator_mut().invalidate_session_cache();
     Ok(())
 }
 
@@ -845,23 +870,28 @@ pub struct SurveyAnalytics {
 pub fn survey_tracker_analytics(
     coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
 ) -> Result<SurveyAnalytics, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let (character, server) = match coord.active_character_server() {
-        Some(cs) => cs,
-        None => {
-            return Ok(SurveyAnalytics {
-                zones: vec![],
-                survey_types: vec![],
-                items: vec![],
-                total_sessions: 0,
-                total_uses: 0,
-                total_basic_uses: 0,
-                basic_uses_with_bonus: 0,
-                bonus_items_total: 0,
-            });
-        }
+    // See survey_tracker_session_detail: release the coordinator lock before
+    // the analytics rollups so they don't stall log ingestion.
+    let (character, server, conn) = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        let (character, server) = match coord.active_character_server() {
+            Some(cs) => cs,
+            None => {
+                return Ok(SurveyAnalytics {
+                    zones: vec![],
+                    survey_types: vec![],
+                    items: vec![],
+                    total_sessions: 0,
+                    total_uses: 0,
+                    total_basic_uses: 0,
+                    basic_uses_with_bonus: 0,
+                    bonus_items_total: 0,
+                });
+            }
+        };
+        let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+        (character, server, conn)
     };
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
 
     let zones = zone_summaries(&conn, &character, &server).map_err(|e| e.to_string())?;
     let survey_types =
@@ -898,7 +928,7 @@ pub fn survey_tracker_analytics(
                 SELECT u.id AS use_id, SUM(t.quantity) AS bonus_qty
                   FROM item_transactions t
                   JOIN survey_uses u
-                    ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+                    ON u.id = t.survey_use_id
                  WHERE u.character_name = ?1 AND u.server_name = ?2
                    AND json_extract(t.source_details, '$.is_speed_bonus') = 1
                    AND t.quantity > 0
@@ -938,7 +968,7 @@ fn zone_summaries(
                    SUM(t.quantity) AS bonus_qty
               FROM item_transactions t
               JOIN survey_uses u
-                ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+                ON u.id = t.survey_use_id
              WHERE u.character_name = ?1 AND u.server_name = ?2
                AND json_extract(t.source_details, '$.is_speed_bonus') = 1
                AND t.quantity > 0
@@ -1005,7 +1035,7 @@ fn survey_type_summaries(
                    SUM(t.quantity) AS bonus_qty
               FROM item_transactions t
               JOIN survey_uses u
-                ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+                ON u.id = t.survey_use_id
              WHERE u.character_name = ?1 AND u.server_name = ?2
                AND json_extract(t.source_details, '$.is_speed_bonus') = 1
                AND t.quantity > 0
@@ -1088,7 +1118,7 @@ fn items_for_zone(
                 COUNT(*) AS times_received
          FROM item_transactions t
          JOIN survey_uses u
-           ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+           ON u.id = t.survey_use_id
          WHERE t.quantity > 0
            AND u.character_name = ?1
            AND u.server_name = ?2
@@ -1130,7 +1160,7 @@ fn items_for_survey_type(
                 COUNT(*) AS times_received
          FROM item_transactions t
          JOIN survey_uses u
-           ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+           ON u.id = t.survey_use_id
          WHERE t.quantity > 0
            AND u.character_name = ?1
            AND u.server_name = ?2
@@ -1173,7 +1203,7 @@ fn item_summaries(
                 COUNT(*) AS times_received
          FROM item_transactions t
          JOIN survey_uses u
-           ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+           ON u.id = t.survey_use_id
          WHERE t.quantity > 0
            AND u.character_name = ?1
            AND u.server_name = ?2
@@ -1231,12 +1261,17 @@ pub struct ItemSourceAnalysis {
 pub fn survey_tracker_item_cost_analysis(
     coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
 ) -> Result<Vec<ItemSourceAnalysis>, String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let (character, server) = match coord.active_character_server() {
-        Some(cs) => cs,
-        None => return Ok(Vec::new()),
+    // See survey_tracker_session_detail: release the coordinator lock before
+    // the analysis query so it doesn't stall log ingestion.
+    let (character, server, conn) = {
+        let coord = coordinator.lock().map_err(|e| e.to_string())?;
+        let (character, server) = match coord.active_character_server() {
+            Some(cs) => cs,
+            None => return Ok(Vec::new()),
+        };
+        let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+        (character, server, conn)
     };
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
     item_cost_analysis_rows(&conn, &character, &server).map_err(|e| e.to_string())
 }
 
@@ -1299,7 +1334,7 @@ fn item_cost_analysis_rows(
                    COUNT(DISTINCT u.id) AS uses_with_any_bonus
               FROM survey_uses u
               JOIN item_transactions t
-                ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+                ON u.id = t.survey_use_id
              WHERE u.character_name = ?1 AND u.server_name = ?2
                AND u.kind = 'basic'
                AND json_extract(t.source_details, '$.is_speed_bonus') = 1
@@ -1325,7 +1360,7 @@ fn item_cost_analysis_rows(
                 COALESCE(td.total_uses, 0) AS td_total_uses
            FROM item_transactions t
            JOIN survey_uses u
-             ON u.id = CAST(json_extract(t.source_details, '$.survey_use_id') AS INTEGER)
+             ON u.id = t.survey_use_id
            JOIN per_type_stats pts
              ON pts.map_internal_name = u.map_internal_name
             AND ((pts.area IS NULL AND u.area IS NULL) OR pts.area = u.area)
