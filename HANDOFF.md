@@ -22,8 +22,9 @@ Projects tab (single + group resolve), ProjectEntryCard (expand/cost), project-n
 - Local-only `dev-detached.cmd` (untracked, machine-specific) + `glogger-dev` scheduled task = MSIX-safe detached `tauri dev` launch (see `project_msix_sandbox_gotcha` memory). `schtasks /Run /TN glogger-dev`, log at `dev-detached.log`.
 - Another session merged [PR #88](https://github.com/crisp-oddio/glogger-oddio/pull/88) (release PR no longer suppressed by old MERGED PRs) and shipped v0.11.32 earlier today; dev was fast-forwarded to pick that up before this session's merge of main.
 
-### Release v0.11.33
+### Release v0.11.33 — ✅ PUBLISHED (all installers + Flatpak, marked Latest)
 - Dispatched `release.yml --ref dev -f version=patch` from dev at `c6bf73e` (0.11.32 baseline → 0.11.33; no stale `release/v0.11.33` branch existed).
+- Release PR **#90 opened automatically** — first release proving the PR #88 fix (no manual `gh pr create` needed). Merged → Release Publish shipped Windows setup.exe, macOS dmg/app.tar.gz, Linux deb/AppImage, `glogger.flatpak`, and `latest.json` in one run (Flatpak is part of release-publish.yml now, no separate tag-triggered wait).
 
 ---
 
