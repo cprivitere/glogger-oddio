@@ -1,6 +1,11 @@
 use super::word_of_power_catalog;
 use super::DbPool;
+use crate::chat_parser::{parse_chat_line, parse_chat_log_filename};
+use crate::chat_status_parser::{parse_status_message, ChatStatusEvent};
+use crate::settings::SettingsManager;
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
+use std::sync::Arc;
 use tauri::State;
 
 // ── Output types ────────────────────────────────────────────────────────────
@@ -278,6 +283,110 @@ fn parse_csv_datetime(s: &str) -> Option<String> {
     None
 }
 
+// ── Used-word removal ───────────────────────────────────────────────────────
+
+/// Delete every saved copy of a spoken word. Words of power are consumed
+/// game-wide when spoken, so copies saved by any character are dead once
+/// used. Matching is case-insensitive and whitespace-tolerant to cover
+/// manual entries. Returns the number of rows deleted.
+pub fn delete_words_by_word(
+    conn: &rusqlite::Connection,
+    word: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM words_of_power WHERE TRIM(word) = TRIM(?1) COLLATE NOCASE",
+        [word],
+    )
+}
+
+/// Scan historical chat logs for `[Status] You use the word of power WORD!`
+/// lines and delete any saved words that were spoken while glogger wasn't
+/// tailing (live uses are handled by the coordinator's chat-status path).
+/// A use can't precede its word's discovery, so only files dated on or after
+/// the earliest saved discovery (minus one day of timezone slack — chat
+/// filenames are local dates, `discovered_at` is UTC) are read, keeping the
+/// startup scan cheap. Returns rows deleted.
+pub fn backfill_used_words_from_chat_logs(
+    settings: &SettingsManager,
+    db: &DbPool,
+) -> Result<usize, String> {
+    let conn = db
+        .get()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+
+    let saved: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT discovered_at FROM words_of_power")
+            .map_err(|e| format!("Query prepare error: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("Query error: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("Row error: {e}"))?
+    };
+    if saved.is_empty() {
+        return Ok(0);
+    }
+
+    let Some(dir) = settings.get_chat_logs_dir() else {
+        return Ok(0);
+    };
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+
+    let min_date = saved
+        .iter()
+        .filter_map(|d| chrono::NaiveDate::parse_from_str(d.get(..10)?, "%Y-%m-%d").ok())
+        .min()
+        .map(|d| d - chrono::Duration::days(1));
+
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?;
+
+    let mut deleted = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_date) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_chat_log_filename)
+        else {
+            continue;
+        };
+        if matches!(min_date, Some(min) if file_date < min) {
+            continue;
+        }
+
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            let Some(msg) = parse_chat_line(&line) else {
+                continue;
+            };
+            if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
+                parse_status_message(&msg)
+            {
+                deleted += delete_words_by_word(&conn, &word)
+                    .map_err(|e| format!("Delete error: {e}"))?;
+            }
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// Tauri command wrapper around [`backfill_used_words_from_chat_logs`].
+#[tauri::command]
+pub fn backfill_words_of_power_usage(
+    settings: State<'_, Arc<SettingsManager>>,
+    db: State<'_, DbPool>,
+) -> Result<usize, String> {
+    backfill_used_words_from_chat_logs(&settings, &db)
+}
+
 // ── Internal helper (called from coordinator, not a Tauri command) ──────────
 
 pub fn insert_word_of_power(
@@ -295,4 +404,68 @@ pub fn insert_word_of_power(
         rusqlite::params![character_name, server_name, word, power_name, description, discovered_at],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE words_of_power (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                word TEXT NOT NULL,
+                power_name TEXT NOT NULL,
+                description TEXT,
+                discovered_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'auto',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM words_of_power", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_delete_words_by_word_removes_all_characters_copies() {
+        let conn = setup();
+        // Same word saved by two characters, plus an unrelated word.
+        insert_word_of_power(&conn, "Alt", "Dreva", "ABCWORD", "Haste", None, "2026-07-01T00:00:00Z").unwrap();
+        insert_word_of_power(&conn, "Main", "Dreva", "ABCWORD", "Haste", None, "2026-07-01T00:00:00Z").unwrap();
+        insert_word_of_power(&conn, "Main", "Dreva", "OTHERWORD", "Luck", None, "2026-07-02T00:00:00Z").unwrap();
+
+        let n = delete_words_by_word(&conn, "ABCWORD").unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(count(&conn), 1);
+    }
+
+    #[test]
+    fn test_delete_words_by_word_case_and_whitespace_insensitive() {
+        let conn = setup();
+        // Manual entries may be lowercased or carry stray whitespace.
+        insert_word_of_power(&conn, "Main", "Dreva", " abcword ", "Haste", None, "2026-07-01T00:00:00Z").unwrap();
+
+        let n = delete_words_by_word(&conn, "ABCWORD").unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(count(&conn), 0);
+    }
+
+    #[test]
+    fn test_delete_words_by_word_unknown_word_is_noop() {
+        let conn = setup();
+        insert_word_of_power(&conn, "Main", "Dreva", "ABCWORD", "Haste", None, "2026-07-01T00:00:00Z").unwrap();
+
+        let n = delete_words_by_word(&conn, "NEVERSPOKEN").unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(count(&conn), 1);
+    }
 }

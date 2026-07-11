@@ -1170,6 +1170,34 @@ impl DataIngestCoordinator {
                                     .ok();
                                 }
                             }
+                            ChatStatusEvent::WordOfPowerUsed { word, .. } => {
+                                // Speaking a word consumes it game-wide — remove
+                                // every saved copy so the Words of Power widget
+                                // stops offering a dead word. Idempotent (a
+                                // replayed use line deletes nothing).
+                                if let Ok(conn) = self.db_pool.get() {
+                                    match crate::db::words_of_power_commands::delete_words_by_word(
+                                        &conn, word,
+                                    ) {
+                                        Ok(0) => {}
+                                        Ok(n) => {
+                                            startup_log!(
+                                                "[coordinator] Word of power used: {} ({} saved row(s) removed)",
+                                                word,
+                                                n
+                                            );
+                                            self.app_handle
+                                                .emit("game-state-updated", vec!["words_of_power"])
+                                                .ok();
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[coordinator] Failed to remove used word of power: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
 

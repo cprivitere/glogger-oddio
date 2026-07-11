@@ -1,5 +1,76 @@
 # glogger — Session Handoff
 
+**Date:** 2026-07-10 (Session 34 — Words of Power widget: auto-remove spoken words)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — committed `8cf9888` on top of `5cba37a`, pushed.
+**Status:** ✅ `cargo test --lib` **504 pass** (5 new: 2 parser + 3 delete-helper), `cargo check --lib` clean, no frontend changes. Not click-tested live (needs an in-game word use); verified offline against real data — see below.
+
+## TL;DR — Session 34
+
+**User request:** using a word of power in-game didn't remove it from the Words of Power widget — dead words lingered forever. Now the widget monitors chat for the player speaking a word and deletes it from the saved set.
+
+**The signal (established from real logs):** speaking a word writes exactly one line to Chat.log:
+`[Status] You use the word of power WORD!` — 111 instances across the user's logs, all uppercase, no spaces, no case variance, and **no failure/variant lines exist** (checked). Words are random long strings, so matching by word text alone is collision-free.
+
+### What shipped (`8cf9888`)
+- **[chat_status_parser.rs](src-tauri/src/chat_status_parser.rs)** — new `ChatStatusEvent::WordOfPowerUsed { timestamp, word }` + `try_word_of_power_used` (prefix/suffix strip, same style as roulette).
+- **[words_of_power_commands.rs](src-tauri/src/db/words_of_power_commands.rs)** — `delete_words_by_word` (`TRIM(word) = TRIM(?1) COLLATE NOCASE` — covers manual lowercase/whitespace entries; deletes across ALL characters/servers since a spoken word is consumed game-wide) + `backfill_used_words_from_chat_logs` (mirrors the roulette backfill, but only reads `Chat-*.log` files dated ≥ earliest saved `discovered_at` − 1 day of TZ slack, and short-circuits to 0 work when no words are saved) + registered `backfill_words_of_power_usage` command wrapper (unused by frontend, matches the roulette/combat-wisdom precedent).
+- **[coordinator.rs](src-tauri/src/coordinator.rs)** — `WordOfPowerUsed` arm in the `process_chat_events` status match: delete + emit `game-state-updated ["words_of_power"]` only when rows were actually removed. Idempotent under chat catch-up replay (re-deleting is a no-op).
+- **[lib.rs](src-tauri/src/lib.rs)** — Step **5d-iii** startup one-shot backfill (async spawn, like 5d/5d-ii) so words spoken while glogger was closed get removed; emits the same domain event on n>0 since the widget may already be mounted.
+- **Widget: zero frontend changes** — it already reloads on `game-state-updated` containing `words_of_power`.
+- Docs: [widget-words-of-power.md](docs/features/screens/dashboard/widget-words-of-power.md) updated (auto-removal feature + on-use data flow).
+
+### Verification (offline — strongest available without an in-game word use)
+- Parser tested against the exact real line; full `cargo test --lib` 504 pass.
+- **Real-data cross-check:** the Release DB (`%APPDATA%\glogger.Release\glogger.db`, the daily-driver build) had **56 saved words, 4 of which were already spoken** (e.g. `KACHZAVPLITQUAYZAOBLIYEAO` / Elemental Immunity, used 26-07-02) — exactly the reported bug. The startup backfill will remove those 4 on the next Release-build launch with this code. The **dev DB has 0 saved words**, so a `tauri dev` run won't visibly demonstrate removal — live confirmation needs the portable/release build or a fresh discovery+use in dev.
+- **Remaining manual step:** speak a word in-game with glogger running and watch it vanish from the widget.
+
+### Gotcha hit
+- PowerShell 5.1 mangles `git commit -m` here-strings containing double quotes (native-arg re-quoting splits the message into pathspecs) — use `git commit -F <file>`.
+
+**Still open from Session 32:** merge PR #81 + release v0.11.30 (Flatpak GNOME-50 fix).
+
+---
+
+**Date:** 2026-07-09/10 (Session 33 — 3D Model Viewer REMOVED from glogger; now a standalone app)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` — **history rewritten + force-pushed** (user-approved): the three model-viewer commits (`89c207f`, `ce5a7b8`, `0f08746`) were dropped via `rebase --onto`; the Flatpak GNOME-50 fix and Import Equipped were kept. `dev` = `origin/dev` = `8a1ee73`. `main` never had the feature.
+**Status:** ✅ glogger tree clean; rewritten source identical to `8f34810` (a released, known-good state).
+
+## TL;DR — Session 33
+
+Per the user's direction, the entire 3D Model Viewer was **extracted into its own app and purged from glogger's history**:
+
+- **New home: [github.com/crisp-oddio/pg-model-viewer](https://github.com/crisp-oddio/pg-model-viewer)** (public), local at `A:\Claude\pg-model-viewer`. Standalone Tauri 2 + Vue 3 app with its own lean PG-CDN item layer; releases **v0.1.1** and **v0.1.2** shipped with Windows/macOS/Linux installers (frozen Python extractor sidecar bundled). See that repo's `HANDOFF.md` + auto-memory `project_model_viewer.md` for everything model-viewer related from now on.
+- **glogger:** no `model_assets.rs`, no `ModelViewer/` components, no `three` dep, no `EquipAppearance` fields on `ItemInfo` — the surface is exactly pre-feature. Session 31/32's handoff entries describing the feature were dropped with the commits (this entry is the record). Anyone with an old clone of `dev` must hard-reset to `origin/dev`.
+- Removed leftovers: the untracked `src-tauri/binaries/` sidecar dir; the (local-only) recovery tag `archive/model-viewer-20260709` was deleted after the standalone was verified.
+
+**Next session (glogger):** merge PR #81 + release v0.11.30 (the Flatpak GNOME-50 fix) is still the open item from Session 32.
+
+---
+
+**Date:** 2026-07-08 (Session 32 — hotfix: Flatpak GNOME 47 runtime EOL)
+**Machine:** Windows 11 (primary dev box)
+**Branch:** `dev` at `9db9bb6` (pushed). Same fix cherry-picked to `hotfix/flatpak-gnome-50` (`78328ef`, off `origin/main`) → **PR #81 open, not yet merged** — this is the release path.
+**Status:** ✅ Fix committed + pushed on both branches; **CI-unverified** — the GNOME 50 build is only provable by the Flatpak workflow on the next release run.
+
+## TL;DR — Session 32
+
+A user reported the v0.11.29 Flatpak warning `runtime org.gnome.Platform branch 47 is end-of-life` (EOL'd 2025-10-15; GNOME **48** also died 2026-03-24 — we were two bumps behind; EOL runtimes can even fail to install for new users). Bumped to **GNOME 50** (current, supported ~March 2027; 49 EOLs ~Sept 2026):
+
+- [flatpak/io.github.crisp_oddio.glogger.yml](flatpak/io.github.crisp_oddio.glogger.yml) — `runtime-version: '50'`.
+- [.github/workflows/flatpak.yml](.github/workflows/flatpak.yml) — builder image → `ghcr.io/flathub-infra/flatpak-github-actions:gnome-50`; the old `bilelmoussaoui/…` registry path is dead (no new runtime tags) — the rename was mandatory.
+- [docs/flatpak-build.md](docs/flatpak-build.md) — local-build runtime `//50`, SDK extensions `//25.08` (freedesktop base under GNOME 49/50), + note on the yearly EOL cadence: next bump must touch all three files together. Manifest `sdk-extensions` are unversioned — flatpak-builder resolves the matching branch automatically.
+
+### Gotchas / open ends
+- **v0.11.29 was NOT actually removed from GitHub** — release still exists, marked *Latest*, still serving the GNOME-47 flatpak; tag still on origin. (**v0.11.28** is the one that's missing.) Deliberately left untouched. To remove: `gh release delete v0.11.29 --repo crisp-oddio/glogger-oddio` + `git push origin :refs/tags/v0.11.29`.
+- **Re-running the Flatpak workflow against v0.11.29 cannot fix it** — the workflow checks out the *tag*, which contains the old manifest. The fix only ships via a new tag: **merge PR #81 → trigger Release workflow (patch → v0.11.30)**.
+- If GNOME 50's webkitgtk misbehaves in CI, the fallback is `runtime-version: '49'` + the `gnome-49` image.
+
+**Next session:** merge #81 + release v0.11.30.
+
+---
+
 **Date:** 2026-07-07 (Session 30 — Quest tabs, uncompleted work-order backlog + board tracking, crafting delete fix)
 **Machine:** Windows 11 (primary dev box)
 **Branch:** `dev` — committed `6e99705`, pushed to `origin/dev` (on top of `31c23be`).
