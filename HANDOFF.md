@@ -30,10 +30,11 @@
 - **Force-push incident on main (2026-07-09, discovered this session):** an accidental `git push --force` from a stale clone wiped `main` to June-22 state; PR #83 (superness) restored it to `769b4cc` (v0.11.29). Casualties: PR #79 (release v0.11.30), PR #82 (release v0.11.31), and PR #81 (GNOME-50 flatpak fix) were all "merged" into the doomed main and published nothing — no v0.11.30/31 tags exist. The GNOME-50 fix only survives on dev (`c01c0ff`).
 - **Release workflow idempotency bug:** re-dispatching release.yml for a version whose old PR was merged-but-lost silently skips `gh pr create` (`gh pr view` matches MERGED PRs, prints "PR already open"). The branch still gets force-updated; the PR must be opened manually.
 
-### Release v0.11.30 — dispatched this session, PENDING MERGE
+### Release v0.11.30 — ✅ PUBLISHED (all installers + Flatpak attached)
 - Merged `origin/main` into dev (`69a112a`, clean) — synced v0.11.29 version baseline + kaeus's survey perf fix (`92850dc`); 505 tests + vue-tsc green post-merge.
-- Dispatched `release.yml --ref dev -f version=patch` → validate green, branch `release/v0.11.30` regenerated (`671d9c0`: v0.11.30, flatpak runtime '50', WoP feature included).
-- PR creation was skipped (bug above) → **opened [PR #85](https://github.com/crisp-oddio/glogger-oddio/pull/85) manually**. **Next action (user): approve + merge PR #85** → Release Publish tags v0.11.30, builds installers, Flatpak attaches.
+- Dispatched `release.yml --ref dev -f version=patch` → validate green, branch `release/v0.11.30` regenerated (`671d9c0`). PR creation was skipped (bug above) → opened [PR #85](https://github.com/crisp-oddio/glogger-oddio/pull/85) manually; user merged it → Release Publish tagged v0.11.30 and shipped Windows/macOS/Linux installers.
+- **Flatpak job failed on first run (exit 127):** on the `flathub-infra:gnome-50` builder image, `pip install --quiet git+…#subdirectory=node` exits 0 but never creates the `flatpak-node-generator` console script (base-distro script-path difference vs the old `bilelmoussaoui:gnome-47` image; `--quiet` hid it). **Fix (`5994ccb` on dev):** invoke `python -m flatpak_node_generator` (module path is image-independent), split/unsilence the pip installs, and sanity-check the module in the install step.
+- Re-dispatched `flatpak.yml --ref dev -f tag=v0.11.30` (dev workflow + tag content) → **GNOME 50 build green in 8m46s, `glogger.flatpak` attached to the release.** Session 32's runtime bump is now CI-verified; no GNOME-49 fallback needed.
 - Stale leftover: `origin/release/v0.11.31` branch (dead, from the incident) can be deleted.
 
 ---
