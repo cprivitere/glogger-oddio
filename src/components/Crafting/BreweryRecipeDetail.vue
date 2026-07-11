@@ -116,24 +116,35 @@
 
     <!-- Discoveries -->
     <div v-if="discoveries.length > 0">
-      <div class="text-[0.65rem] uppercase tracking-widest text-text-dim border-b border-surface-card pb-0.5 mb-1.5">
-        Your Discoveries
-        <span class="normal-case tracking-normal text-text-dim ml-1">({{ discoveries.length }} found)</span>
+      <div class="text-[0.65rem] uppercase tracking-widest text-text-dim border-b border-surface-card pb-0.5 mb-1.5 flex items-center gap-1.5">
+        <button
+          class="flex items-center gap-1 uppercase tracking-widest text-text-dim hover:text-text-secondary cursor-pointer bg-transparent border-none p-0"
+          :title="layoutPrefs.discoveriesCollapsed ? 'Expand discoveries' : 'Collapse discoveries'"
+          @click="updateLayout({ discoveriesCollapsed: !layoutPrefs.discoveriesCollapsed })">
+          <span class="inline-block transition-transform text-[0.7rem] leading-none" :class="layoutPrefs.discoveriesCollapsed ? '-rotate-90' : ''">▾</span>
+          Your Discoveries
+        </button>
+        <span class="normal-case tracking-normal text-text-dim">({{ discoveries.length }} found)</span>
       </div>
-      <table class="text-xs">
+      <div
+        v-show="!layoutPrefs.discoveriesCollapsed"
+        ref="discoveriesEl"
+        class="overflow-auto resize-y min-h-24 border border-surface-elevated rounded px-2"
+        :style="{ height: discoveriesHeight + 'px' }">
+      <table class="text-xs w-full">
         <thead>
           <tr class="text-xs uppercase tracking-wider text-text-dim">
             <th
               v-for="(slot, si) in recipe.variable_slots"
               :key="si"
-              class="text-left pb-1 font-normal w-36"
+              class="text-left pt-1 pb-1 font-normal w-36 sticky top-0 z-10 bg-surface-base"
               :title="slot.keyword">
               Slot {{ si + 1 }}
             </th>
-            <th class="text-left pb-1 font-normal">Effect</th>
-            <th class="text-left pb-1 font-normal">Req</th>
-            <th class="text-left pb-1 font-normal">Race</th>
-            <th class="w-6"></th>
+            <th class="text-left pt-1 pb-1 font-normal sticky top-0 z-10 bg-surface-base">Effect</th>
+            <th class="text-left pt-1 pb-1 font-normal sticky top-0 z-10 bg-surface-base">Req</th>
+            <th class="text-left pt-1 pb-1 font-normal sticky top-0 z-10 bg-surface-base">Race</th>
+            <th class="w-6 sticky top-0 z-10 bg-surface-base"></th>
           </tr>
         </thead>
         <tbody>
@@ -195,6 +206,7 @@
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <!-- No discoveries yet prompt -->
@@ -271,7 +283,15 @@
     <!-- Untried combinations -->
     <div v-if="recipe.variable_slots.length > 0 && recipeComboStat">
       <div class="text-[0.65rem] uppercase tracking-widest text-text-dim border-b border-surface-card pb-0.5 mb-1.5 flex items-center justify-between gap-2">
-        <span>Untried Combinations</span>
+        <button
+          v-if="missingCombos.length > 0"
+          class="flex items-center gap-1 uppercase tracking-widest text-text-dim hover:text-text-secondary cursor-pointer bg-transparent border-none p-0"
+          :title="layoutPrefs.untriedCollapsed ? 'Expand untried combinations' : 'Collapse untried combinations'"
+          @click="updateLayout({ untriedCollapsed: !layoutPrefs.untriedCollapsed })">
+          <span class="inline-block transition-transform text-[0.7rem] leading-none" :class="layoutPrefs.untriedCollapsed ? '-rotate-90' : ''">▾</span>
+          Untried Combinations
+        </button>
+        <span v-else>Untried Combinations</span>
         <span
           class="normal-case tracking-normal font-mono"
           :class="recipeComboStat.remaining === 0 ? 'text-accent-green' : 'text-text-muted'">
@@ -292,15 +312,7 @@
       </div>
 
       <template v-else>
-        <!-- Expand to the full missing list -->
-        <button
-          v-if="missingCombos.length > 0"
-          class="text-xs px-2 py-0.5 rounded border border-border-light text-text-muted hover:text-accent-gold hover:border-accent-gold/40 cursor-pointer transition-colors bg-transparent"
-          @click="showAllMissing = !showAllMissing">
-          {{ showAllMissing ? 'Hide full list' : `Show all ${recipeComboStat.remaining} missing combinations` }}
-        </button>
-
-        <div v-if="showAllMissing" class="mt-2 border border-surface-elevated rounded overflow-hidden">
+        <div v-if="!layoutPrefs.untriedCollapsed && missingCombos.length > 0" class="mt-2 border border-surface-elevated rounded overflow-hidden">
           <!-- Selection toolbar -->
           <div class="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-surface-card bg-surface-base">
             <div class="flex items-center gap-2 text-xs">
@@ -329,7 +341,10 @@
           </div>
 
           <!-- Missing combos -->
-          <div class="max-h-96 overflow-y-auto">
+          <div
+            ref="untriedEl"
+            class="overflow-y-auto resize-y min-h-32"
+            :style="{ height: untriedHeight + 'px' }">
             <div
               v-for="(sug, i) in missingCombosCapped"
               :key="i"
@@ -434,7 +449,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import ItemInline from "../Shared/Item/ItemInline.vue";
 import type { BrewingRecipe, BrewingIngredient, BrewingDiscovery } from "../../types/gameData/brewing";
@@ -444,6 +459,7 @@ import { useGameStateStore } from "../../stores/gameStateStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useCraftingStore } from "../../stores/craftingStore";
 import { useViewNavigation } from "../../composables/useViewNavigation";
+import { useViewPrefs } from "../../composables/useViewPrefs";
 import { useToast } from "../../composables/useToast";
 
 const props = defineProps<{
@@ -460,6 +476,51 @@ const { navigateToView } = useViewNavigation();
 const toast = useToast();
 
 const characterName = computed(() => settingsStore.settings.activeCharacterName);
+
+// ── Persisted layout: collapse state + resizable list heights ────────────────
+const { prefs: layoutPrefs, update: updateLayout } = useViewPrefs(
+  "crafting-brewery.recipeDetail",
+  { discoveriesCollapsed: false, discoveriesHeight: 320, untriedCollapsed: true, untriedHeight: 384 },
+);
+
+const discoveriesEl = ref<HTMLElement | null>(null);
+const untriedEl = ref<HTMLElement | null>(null);
+const discoveriesHeight = ref(layoutPrefs.value.discoveriesHeight);
+const untriedHeight = ref(layoutPrefs.value.untriedHeight);
+
+let resizeObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const el = entry.target as HTMLElement;
+      const h = Math.round(el.offsetHeight);
+      if (h <= 1) continue; // hidden via v-show — ignore the transient 0-height
+      if (el === discoveriesEl.value && h !== discoveriesHeight.value) {
+        discoveriesHeight.value = h;
+        updateLayout({ discoveriesHeight: h });
+      } else if (el === untriedEl.value && h !== untriedHeight.value) {
+        untriedHeight.value = h;
+        updateLayout({ untriedHeight: h });
+      }
+    }
+  });
+
+  // Observe each resizable region as it mounts/unmounts (both sit behind v-if/v-show).
+  watch(discoveriesEl, (el, prev) => {
+    if (prev) resizeObserver?.unobserve(prev);
+    if (el) resizeObserver?.observe(el);
+  }, { immediate: true });
+  watch(untriedEl, (el, prev) => {
+    if (prev) resizeObserver?.unobserve(prev);
+    if (el) resizeObserver?.observe(el);
+  }, { immediate: true });
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+});
 
 // Session-stable random seed for shuffling untried combos
 const sessionSeed = Math.random();
@@ -623,10 +684,10 @@ const missingCombos = computed((): Suggestion[] => {
 const MISSING_RENDER_CAP = 500;
 const missingCombosCapped = computed(() => missingCombos.value.slice(0, MISSING_RENDER_CAP));
 
-/** Whether the full missing-combinations list is expanded. */
-const showAllMissing = ref(false);
+// The untried-list expand state lives in the persisted `layoutPrefs.untriedCollapsed`
+// (toggled from the section label), so it survives recipe switches like the
+// discoveries collapse does. Only the per-recipe selection/dialog reset here.
 watch(() => props.recipe.recipe_id, () => {
-  showAllMissing.value = false;
   clearComboSelection();
   showProjectDialog.value = false;
 });
