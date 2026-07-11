@@ -531,6 +531,27 @@ pub fn run() {
                 });
             }
 
+            // Step 5d-iii: One-shot removal of words of power that were spoken
+            // while glogger wasn't running — scans only chat logs dated after
+            // the earliest saved discovery, so it's a no-op when the widget is
+            // empty. Live uses are handled by the coordinator's chat-status path.
+            {
+                let sm = settings_manager.clone();
+                let dbp = db_pool.clone();
+                let ah = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    match db::words_of_power_commands::backfill_used_words_from_chat_logs(&sm, &dbp)
+                    {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            startup_log!("Words of Power backfill: {} used word(s) removed", n);
+                            ah.emit("game-state-updated", vec!["words_of_power"]).ok();
+                        }
+                        Err(e) => eprintln!("Words of Power usage backfill failed: {e}"),
+                    }
+                });
+            }
+
             // Step 5e: Auto-purge old user data on startup, if enabled in
             // settings. Bounds unbounded growth of the big append-only tables
             // (item_transactions, chat_messages + its FTS index). Non-fatal —
@@ -957,6 +978,7 @@ pub fn run() {
             db::words_of_power_commands::add_word_of_power,
             db::words_of_power_commands::delete_word_of_power,
             db::words_of_power_commands::import_words_of_power_csv,
+            db::words_of_power_commands::backfill_words_of_power_usage,
             // User timers
             get_user_timers,
             save_user_timer,

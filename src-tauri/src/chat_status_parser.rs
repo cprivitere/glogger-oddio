@@ -87,6 +87,10 @@ pub enum ChatStatusEvent {
     /// only roulette event written to the logs; the player's own bet is an
     /// on-screen toast that is never logged, so only outcomes are trackable.
     RouletteResult { timestamp: String, number: u32 },
+
+    /// "You use the word of power WORD!" — the player spoke a word of power.
+    /// A spoken word is consumed game-wide, so every saved copy of it is dead.
+    WordOfPowerUsed { timestamp: String, word: String },
 }
 
 /// Try to parse a Status channel ChatMessage into a structured event.
@@ -115,6 +119,22 @@ pub fn parse_status_message(msg: &ChatMessage) -> Option<ChatStatusEvent> {
         .or_else(|| try_item_studied(text, &ts))
         .or_else(|| try_report_saved(text, &ts))
         .or_else(|| try_roulette_result(text, &ts))
+        .or_else(|| try_word_of_power_used(text, &ts))
+}
+
+/// "You use the word of power WORD!" — the player spoke a word of power.
+fn try_word_of_power_used(text: &str, ts: &str) -> Option<ChatStatusEvent> {
+    let word = text
+        .strip_prefix("You use the word of power ")?
+        .strip_suffix('!')?
+        .trim();
+    if word.is_empty() {
+        return None;
+    }
+    Some(ChatStatusEvent::WordOfPowerUsed {
+        timestamp: ts.to_string(),
+        word: word.to_string(),
+    })
 }
 
 /// "Roulette ball ended on N!" — casino roulette spin outcome.
@@ -518,6 +538,24 @@ mod tests {
         } else {
             panic!("Expected ItemGained, got {:?}", event);
         }
+    }
+
+    #[test]
+    fn test_word_of_power_used() {
+        let msg = status_msg("You use the word of power SLOAVHOUJALGLUWFRYLGWODNYD!");
+        let event = parse_status_message(&msg).unwrap();
+        if let ChatStatusEvent::WordOfPowerUsed { word, .. } = event {
+            assert_eq!(word, "SLOAVHOUJALGLUWFRYLGWODNYD");
+        } else {
+            panic!("Expected WordOfPowerUsed, got {:?}", event);
+        }
+    }
+
+    #[test]
+    fn test_word_of_power_used_requires_exclamation() {
+        // Missing trailing "!" must not match
+        let msg = status_msg("You use the word of power ABCDEF");
+        assert!(parse_status_message(&msg).is_none());
     }
 
     #[test]
