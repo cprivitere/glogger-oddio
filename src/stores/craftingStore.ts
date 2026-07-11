@@ -106,6 +106,7 @@ export const useCraftingStore = defineStore("crafting", () => {
     recipe: RecipeInfo,
     quantity: number,
     expandItemIds?: Set<number>,
+    quantityIsCrafts?: boolean,
   ): string {
     const expandKey = expandItemIds
       ? Array.from(expandItemIds).sort((a, b) => a - b).join(",")
@@ -119,7 +120,8 @@ export const useCraftingStore = defineStore("crafting", () => {
       .map((i) => (i.item_id ?? `k:${i.item_keys[0] ?? ""}`))
       .join("|");
     // The buffer changes expected quantities, so it must be part of the key.
-    return `${recipe.id}:${quantity}:${expandKey}:b${consumeBufferPct.value}:${ingSig}`;
+    // Craft-count and item-count requests for the same number must not collide.
+    return `${recipe.id}:${quantityIsCrafts ? "c" : ""}${quantity}:${expandKey}:b${consumeBufferPct.value}:${ingSig}`;
   }
 
   /** Clear all in-memory caches (call on CDN reload or when data changes). */
@@ -321,6 +323,9 @@ export const useCraftingStore = defineStore("crafting", () => {
    * If not provided, falls back to the boolean expandIntermediates flag.
    * intermediateStock: if provided, maps item_id → quantity on hand. When expanding
    * an intermediate, only the shortfall (needed - stock) is resolved into sub-ingredients.
+   * quantityIsCrafts: when true, desiredQuantity is a number of crafts rather than a
+   * desired output-item count (the leveling planner plans in crafts). Without this,
+   * multi-yield recipes get divided by output-per-craft and materials come up short.
    */
   async function resolveRecipeIngredients(
     recipe: RecipeInfo,
@@ -329,6 +334,7 @@ export const useCraftingStore = defineStore("crafting", () => {
     visited: Set<number> = new Set(),
     expandItemIds?: Set<number>,
     intermediateStock?: Map<number, number>,
+    quantityIsCrafts: boolean = false,
   ): Promise<ResolvedRecipe> {
     // Check ingredient tree cache for top-level calls without mutable stock.
     // Recursive (internal) calls have a non-empty visited set and shouldn't
@@ -336,7 +342,7 @@ export const useCraftingStore = defineStore("crafting", () => {
     const isCacheable = visited.size === 0 && !intermediateStock;
     let cacheKey: string | null = null;
     if (isCacheable) {
-      cacheKey = buildIngredientCacheKey(recipe, desiredQuantity, expandItemIds);
+      cacheKey = buildIngredientCacheKey(recipe, desiredQuantity, expandItemIds, quantityIsCrafts);
       const cached = ingredientTreeCache.get(cacheKey);
       if (cached) return cached;
     }
@@ -345,7 +351,9 @@ export const useCraftingStore = defineStore("crafting", () => {
     const outputPerCraft = recipe.result_items[0]?.stack_size ?? 1;
     const primaryChance = (recipe.result_items[0]?.percent_chance ?? 100) / 100;
     const effectiveOutput = outputPerCraft * primaryChance;
-    const craftCount = Math.ceil(desiredQuantity / effectiveOutput);
+    const craftCount = quantityIsCrafts
+      ? Math.ceil(desiredQuantity)
+      : Math.ceil(desiredQuantity / effectiveOutput);
 
     // Resolve each ingredient
     const ingredients: ResolvedIngredient[] = [];
@@ -457,7 +465,8 @@ export const useCraftingStore = defineStore("crafting", () => {
       recipe_id: recipe.id,
       recipe_name: recipe.name,
       craft_count: craftCount,
-      desired_quantity: desiredQuantity,
+      // desired_quantity is always in output items, even for craft-count requests
+      desired_quantity: quantityIsCrafts ? craftCount * outputPerCraft : desiredQuantity,
       output_per_craft: outputPerCraft,
       xp_per_craft: recipe.reward_skill_xp ?? 0,
       // The first craft awards a flat 4× base XP total; xp_first_time is the bonus
