@@ -1077,6 +1077,26 @@ impl GameStateManager {
                 domains.push("player_messages");
             }
 
+            PlayerEvent::PoemRecorded {
+                timestamp,
+                author,
+                title,
+                content,
+            } => {
+                let dt = self.to_utc(timestamp);
+                // Poems are global (not character-scoped). The character/server
+                // that recorded it are kept for reference only. INSERT OR IGNORE
+                // + the UNIQUE(author, title, content) index dedups the same poem
+                // heard multiple times or across characters.
+                conn.execute(
+                    "INSERT OR IGNORE INTO poems (author, title, content, recorded_at, recorded_by_character, recorded_by_server)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![author, title, content, dt, character, server],
+                )
+                .ok();
+                domains.push("poems");
+            }
+
             _ => {}
         }
     }

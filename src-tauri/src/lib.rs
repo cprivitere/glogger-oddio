@@ -149,7 +149,7 @@ use coordinator::{
     debug_capture_stop,
     get_coordinator_status, poll_watchers, start_background_polling, stop_background_polling,
     start_chat_tailing, start_player_tailing,
-    stop_chat_tailing, stop_player_tailing,
+    stop_chat_tailing, stop_player_tailing, scan_player_log_for_poems,
     spawn_polling_thread, DataIngestCoordinator, PollingHandle,
 };
 use db::admin_commands::{
@@ -808,6 +808,7 @@ pub fn run() {
             // Coordinator
             start_player_tailing,
             stop_player_tailing,
+            scan_player_log_for_poems,
             start_chat_tailing,
             stop_chat_tailing,
             get_coordinator_status,
@@ -988,6 +989,8 @@ pub fn run() {
             set_mushroom_circles,
             // Player messages (pigeons & stall notes)
             db::message_commands::get_player_messages,
+            // Recorded poems (Chat Logs → Poems tab)
+            db::poem_commands::get_poems,
             // Garden almanac
             get_garden_almanac,
             get_garden_almanac_history,

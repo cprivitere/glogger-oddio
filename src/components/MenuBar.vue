@@ -187,6 +187,7 @@ const viewTabs: Partial<Record<AppView, SubTab[]>> = {
     { id: "system", label: "System" },
     { id: "all", label: "All Messages" },
     { id: "watchwords", label: "Watchwords" },
+    { id: "poems", label: "Poems" },
   ],
 };
 
