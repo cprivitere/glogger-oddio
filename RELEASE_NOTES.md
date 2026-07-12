@@ -1,8 +1,7 @@
-## What's Changed since v0.11.32
+## What's Changed since v0.11.33
 
 ### Fixes
-- fix(crafting): leveling planner understated materials for multi-yield recipes (`7b665b7`)
-- fix(release): only an open PR should suppress the release PR (`2a2ad8a`)
+- fix(build-planner): default mod/augment tier to target level deterministically (`8cade1f`)
 
 ---
-*5 commits since v0.11.32*
+*4 commits since v0.11.33*
