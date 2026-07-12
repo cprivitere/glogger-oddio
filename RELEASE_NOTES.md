@@ -1,7 +1,7 @@
-## What's Changed since v0.11.33
+## What's Changed since v0.11.34
 
-### Fixes
-- fix(build-planner): default mod/augment tier to target level deterministically (`8cade1f`)
+### Features
+- feat(chat): add Poems tab to Chat Logs (`35a46b8`)
 
 ---
-*4 commits since v0.11.33*
+*2 commits since v0.11.34*
