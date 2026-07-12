@@ -23,6 +23,7 @@ pub mod market_commands;
 pub mod message_commands;
 pub mod migrations;
 pub mod player_commands;
+pub mod poem_commands;
 #[allow(dead_code)]
 pub mod price_helper_commands;
 pub mod queries;

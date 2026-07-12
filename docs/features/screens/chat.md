@@ -4,6 +4,8 @@
 
 A full chat log browser that imports, indexes, and displays all in-game chat with full-text search, per-channel filtering, item link detection, and configurable watchword alerts. Chat data is parsed from the game's chat log files and stored in SQLite with FTS indexing.
 
+The screen also hosts a **Poems** tab — a browsable, searchable collection of poems recited by other players at poetry podiums. Unlike the other tabs (which come from `Chat-*.log`), poems are sourced from `Player.log` `ProcessTalkScreen` events and stored globally (not per-character).
+
 ## Architecture
 
 ### Files
@@ -15,13 +17,19 @@ A full chat log browser that imports, indexes, and displays all in-game chat wit
 - `src-tauri/src/db/chat_commands.rs` — database query layer
 
 **Frontend (Vue/TS):**
-- `src/components/Chat/ChatView.vue` — 9-tab container
+- `src/components/Chat/ChatView.vue` — 10-tab container
 - `src/components/Chat/ChatMessageList.vue` — shared paginated message renderer
 - `src/components/Chat/ChatSearchView.vue` — unified search with context navigation
 - `src/components/Chat/ChatMessage.vue` — individual message display
 - `src/components/Chat/MessageWithItemLinks.vue` — item link detection and rendering
 - `src/utils/parseSearchQuery.ts` — search query parser for `from:`/`in:` operators
 - Channel views: `ChannelView`, `TellsView`, `PartyView`, `NearbyView`, `GuildView`, `SystemView`, `AllMessagesView`, `WatchwordsView`
+- `src/components/Chat/PoemsView.vue` — recorded-poems browser (list + full-poem viewer with prev/next)
+
+**Poems pipeline (Rust):**
+- `src-tauri/src/player_event_parser.rs` — `handle_talk_screen` detects `Poem by X` talk screens and emits `PlayerEvent::PoemRecorded` (`parse_poem_body` strips the intro/outro review blurbs and pulls out the bold title)
+- `src-tauri/src/game_state.rs` — persists `PoemRecorded` into the `poems` table (`INSERT OR IGNORE` for dedup)
+- `src-tauri/src/db/poem_commands.rs` — `get_poems` query command
 
 **Stores:**
 - `chatStore` — tailing state management
@@ -39,7 +47,8 @@ ChatView.vue                        — 9-tab container
 ├── GuildView.vue                   — guild chat
 ├── SystemView.vue                  — system/status messages
 ├── AllMessagesView.vue             — global search across all channels
-└── WatchwordsView.vue              — rule-based filtering and alerts
+├── WatchwordsView.vue              — rule-based filtering and alerts
+└── PoemsView.vue                   — recorded poems (self-contained; list + viewer)
 
 Shared:
 ├── ChatMessageList.vue             — paginated message list (standard + bubble layouts)
@@ -76,6 +85,7 @@ Parses message text to detect `[Item: ItemName]` patterns and renders them as `I
 | `chat_messages` | Core message storage (timestamp, channel, sender, message, flags) |
 | `chat_item_links` | Item references found in messages (raw_text, item_name, item_id) |
 | `chat_messages_fts` | Full-text search index on message content |
+| `poems` | Recorded poems (author, title, content, recorded_at). Global, not character-scoped; deduped via `UNIQUE(author, title, content)` |
 
 ## Tauri Commands
 
@@ -92,6 +102,8 @@ Parses message text to detect `[Item: ItemName]` patterns and renders them as `I
 - `get_tell_conversations() → Vec<ChannelStat>` — list conversation partners
 - `get_watch_rule_messages(rule_id, limit, offset) → Vec<ChatMessage>` — messages matching a watchword rule
 - `get_chat_stats() → ChatStats` — overall statistics
+- `get_poems() → Vec<PoemRow>` — all recorded poems (global, newest first); searching/filtering is done on the frontend
+- `scan_player_log_for_poems() → usize` — one-time backfill: scans the entire current Player.log for past `Poem by X` recitals and inserts them (deduped). Exposed as the "Scan Player.log" button on the Poems tab, since the live watcher only sees poems recited after it starts tailing.
 
 ### Maintenance
 - `purge_chat_messages(days) → usize` — delete messages older than N days

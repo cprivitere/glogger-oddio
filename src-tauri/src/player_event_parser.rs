@@ -287,6 +287,19 @@ pub enum PlayerEvent {
         item_name: Option<String>,
     },
 
+    /// A poem recited by another player, captured from a `Poem by X` NPC talk
+    /// screen. Stored globally (not per-character) in the `poems` table.
+    PoemRecorded {
+        timestamp: String,
+        /// The player who wrote/recited the poem (from the `Poem by X` title).
+        author: String,
+        /// The poem's bold name/title (may be empty if the game omits it).
+        title: String,
+        /// The poem stanzas, with the intro/outro review blurbs stripped and
+        /// the log's `\n` escapes converted to real newlines.
+        content: String,
+    },
+
     // === Loot Events ===
     /// Fired when a corpse's loot window is opened (`Search Corpse of X`).
     /// This is the drop-rate *denominator*: it marks a lootable kill even if
@@ -2308,7 +2321,10 @@ impl PlayerEventParser {
             Some(i) => i,
             None => return,
         };
-        let entity_id: u32 = match args[..first_comma].trim().parse() {
+        // Parsed as i64 because some talk screens (notably "Poem by X" poem
+        // recitals) carry a negative entity id like -51. The corpse-search
+        // path below re-narrows to u32 where a real entity id is required.
+        let entity_id: i64 = match args[..first_comma].trim().parse() {
             Ok(id) => id,
             Err(_) => return,
         };
@@ -2328,6 +2344,23 @@ impl PlayerEventParser {
         // Body is the second quoted string
         let after_title = &rest[q_end + 1..];
         let body_text = extract_quoted_string(after_title, 0).unwrap_or_default();
+
+        // --- Poem detection ---
+        // Poems are recited via a "Poem by <author>" talk screen. Delegated to
+        // the shared `parse_poem_line` so the live parser and the one-time
+        // Player.log backfill produce identical results.
+        if title.starts_with("Poem by ") {
+            if let Some(poem) = parse_poem_line(line) {
+                events.push(PlayerEvent::PoemRecorded {
+                    timestamp: poem.timestamp,
+                    author: poem.author,
+                    title: poem.title,
+                    content: poem.content,
+                });
+            }
+            // A poem screen is never a pigeon/stall/corpse interaction.
+            return;
+        }
 
         // --- Pigeon send detection ---
         // Confirmation screen: "I am sending <recipient> the following..."
@@ -2395,6 +2428,8 @@ impl PlayerEventParser {
         }
 
         if let Some(corpse_name) = title.strip_prefix("Search Corpse of ") {
+            // Corpse entity ids are always positive; narrow back to u32.
+            let entity_id = entity_id as u32;
             // Capture the equipment skill bonus for the extract that follows,
             // e.g. "...skinned the corpse (with a +12 skill bonus from
             // equipment)...". Attached to the next CorpseExtract.
@@ -3329,6 +3364,173 @@ fn extract_quoted_string(text: &str, n: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the nth double-quoted string from `text`, honoring backslash escapes
+/// (`\"`, `\\`) so an escaped quote inside the string is not mistaken for its
+/// terminator. Returns the raw inner content with escapes left intact (use
+/// [`unescape_log_string`] to resolve them). Unlike [`extract_quoted_string`],
+/// this is safe for free-form text such as poems that may contain quotes.
+fn extract_quoted_escaped(text: &str, n: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut count = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => j += 2, // skip the escaped character
+                    b'"' => break,
+                    _ => j += 1,
+                }
+            }
+            if j >= bytes.len() {
+                return None; // unterminated string
+            }
+            if count == n {
+                return Some(text[start..j].to_string());
+            }
+            count += 1;
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Resolve the log's backslash escapes (`\n`, `\t`, `\r`, `\"`, `\\`) into their
+/// real characters. Unknown escapes are passed through verbatim.
+fn unescape_log_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A poem parsed from a `Poem by X` talk-screen line.
+pub struct ParsedPoem {
+    /// Raw `HH:MM:SS` timestamp from the log line.
+    pub timestamp: String,
+    pub author: String,
+    pub title: String,
+    pub content: String,
+}
+
+/// Parse a single `Poem by X` ProcessTalkScreen log line into a [`ParsedPoem`],
+/// or `None` if the line is not a poem recital.
+///
+/// Shared by the live parser ([`PlayerEventParser::handle_talk_screen`]) and the
+/// one-time Player.log poem backfill, so both stay byte-for-byte consistent.
+pub fn parse_poem_line(line: &str) -> Option<ParsedPoem> {
+    if !line.contains("ProcessTalkScreen(") {
+        return None;
+    }
+    let timestamp = parse_timestamp(line)?;
+
+    let args_start = line.find("ProcessTalkScreen(")? + "ProcessTalkScreen(".len();
+    let args = &line[args_start..];
+    let first_comma = args.find(',')?;
+    let rest = &args[first_comma + 1..];
+
+    // Title is the first quoted string. Poem titles are "Poem by <name>" and
+    // never contain escaped quotes, so the naive scan is safe here.
+    let q_start = rest.find('"')? + 1;
+    let q_end = rest[q_start..].find('"')? + q_start;
+    let title = &rest[q_start..q_end];
+    let author = title.strip_prefix("Poem by ")?.trim().to_string();
+
+    // Body is the next quoted string; it may contain `\"`-escaped quotes.
+    let after_title = &rest[q_end + 1..];
+    let raw_body = extract_quoted_escaped(after_title, 0)?;
+    let (poem_title, content) = parse_poem_body(&raw_body)?;
+
+    Some(ParsedPoem {
+        timestamp,
+        author,
+        title: poem_title,
+        content,
+    })
+}
+
+/// Parse the raw body of a `Poem by X` talk screen into `(title, content)`.
+///
+/// The body has the shape (all on one log line, with `\n` escapes):
+/// ```text
+/// <i>The following poem was spoken by NAME…</i>\n\n---\n\n<b>TITLE</b>\n\n<poem>\n\n\n---\n\n<i>What did you think…</i>
+/// ```
+/// The bold `<b>TITLE</b>` is pulled out as the poem's name, the intro/outro
+/// review blurbs (`<i>…</i>`) and the `---` fences are dropped, and the
+/// remaining stanzas are returned with real newlines. Returns `None` only when
+/// both the title and content come out empty.
+fn parse_poem_body(raw_body: &str) -> Option<(String, String)> {
+    // The bold tag holds the poem's name.
+    let title = raw_body
+        .find("<b>")
+        .and_then(|s| {
+            let inner = &raw_body[s + 3..];
+            inner.find("</b>").map(|e| inner[..e].trim().to_string())
+        })
+        .unwrap_or_default();
+
+    // Drop the leading intro blurb (everything up to and including its `</i>`)
+    // and the trailing outro blurb (from its opening `<i>` to the end). Player
+    // text is HTML-entity escaped by the game, so raw `<i>`/`</i>` only ever
+    // come from the game-generated blurbs.
+    let mut core = raw_body;
+    if let Some(p) = core.find("</i>") {
+        core = &core[p + "</i>".len()..];
+    }
+    if let Some(p) = core.rfind("<i>") {
+        core = &core[..p];
+    }
+
+    // Remove the bold title line — it's stored separately.
+    let core = if title.is_empty() {
+        core.to_string()
+    } else {
+        core.replacen(&format!("<b>{title}</b>"), "", 1)
+    };
+
+    // Resolve `\n` (and friends) to real characters, then drop the blank and
+    // `---` fence lines that bookend the poem, keeping interior lines intact.
+    let unescaped = unescape_log_string(&core);
+    let is_boundary =
+        |line: &str| line.trim().is_empty() || line.trim().chars().all(|c| c == '-');
+    let lines: Vec<&str> = unescaped.lines().collect();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && is_boundary(lines[start]) {
+        start += 1;
+    }
+    while end > start && is_boundary(lines[end - 1]) {
+        end -= 1;
+    }
+    let content = lines[start..end].join("\n");
+
+    if title.is_empty() && content.is_empty() {
+        return None;
+    }
+    Some((title, content))
 }
 
 // ============================================================
@@ -5792,5 +5994,99 @@ mod tests {
                 other => panic!("Expected PlayerStringUpdated for {}, got {:?}", tab, other),
             }
         }
+    }
+
+    // ── Poem parsing ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_poem_basic() {
+        let mut parser = PlayerEventParser::new();
+        let line = r#"[05:07:17] LocalPlayer: ProcessTalkScreen(-51, "Poem by Snowkit", "<i>The following poem was spoken by Snowkit. Review it to receive Poetry Appreciation XP!</i>\n\n---\n\n<b>swiped snacks</b>\n\nA flash of red, a bushy tail,\nThrough garden green, a scent to hail.\n\nNo harm he means, just a quick peep,\nWhile happy folks their secrets keep.\n\n\n---\n\n<i>What did you think of the poem? Your review will be aggregated and sent to Snowkit. This rating has no impact on how much XP anybody earns, so be honest!</i>", "", [1,2,3,4,5,], System.String[], 0, Generic)"#;
+        let events = parser.process_line(line);
+        let poem = events
+            .iter()
+            .find_map(|e| match e {
+                PlayerEvent::PoemRecorded { author, title, content, .. } => {
+                    Some((author.clone(), title.clone(), content.clone()))
+                }
+                _ => None,
+            })
+            .expect("should emit a PoemRecorded event");
+        assert_eq!(poem.0, "Snowkit");
+        assert_eq!(poem.1, "swiped snacks");
+        // Intro/outro blurbs and fences stripped; stanzas preserved with newlines.
+        assert!(poem.2.starts_with("A flash of red, a bushy tail,"));
+        assert!(poem.2.ends_with("While happy folks their secrets keep."));
+        assert!(!poem.2.contains("Poetry Appreciation"));
+        assert!(!poem.2.contains("What did you think"));
+        assert!(!poem.2.contains("---"));
+        assert!(!poem.2.contains("swiped snacks")); // title not duplicated in body
+        assert!(poem.2.contains('\n')); // real newlines, not literal \n
+    }
+
+    #[test]
+    fn test_parse_poem_with_escaped_quotes() {
+        // A poem whose body contains \"-escaped quotes must not be truncated.
+        let mut parser = PlayerEventParser::new();
+        let line = r#"[18:05:31] LocalPlayer: ProcessTalkScreen(-51, "Poem by TheScare", "<i>The following poem was spoken by TheScare. Review it to receive Poetry Appreciation XP!</i>\n\n---\n\n<b>Bees take over the world</b>\n\nIt started with a note: \"Give us the flowers.\"\nWe laughed. We wrote back \"lol no.\"\n\n\n---\n\n<i>What did you think of the poem? Your review will be aggregated and sent to TheScare. This rating has no impact on how much XP anybody earns, so be honest!</i>", "", [1,2,3,4,5,], System.String[], 0, Generic)"#;
+        let events = parser.process_line(line);
+        let content = events
+            .iter()
+            .find_map(|e| match e {
+                PlayerEvent::PoemRecorded { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("should emit a PoemRecorded event");
+        assert!(content.contains(r#""Give us the flowers.""#), "got: {content}");
+        assert!(content.contains(r#""lol no.""#), "got: {content}");
+    }
+
+    #[test]
+    fn test_parse_poem_title_only() {
+        // Empty-body poem (just a bold title) still records, with empty content.
+        let mut parser = PlayerEventParser::new();
+        let line = r#"[05:13:28] LocalPlayer: ProcessTalkScreen(-51, "Poem by Banbu", "<i>The following poem was spoken by Banbu. Review it to receive Poetry Appreciation XP!</i>\n\n---\n\n<b>waaaaaaaaaaaaaaaaaaaaagh</b>\n\n\n\n---\n\n<i>What did you think of the poem? Your review will be aggregated and sent to Banbu. This rating has no impact on how much XP anybody earns, so be honest!</i>", "", [1,2,3,4,5,], System.String[], 0, Generic)"#;
+        let events = parser.process_line(line);
+        let poem = events
+            .iter()
+            .find_map(|e| match e {
+                PlayerEvent::PoemRecorded { author, title, content, .. } => {
+                    Some((author.clone(), title.clone(), content.clone()))
+                }
+                _ => None,
+            })
+            .expect("should emit a PoemRecorded event");
+        assert_eq!(poem.0, "Banbu");
+        assert_eq!(poem.1, "waaaaaaaaaaaaaaaaaaaaagh");
+        assert_eq!(poem.2, "");
+    }
+
+    #[test]
+    fn test_poem_preserves_html_entities() {
+        // The game HTML-entity-escapes player text (< > &); we keep it verbatim
+        // so the view layer can render it safely.
+        let mut parser = PlayerEventParser::new();
+        let line = r#"[18:02:59] LocalPlayer: ProcessTalkScreen(-51, "Poem by Inne", "<i>The following poem was spoken by Inne. Review it to receive Poetry Appreciation XP!</i>\n\n---\n\n<b>Thanks</b>\n\nLove you Dreva People! &lt;3 &lt;3\n\n\n---\n\n<i>What did you think of the poem? Your review will be aggregated and sent to Inne. This rating has no impact on how much XP anybody earns, so be honest!</i>", "", [1,2,3,4,5,], System.String[], 0, Generic)"#;
+        let events = parser.process_line(line);
+        let content = events
+            .iter()
+            .find_map(|e| match e {
+                PlayerEvent::PoemRecorded { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("should emit a PoemRecorded event");
+        assert!(content.contains("&lt;3 &lt;3"), "got: {content}");
+    }
+
+    #[test]
+    fn test_talk_screen_negative_id_does_not_break_corpse_path() {
+        // Sanity: a normal positive-id corpse search still parses after the
+        // i64 entity-id change.
+        let mut parser = PlayerEventParser::new();
+        let line = r#"[18:04:38] LocalPlayer: ProcessTalkScreen(435269, "Search Corpse of Ratkin Miner", "", "", System.Int32[], System.String[], 0, Corpse)"#;
+        let events = parser.process_line(line);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PlayerEvent::CorpseSearched { corpse_name, .. } if corpse_name == "Ratkin Miner")));
     }
 }

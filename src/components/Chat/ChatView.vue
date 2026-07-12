@@ -12,6 +12,7 @@
         <SystemView v-else-if="activeTab === 'system'" />
         <AllMessagesView v-else-if="activeTab === 'all'" />
         <WatchwordsView v-else-if="activeTab === 'watchwords'" />
+        <PoemsView v-else-if="activeTab === 'poems'" />
       </div>
     </div>
   </PaneLayout>
@@ -28,6 +29,7 @@ import GuildView from './GuildView.vue'
 import SystemView from './SystemView.vue'
 import AllMessagesView from './AllMessagesView.vue'
 import WatchwordsView from './WatchwordsView.vue'
+import PoemsView from './PoemsView.vue'
 
 defineProps<{
   activeTab: string;

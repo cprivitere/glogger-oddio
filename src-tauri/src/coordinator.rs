@@ -312,6 +312,74 @@ impl DataIngestCoordinator {
         Ok(())
     }
 
+    /// One-time backfill of the `poems` table from the *entire* current
+    /// Player.log.
+    ///
+    /// The live watcher resumes from a saved byte offset, so poems recited
+    /// before the app first started watching are never seen. This scans the
+    /// whole file for `Poem by X` recitals and inserts them (`INSERT OR IGNORE`,
+    /// deduped by the `UNIQUE(author, title, content)` index), touching only the
+    /// poems table — no other game state. Safe to run repeatedly. Returns the
+    /// number of newly inserted poems.
+    pub fn backfill_poems_from_player_log(&self) -> Result<usize, String> {
+        use crate::parsers::to_utc_datetime_with_base;
+        use crate::player_event_parser::parse_poem_line;
+
+        let path = self
+            .settings
+            .get_player_log_path()
+            .ok_or_else(|| "Player.log path is not configured".to_string())?;
+
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read Player.log: {e}"))?;
+
+        // Player.log lines carry only HH:MM:SS (no date). A PG Player.log is
+        // normally a single session, so anchor backfilled poems to the file's
+        // last-modified (UTC) date rather than "today". Falls back to today's
+        // date (base = None) if the mtime is unavailable.
+        let base_date = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|mtime| chrono::DateTime::<chrono::Utc>::from(mtime).date_naive());
+
+        let mut conn = self.db_pool.get().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut inserted = 0usize;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO poems (author, title, content, recorded_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| e.to_string())?;
+            for line in text.lines() {
+                // Cheap pre-filter before the fuller parse.
+                if !line.contains("\"Poem by ") {
+                    continue;
+                }
+                if let Some(poem) = parse_poem_line(line) {
+                    // Combine the log's HH:MM:SS with the file-date anchor.
+                    let recorded_at = to_utc_datetime_with_base(&poem.timestamp, base_date);
+                    let changed = stmt
+                        .execute(rusqlite::params![
+                            poem.author,
+                            poem.title,
+                            poem.content,
+                            recorded_at
+                        ])
+                        .map_err(|e| e.to_string())?;
+                    inserted += changed;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+
+        if inserted > 0 {
+            self.app_handle.emit("game-state-updated", vec!["poems"]).ok();
+        }
+        Ok(inserted)
+    }
+
     /// Stop player log tailing
     pub fn stop_player_log_tailing(&mut self) -> Result<(), String> {
         if let Some(mut watcher) = self.player_watcher.take() {
@@ -2536,6 +2604,16 @@ pub fn stop_player_tailing(
 ) -> Result<(), String> {
     let mut coord = coordinator.lock().unwrap();
     coord.stop_player_log_tailing()
+}
+
+/// Scan the full Player.log for past poem recitals and backfill the poems table
+/// (called from the Poems tab). Returns the number of newly inserted poems.
+#[tauri::command]
+pub fn scan_player_log_for_poems(
+    coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
+) -> Result<usize, String> {
+    let coord = coordinator.lock().unwrap();
+    coord.backfill_poems_from_player_log()
 }
 
 /// Start chat log tailing (called from frontend)

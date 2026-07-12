@@ -327,6 +327,41 @@ pub fn run_migrations(conn: &Connection, tz_offset_seconds: Option<i32>) -> Resu
         super::record_migration(conn, 60)?;
     }
 
+    if current_version < 61 {
+        migration_v61_poems(conn)?;
+        super::record_migration(conn, 61)?;
+    }
+
+    Ok(())
+}
+
+/// Migration V61: recorded poems (Chat Logs → Poems tab).
+///
+/// Poems recited by other players via `Poem by X` NPC talk screens are captured
+/// globally — they are *not* character-scoped, so the same poem heard by any
+/// character (or heard more than once) is stored a single time. The
+/// UNIQUE(author, title, content) index drives that dedup via INSERT OR IGNORE,
+/// so re-scanning a Player.log never produces duplicate rows. The
+/// `recorded_by_*` columns retain which character/server first captured the poem
+/// for reference only.
+fn migration_v61_poems(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS poems (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT NOT NULL,
+            recorded_by_character TEXT,
+            recorded_by_server TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(author, title, content)
+        );
+        CREATE INDEX IF NOT EXISTS idx_poems_recorded_at
+            ON poems(recorded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_poems_author
+            ON poems(author);",
+    )?;
     Ok(())
 }
 
