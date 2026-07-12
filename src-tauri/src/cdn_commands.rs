@@ -3133,6 +3133,49 @@ pub struct SlotTsysPower {
     pub slots: Vec<String>,
 }
 
+/// Choose the default tier for a mod at a given target level.
+///
+/// Tier level ranges overlap heavily (e.g. 5–20, 10–25, 15–30 …), so several
+/// tiers can contain the target level at once. Pick deterministically: the
+/// highest tier whose `min_level` is at or below the target — i.e. the strongest
+/// tier you qualify for at that level. If the target is below every tier's
+/// `min_level`, fall back to the lowest tier (a higher-level mod can still be
+/// applied to lower-level gear; it just raises the equip requirement).
+///
+/// Returns the tier key (e.g. "id_9"), or `None` if `tiers` is empty. Iterating
+/// the `tiers` HashMap and taking the first range match instead would be
+/// non-deterministic, which made the default tier appear random across launches.
+/// The `min_level` tiebreak on the tier key keeps the result stable even if two
+/// tiers shared a `min_level`.
+fn select_default_tier_key(
+    tiers: &HashMap<String, TsysTierInfo>,
+    target_level: i64,
+) -> Option<String> {
+    // Strongest tier at or below the target level.
+    let at_or_below = tiers
+        .iter()
+        .filter(|(_, t)| t.min_level.unwrap_or(0) as i64 <= target_level)
+        .max_by(|a, b| {
+            a.1.min_level
+                .unwrap_or(0)
+                .cmp(&b.1.min_level.unwrap_or(0))
+                .then_with(|| a.0.cmp(b.0))
+        });
+    if let Some((key, _)) = at_or_below {
+        return Some(key.clone());
+    }
+    // Target is below every tier: use the lowest tier available.
+    tiers
+        .iter()
+        .min_by(|a, b| {
+            a.1.min_level
+                .unwrap_or(0)
+                .cmp(&b.1.min_level.unwrap_or(0))
+                .then_with(|| a.0.cmp(b.0))
+        })
+        .map(|(key, _)| key.clone())
+}
+
 /// Get all eligible TSys powers for a given equipment slot, filtered by skills and target level.
 /// Returns powers belonging to skill_primary, skill_secondary, or generic (no skill).
 #[tauri::command]
@@ -3209,7 +3252,6 @@ pub async fn get_tsys_powers_for_slot(
         // Sort tiers by min_level ascending
         available_tiers.sort_by_key(|t| t.min_level);
 
-        let mut best_tier_id: Option<String> = None;
         let mut best_effects: Vec<String> = Vec::new();
         let mut best_raw_effects: Vec<String> = Vec::new();
         let mut best_min_rarity: Option<String> = None;
@@ -3231,57 +3273,17 @@ pub async fn get_tsys_powers_for_slot(
             (resolved, raw, icon)
         };
 
-        for (tier_key, tier) in tiers {
-            let min_level = tier.min_level.unwrap_or(0) as i64;
-            let max_level = tier.max_level.unwrap_or(999) as i64;
-
-            if target_level >= min_level && target_level <= max_level {
-                best_tier_id = Some(tier_key.clone());
-                best_min_rarity = tier.min_rarity.clone();
-                best_skill_prereq = tier.skill_level_prereq.map(|v| v as i64);
-                let (eff, raw, icon) = resolve_tier(tier, &data);
-                best_effects = eff;
-                best_raw_effects = raw;
-                best_icon_id = icon;
-                break; // First matching tier wins
-            }
-        }
-
-        // If no tier matched, try to find the highest tier at or below target level
-        if best_tier_id.is_none() {
-            let mut best_min: i64 = 0;
-            for (tier_key, tier) in tiers {
-                let min_level = tier.min_level.unwrap_or(0) as i64;
-                if min_level <= target_level && min_level >= best_min {
-                    best_min = min_level;
-                    best_tier_id = Some(tier_key.clone());
-                    best_min_rarity = tier.min_rarity.clone();
-                    best_skill_prereq = tier.skill_level_prereq.map(|v| v as i64);
-                    let (eff, raw, icon) = resolve_tier(tier, &data);
-                    best_effects = eff;
-                    best_raw_effects = raw;
-                    best_icon_id = icon;
-                }
-            }
-        }
-
-        // Final fallback: if target level is below all tiers, pick the lowest tier
-        // (higher-level mods can go on lower-level gear, raising the equip requirement)
-        if best_tier_id.is_none() {
-            let mut lowest_min: i64 = i64::MAX;
-            for (tier_key, tier) in tiers {
-                let min_level = tier.min_level.unwrap_or(0) as i64;
-                if min_level < lowest_min {
-                    lowest_min = min_level;
-                    best_tier_id = Some(tier_key.clone());
-                    best_min_rarity = tier.min_rarity.clone();
-                    best_skill_prereq = tier.skill_level_prereq.map(|v| v as i64);
-                    let (eff, raw, icon) = resolve_tier(tier, &data);
-                    best_effects = eff;
-                    best_raw_effects = raw;
-                    best_icon_id = icon;
-                }
-            }
+        // Default the mod to the tier the target level qualifies for (deterministic
+        // — see select_default_tier_key). This is what feeds `tier_id` below, which
+        // the frontend uses as the default in the mod/augment tier picker.
+        let best_tier_id = select_default_tier_key(tiers, target_level);
+        if let Some(tier) = best_tier_id.as_ref().and_then(|k| tiers.get(k)) {
+            best_min_rarity = tier.min_rarity.clone();
+            best_skill_prereq = tier.skill_level_prereq.map(|v| v as i64);
+            let (eff, raw, icon) = resolve_tier(tier, &data);
+            best_effects = eff;
+            best_raw_effects = raw;
+            best_icon_id = icon;
         }
 
         if best_tier_id.is_some() {
@@ -4964,8 +4966,20 @@ mod build_stats_parsing_tests {
         category_attack_tokens, parse_attacks_deal, parse_base_damage,
         parse_conditional_direct_text, parse_conditional_indirect_text, parse_dot_apply,
         parse_dot_clause, parse_named_damage_rest, parse_named_type_conversion,
-        parse_names_deal_direct, parse_skill_type_conversion, parse_token_value, sniff_damage_type,
+        parse_names_deal_direct, parse_skill_type_conversion, parse_token_value,
+        select_default_tier_key, sniff_damage_type, TsysTierInfo,
     };
+    use std::collections::HashMap;
+
+    fn tier(min: u32, max: u32) -> TsysTierInfo {
+        TsysTierInfo {
+            effect_descs: vec![],
+            min_level: Some(min),
+            max_level: Some(max),
+            min_rarity: None,
+            skill_level_prereq: None,
+        }
+    }
 
     #[test]
     fn category_attack_tokens_maps_keywords_to_tokens() {
@@ -5378,6 +5392,62 @@ mod build_stats_parsing_tests {
         // %-damage and instant-only forms have no "over M seconds" clause.
         assert!(parse_dot_clause("Agonize deals +40% damage and conjures a magical field").is_none());
         assert!(parse_dot_clause("Drink Blood steals 24 more Health over 12 seconds").is_none());
+    }
+
+    #[test]
+    fn select_default_tier_key_is_deterministic_across_overlapping_ranges() {
+        // Mod tier level ranges overlap: id_1 5–20, id_2 10–25, id_3 15–30, id_4 20–35.
+        // At target level 20 all four ranges contain the level; the strongest tier
+        // whose min_level is <= 20 is id_4. The choice must not depend on HashMap
+        // iteration order (each fresh map gets a new random seed) — this is the bug
+        // that made augment/mod defaults appear random across launches.
+        let build = || {
+            let mut t = HashMap::new();
+            t.insert("id_1".to_string(), tier(5, 20));
+            t.insert("id_2".to_string(), tier(10, 25));
+            t.insert("id_3".to_string(), tier(15, 30));
+            t.insert("id_4".to_string(), tier(20, 35));
+            t
+        };
+        for _ in 0..50 {
+            assert_eq!(select_default_tier_key(&build(), 20).as_deref(), Some("id_4"));
+        }
+    }
+
+    #[test]
+    fn select_default_tier_key_picks_strongest_qualifying_tier() {
+        // ArcheryBoost-style ladder (min increments by 10). At level 90 the intended
+        // default is the tier whose min_level == 90, not a lower overlapping one.
+        let mut t = HashMap::new();
+        t.insert("id_7".to_string(), tier(70, 90));
+        t.insert("id_8".to_string(), tier(80, 100));
+        t.insert("id_9".to_string(), tier(90, 110));
+        t.insert("id_10".to_string(), tier(100, 120));
+        assert_eq!(select_default_tier_key(&t, 90).as_deref(), Some("id_9"));
+    }
+
+    #[test]
+    fn select_default_tier_key_below_all_uses_lowest_tier() {
+        // Target under every tier's min_level: fall back to the lowest tier.
+        let mut t = HashMap::new();
+        t.insert("id_2".to_string(), tier(10, 25));
+        t.insert("id_3".to_string(), tier(15, 30));
+        assert_eq!(select_default_tier_key(&t, 3).as_deref(), Some("id_2"));
+    }
+
+    #[test]
+    fn select_default_tier_key_above_all_uses_strongest_tier() {
+        // Target above every tier's max_level: still pick the highest min_level tier.
+        let mut t = HashMap::new();
+        t.insert("id_1".to_string(), tier(5, 20));
+        t.insert("id_2".to_string(), tier(10, 25));
+        assert_eq!(select_default_tier_key(&t, 200).as_deref(), Some("id_2"));
+    }
+
+    #[test]
+    fn select_default_tier_key_empty_is_none() {
+        let t: HashMap<String, TsysTierInfo> = HashMap::new();
+        assert!(select_default_tier_key(&t, 90).is_none());
     }
 }
 
