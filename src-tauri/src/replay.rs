@@ -743,40 +743,60 @@ pub fn ingest_kill_loot_from_logs(
     // corpse_entity_id -> kill_id (row id of the persisted kill)
     let mut kill_ids: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
 
+    // Server-independent lookup for an existing kill of this corpse. Player.log
+    // has no server field, so this backfill only knows `server_name = "Unknown"`,
+    // whereas the live tailer records the real server (e.g. "Arisetsu"). The
+    // kill-dedup UNIQUE index includes server_name, so keying the match on server
+    // would MISS a corpse already recorded live and insert a duplicate kill row —
+    // re-attaching the same loot under a new kill_id and doubling both kills and
+    // loot. A corpse is uniquely identified by (character, entity_id, killed_at)
+    // regardless of server, so match on that natural key instead.
+    let find_existing_kill = |entity_id_str: &str, killed_at: &str| -> Option<i64> {
+        conn.query_row(
+            "SELECT id FROM enemy_kills
+             WHERE character_name IS ?1 AND enemy_entity_id = ?2 AND killed_at = ?3
+             LIMIT 1",
+            rusqlite::params![character_name, entity_id_str, killed_at],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()
+    };
+
     for (entity_id, (corpse_name, killed_at, zone, combat_skills)) in &corpses {
         let entity_id_str = entity_id.to_string();
-        let inserted = conn
-            .execute(
-                "INSERT OR IGNORE INTO enemy_kills
-                    (enemy_name, enemy_entity_id, killing_ability,
-                     health_damage, armor_damage, killed_at, character_name, server_name, zone, combat_skills)
-                 VALUES (?1, ?2, '', 0, 0, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    corpse_name,
-                    entity_id_str,
-                    killed_at,
-                    character_name,
-                    server_name,
-                    zone,
-                    combat_skills,
-                ],
-            )
-            .map_err(|e| format!("Failed to insert kill: {e}"))?;
 
-        // Resolve the kill_id whether we inserted or an earlier ingest/live row
-        // already covered this corpse — loot is deduped by instance_id either way.
-        let kill_id = if inserted > 0 {
-            result.kills_added += 1;
-            conn.last_insert_rowid()
+        // Reuse a kill already recorded by the live tailer (or a prior ingest) for
+        // this same corpse, ignoring server_name — loot is deduped by instance_id
+        // against whichever kill_id we resolve to.
+        let kill_id = if let Some(id) = find_existing_kill(&entity_id_str, killed_at) {
+            id
         } else {
-            conn.query_row(
-                "SELECT id FROM enemy_kills
-                 WHERE character_name IS ?1 AND server_name IS ?2
-                   AND enemy_entity_id = ?3 AND killed_at = ?4",
-                rusqlite::params![character_name, server_name, entity_id_str, killed_at],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(-1)
+            // No prior row for this corpse — insert it. (INSERT OR IGNORE guards a
+            // rare race with the live tailer inserting the same corpse between our
+            // check and this write; the fallback re-lookup then resolves it.)
+            let inserted = conn
+                .execute(
+                    "INSERT OR IGNORE INTO enemy_kills
+                        (enemy_name, enemy_entity_id, killing_ability,
+                         health_damage, armor_damage, killed_at, character_name, server_name, zone, combat_skills)
+                     VALUES (?1, ?2, '', 0, 0, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        corpse_name,
+                        entity_id_str,
+                        killed_at,
+                        character_name,
+                        server_name,
+                        zone,
+                        combat_skills,
+                    ],
+                )
+                .map_err(|e| format!("Failed to insert kill: {e}"))?;
+            if inserted > 0 {
+                result.kills_added += 1;
+                conn.last_insert_rowid()
+            } else {
+                find_existing_kill(&entity_id_str, killed_at).unwrap_or(-1)
+            }
         };
         if kill_id >= 0 {
             kill_ids.insert(*entity_id, kill_id);
@@ -960,6 +980,95 @@ mod ingest_tests {
         assert!(r2.already_ingested);
         assert_eq!(r2.kills_added, 0);
         assert_eq!(r2.loot_added, 0);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn backfill_dedups_against_live_kill_despite_server_mismatch() {
+        // Regression: the live tailer records kills under the real server name
+        // (e.g. "Arisetsu") while this Player.log backfill only knows "Unknown".
+        // The kill-dedup UNIQUE index includes server_name, so matching on server
+        // would treat a corpse already recorded live as new — inserting a
+        // duplicate kill row and re-attaching the same loot under a fresh kill_id,
+        // doubling both kills and loot. The backfill must dedup on the
+        // server-independent natural key (character, entity_id, killed_at).
+        let (pool, db_path) = temp_pool();
+        {
+            let conn = pool.get().unwrap();
+            // Simulate a live-recorded kill: corpse 500 "Goblin" at 15:42:00 under
+            // the real server "Arisetsu", with one looted HealthPotion (inst 111).
+            conn.execute(
+                "INSERT INTO enemy_kills
+                    (enemy_name, enemy_entity_id, killing_ability, health_damage, armor_damage,
+                     killed_at, character_name, server_name, zone, combat_skills)
+                 VALUES ('Goblin', '500', '', 0, 0, '15:42:00', 'TestPlayer', 'Arisetsu', NULL, NULL)",
+                [],
+            )
+            .unwrap();
+            let kid: i64 = conn
+                .query_row(
+                    "SELECT id FROM enemy_kills WHERE enemy_entity_id = '500'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO enemy_kill_loot (kill_id, item_name, quantity, instance_id)
+                 VALUES (?1, 'HealthPotion', 1, 111)",
+                rusqlite::params![kid],
+            )
+            .unwrap();
+        }
+
+        // Backfill the rotated Player.log for the SAME session: same corpse 500 at
+        // 15:42:00, re-looting instance 111 plus a genuinely new instance 222.
+        let log = "\
+[15:41:09] Logged in as character TestPlayer. Time UTC=04/17/2026 15:41:09. Timezone Offset 00:00:00
+[15:42:00] LocalPlayer: ProcessTalkScreen(500, \"Search Corpse of Goblin\", \"\", \"\", System.Int32[], System.String[], 0, Corpse)
+[15:42:01] LocalPlayer: ProcessAddItem(HealthPotion(111), -1, True)
+[15:42:01] LocalPlayer: ProcessRemoveLoot(111)
+[15:42:02] LocalPlayer: ProcessAddItem(HealthPotion(222), -1, True)
+[15:42:02] LocalPlayer: ProcessRemoveLoot(222)
+";
+        let log_path = write_log(log);
+        let r = ingest_kill_loot_from_logs(log_path.clone(), &pool).expect("ingest");
+        assert!(!r.already_ingested);
+        // The corpse already existed (recorded live) — no new kill row.
+        assert_eq!(r.kills_added, 0, "no duplicate kill for an already-recorded corpse");
+        // Instance 111 already recorded live (dedup); only 222 is genuinely new.
+        assert_eq!(r.loot_added, 1, "only the new instance is added, 111 deduped");
+
+        let conn = pool.get().unwrap();
+        let kills: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM enemy_kills WHERE enemy_entity_id = '500'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kills, 1, "corpse recorded once, not duplicated under 'Unknown'");
+        let loot: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM enemy_kill_loot l
+                 JOIN enemy_kills k ON k.id = l.kill_id
+                 WHERE k.enemy_entity_id = '500'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(loot, 2, "111 (live) + 222 (backfill); 111 not duplicated");
+        // The kept kill row retains the real server, not the backfill's "Unknown".
+        let srv: String = conn
+            .query_row(
+                "SELECT server_name FROM enemy_kills WHERE enemy_entity_id = '500'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(srv, "Arisetsu");
 
         drop(conn);
         let _ = std::fs::remove_file(&log_path);
