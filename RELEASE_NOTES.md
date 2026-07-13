@@ -1,7 +1,7 @@
-## What's Changed since v0.11.34
+## What's Changed since v0.11.35
 
-### Features
-- feat(chat): add Poems tab to Chat Logs (`35a46b8`)
+### Fixes
+- fix(database): dedup Player-prev backfill kills against live rows regardless of server (`6a7ef8c`)
 
 ---
-*2 commits since v0.11.34*
+*2 commits since v0.11.35*
