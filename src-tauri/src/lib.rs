@@ -208,7 +208,8 @@ use db::gourmand_commands::{
     import_gourmand_report, import_latest_gourmand_report, toggle_food_eaten_status,
 };
 use db::inventory_commands::{
-    get_inventory_snapshots, get_inventory_summary, get_snapshot_items, import_inventory_report,
+    get_all_character_items, get_inventory_snapshots, get_inventory_summary, get_snapshot_items,
+    import_inventory_report,
 };
 use db::timer_commands::{delete_user_timer, get_user_timers, save_user_timer};
 use db::market_commands::{
@@ -230,9 +231,10 @@ use settings::{
     get_settings_file_path, load_settings, save_settings, SettingsManager,
 };
 use setup_commands::{
-    complete_setup, delete_character, get_user_characters, import_latest_inventory_for_character,
-    import_latest_report_for_character, import_reports_for_server, save_user_character,
-    scan_reports_for_characters, set_active_character, validate_game_data_path,
+    complete_setup, delete_character, get_user_characters, import_all_inventory_for_server,
+    import_latest_inventory_for_character, import_latest_report_for_character,
+    import_reports_for_server, save_user_character, scan_reports_for_characters,
+    set_active_character, validate_game_data_path,
 };
 
 /// Timestamped log line for startup diagnostics.
@@ -792,6 +794,7 @@ pub fn run() {
             import_latest_report_for_character,
             import_latest_inventory_for_character,
             import_reports_for_server,
+            import_all_inventory_for_server,
             // Chat
             scan_chat_logs,
             scan_chat_log_file,
@@ -855,6 +858,7 @@ pub fn run() {
             get_inventory_snapshots,
             get_snapshot_items,
             get_inventory_summary,
+            get_all_character_items,
             // Gourmand tracker
             get_all_foods,
             import_gourmand_report,
