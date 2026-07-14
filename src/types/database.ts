@@ -459,3 +459,17 @@ export interface InventorySummary {
   items_by_vault: Record<string, number>
   items_by_rarity: Record<string, number>
 }
+
+/** One item from a character's latest inventory snapshot, tagged with its owner.
+ *  Returned by `get_all_character_items` for the cross-character storage search. */
+export interface CrossCharacterItem {
+  character_name: string
+  server_name: string
+  item_name: string
+  storage_vault: string
+  is_in_inventory: boolean
+  stack_size: number
+  type_id: number
+  rarity: string | null
+  value: number | null
+}

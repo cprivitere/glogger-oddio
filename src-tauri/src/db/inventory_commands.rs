@@ -111,6 +111,21 @@ pub struct InventorySummary {
     pub items_by_rarity: HashMap<String, i64>,
 }
 
+/// One item row from the latest inventory snapshot of a given character,
+/// used by the cross-character storage search.
+#[derive(Serialize)]
+pub struct CrossCharacterItem {
+    pub character_name: String,
+    pub server_name: String,
+    pub item_name: String,
+    pub storage_vault: String,
+    pub is_in_inventory: bool,
+    pub stack_size: i64,
+    pub type_id: i64,
+    pub rarity: Option<String>,
+    pub value: Option<f64>,
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -545,4 +560,61 @@ pub fn get_inventory_summary(
         items_by_vault,
         items_by_rarity,
     })
+}
+
+/// Return every item from the *latest* inventory snapshot of every character,
+/// optionally scoped to a single server. Powers the "search all characters"
+/// storage lookup — each row carries the owning character so the frontend can
+/// group matches by item and show who has it and where.
+#[tauri::command]
+pub fn get_all_character_items(
+    db: State<'_, DbPool>,
+    server_name: Option<String>,
+) -> Result<Vec<CrossCharacterItem>, String> {
+    let conn = db
+        .get()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+
+    // `latest` picks, per (character, server), the snapshot with the newest
+    // timestamp. The unique (character, server, timestamp) constraint guarantees
+    // that MAX(timestamp) maps to exactly one snapshot row, so no duplicates.
+    let mut stmt = conn
+        .prepare(
+            "WITH latest AS (
+                SELECT cis.id, cis.character_name, cis.server_name
+                FROM character_item_snapshots cis
+                WHERE (?1 IS NULL OR cis.server_name = ?1)
+                  AND cis.snapshot_timestamp = (
+                      SELECT MAX(c2.snapshot_timestamp)
+                      FROM character_item_snapshots c2
+                      WHERE c2.character_name = cis.character_name
+                        AND c2.server_name = cis.server_name
+                  )
+            )
+            SELECT l.character_name, l.server_name, i.item_name, i.storage_vault,
+                   i.is_in_inventory, i.stack_size, i.type_id, i.rarity, i.value
+            FROM latest l
+            JOIN character_snapshot_items i ON i.item_snapshot_id = l.id
+            ORDER BY i.item_name, l.character_name",
+        )
+        .map_err(|e| format!("Failed to prepare query: {e}"))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![server_name], |row| {
+            Ok(CrossCharacterItem {
+                character_name: row.get(0)?,
+                server_name: row.get(1)?,
+                item_name: row.get(2)?,
+                storage_vault: row.get(3)?,
+                is_in_inventory: row.get(4)?,
+                stack_size: row.get(5)?,
+                type_id: row.get(6)?,
+                rarity: row.get(7)?,
+                value: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("Query failed: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read results: {e}"))
 }

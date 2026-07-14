@@ -21,6 +21,18 @@
         @click="handleImport">
         Import Inventory
       </button>
+
+      <button
+        class="ml-auto px-3 py-1.5 text-xs cursor-pointer rounded border transition-colors whitespace-nowrap"
+        :class="searchAllChars
+          ? 'bg-accent-gold/20 text-accent-gold border-accent-gold/40'
+          : 'bg-surface-base text-text-secondary border-border-default hover:text-text-primary hover:bg-surface-elevated'"
+        :title="searchAllChars
+          ? 'Showing storage across all characters on this server'
+          : 'Search the storage of every character on this server'"
+        @click="searchAllChars = !searchAllChars">
+        {{ searchAllChars ? '✓ All Characters' : 'All Characters' }}
+      </button>
     </div>
 
     <!-- Import feedback -->
@@ -59,12 +71,12 @@
     </div>
 
     <!-- Search + View / Grouping controls -->
-    <div v-if="store.selectedInventorySnapshot" class="flex items-center gap-3 flex-wrap">
+    <div v-if="store.selectedInventorySnapshot || searchAllChars" class="flex items-center gap-3 flex-wrap">
       <div class="relative">
         <input
           v-model="searchQuery"
           type="text"
-          placeholder="Search items..."
+          :placeholder="searchAllChars ? 'Search all characters…' : 'Search items...'"
           class="pl-7 pr-7 py-1 bg-surface-base border border-border-default rounded text-xs text-text-primary placeholder-text-muted w-48 focus:outline-none focus:border-accent-gold/50"
         />
         <span class="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted text-xs pointer-events-none">&#x1F50D;</span>
@@ -74,11 +86,15 @@
           @click="searchQuery = ''"
         >&times;</button>
       </div>
-      <span v-if="searchQuery" class="text-xs text-text-muted">
+      <span v-if="searchAllChars" class="text-xs text-text-muted">
+        {{ crossCharFiltered.length }} item{{ crossCharFiltered.length !== 1 ? 's' : '' }}
+        across all characters
+      </span>
+      <span v-else-if="searchQuery" class="text-xs text-text-muted">
         {{ filteredItems.length }} match{{ filteredItems.length !== 1 ? 'es' : '' }}
       </span>
     </div>
-    <div v-if="store.selectedInventorySnapshot" class="flex items-center gap-3 flex-wrap">
+    <div v-if="store.selectedInventorySnapshot && !searchAllChars" class="flex items-center gap-3 flex-wrap">
       <div v-if="groupMode !== 'totals'" class="flex items-center gap-1.5">
         <span class="text-xs text-text-muted">View:</span>
         <div class="flex border border-border-default rounded overflow-hidden">
@@ -132,13 +148,59 @@
 
     <!-- No data -->
     <EmptyState
-      v-if="!store.inventorySnapshots.length && !store.loading"
+      v-if="!searchAllChars && !store.inventorySnapshots.length && !store.loading"
       variant="panel"
       primary="No inventory data found"
       secondary="Use /outputitems in-game, then import the report." />
 
+    <!-- All-characters storage search -->
+    <div v-if="searchAllChars" class="overflow-auto flex-1 min-h-0">
+      <div v-if="store.allCharacterItemsLoading && !store.allCharacterItems.length"
+        class="text-xs text-text-muted py-6 text-center">
+        Loading storage for all characters…
+      </div>
+      <EmptyState
+        v-else-if="!store.allCharacterItems.length"
+        variant="panel"
+        primary="No inventory data for any character"
+        secondary="Use /outputitems in-game on each character, then import their reports." />
+      <EmptyState
+        v-else-if="crossCharFiltered.length === 0"
+        variant="compact"
+        :primary="`No items matching &quot;${searchQuery}&quot;`" />
+      <table v-else class="w-full border-collapse text-xs">
+        <thead class="sticky top-0 z-10 bg-surface-base border-b border-border-default">
+          <tr>
+            <th class="text-[10px] uppercase tracking-wider text-text-muted font-semibold px-3 py-1.5 text-left">Item</th>
+            <th class="text-[10px] uppercase tracking-wider text-text-muted font-semibold px-3 py-1.5 text-right tabular-nums">Total Qty</th>
+            <th class="text-[10px] uppercase tracking-wider text-text-muted font-semibold px-3 py-1.5 text-right">Characters</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="row in crossCharFiltered" :key="row.name">
+            <tr
+              class="border-b border-border-default/50 hover:bg-surface-row-hover cursor-pointer"
+              @click="toggleCrossCharRow(row.name)">
+              <td class="px-3 py-2">
+                <ItemInline :reference="row.name" :type-id="row.typeId" />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-text-primary">{{ row.total.toLocaleString() }}</td>
+              <td class="px-3 py-2 text-right text-text-muted">{{ row.characterCount }} {{ row.characterCount === 1 ? 'character' : 'characters' }}</td>
+            </tr>
+            <template v-if="expandedCrossChar.has(row.name)">
+              <tr v-for="(e, i) in row.entries" :key="`${row.name}-${e.character}-${e.location}-${i}`" class="bg-surface-inset/30">
+                <td class="px-3 py-1 pl-8 text-text-secondary">{{ e.character }}</td>
+                <td class="px-3 py-1 text-right tabular-nums text-text-secondary">{{ e.qty.toLocaleString() }}</td>
+                <td class="px-3 py-1 text-right text-text-muted">{{ formatVault(e.location) }}</td>
+              </tr>
+            </template>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
     <!-- Content -->
-    <div v-if="store.selectedInventorySnapshot" class="overflow-auto flex-1 min-h-0">
+    <div v-else-if="store.selectedInventorySnapshot" class="overflow-auto flex-1 min-h-0">
       <!-- No search results -->
       <EmptyState v-if="searchQuery && filteredItems.length === 0" variant="compact" :primary="`No items matching &quot;${searchQuery}&quot;`" />
 
@@ -167,7 +229,7 @@
                 class="border-b border-border-default/50 hover:bg-surface-row-hover cursor-pointer"
                 @click="toggleTotalRow(row.name)">
                 <td class="px-3 py-2">
-                  <ItemInline :reference="row.name" />
+                  <ItemInline :reference="row.name" :type-id="row.typeId" />
                 </td>
                 <td class="px-3 py-2 text-right tabular-nums font-medium text-text-primary">{{ row.total.toLocaleString() }}</td>
                 <td class="px-3 py-2 text-right text-text-muted">{{ row.locations.length }} {{ row.locations.length === 1 ? 'location' : 'locations' }}</td>
@@ -231,21 +293,91 @@ const { prefs, update: updatePrefs } = useViewPrefs<Record<string, unknown>>('in
   groupMode: 'storage' as string,
   sortMode: 'slot' as string,
   searchQuery: '' as string,
+  searchAllChars: false as boolean,
 })
 
 const viewMode = ref<ViewMode>((prefs.value.viewMode as ViewMode) || 'detail')
 const groupMode = ref<GroupMode>((prefs.value.groupMode as GroupMode) || 'storage')
 const sortMode = ref<SortMode>((prefs.value.sortMode as SortMode) || 'slot')
 const searchQuery = ref((prefs.value.searchQuery as string) || '')
+const searchAllChars = ref((prefs.value.searchAllChars as boolean) || false)
 
 // Persist changes back
-watch([viewMode, groupMode, sortMode, searchQuery], () => {
+watch([viewMode, groupMode, sortMode, searchQuery, searchAllChars], () => {
   updatePrefs({
     viewMode: viewMode.value,
     groupMode: groupMode.value,
     sortMode: sortMode.value,
     searchQuery: searchQuery.value,
+    searchAllChars: searchAllChars.value,
   })
+})
+
+// ── Cross-character storage search ────────────────────────────────────────────
+// When enabled, search spans the latest inventory snapshot of every character
+// on the active server so the user can find which character holds an item.
+
+// Load (and lazily backfill) the aggregated dataset the first time the toggle
+// is turned on, or immediately if it was persisted as enabled.
+watch(searchAllChars, (on) => {
+  if (on) store.loadAllCharacterItems()
+}, { immediate: true })
+
+interface CrossCharEntry {
+  character: string
+  location: string
+  qty: number
+}
+
+interface CrossCharRow {
+  name: string
+  typeId: number
+  total: number
+  characterCount: number
+  entries: CrossCharEntry[]
+}
+
+const crossCharFiltered = computed<CrossCharRow[]>(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  const map = new Map<string, { typeId: number; total: number; entries: CrossCharEntry[]; chars: Set<string> }>()
+
+  for (const item of store.allCharacterItems) {
+    if (q && !item.item_name.toLowerCase().includes(q)) continue
+    const location = item.is_in_inventory ? 'Inventory' : (item.storage_vault || 'Unknown')
+    let entry = map.get(item.item_name)
+    if (!entry) { entry = { typeId: item.type_id, total: 0, entries: [], chars: new Set() }; map.set(item.item_name, entry) }
+    entry.total += item.stack_size
+    entry.entries.push({ character: item.character_name, location, qty: item.stack_size })
+    entry.chars.add(item.character_name)
+  }
+
+  return [...map.entries()]
+    .map(([name, data]) => ({
+      name,
+      typeId: data.typeId,
+      total: data.total,
+      characterCount: data.chars.size,
+      entries: data.entries.sort(
+        (a, b) => a.character.localeCompare(b.character) || a.location.localeCompare(b.location),
+      ),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
+
+const expandedCrossChar = reactive(new Set<string>())
+function toggleCrossCharRow(name: string) {
+  if (expandedCrossChar.has(name)) expandedCrossChar.delete(name)
+  else expandedCrossChar.add(name)
+}
+
+// While searching all characters, auto-expand matches so the owning character
+// and location are visible without an extra click. Collapse again when cleared.
+watch([searchQuery, searchAllChars], ([q, on]) => {
+  if (!on) return
+  expandedCrossChar.clear()
+  if (q.trim()) {
+    for (const row of crossCharFiltered.value) expandedCrossChar.add(row.name)
+  }
 })
 
 const viewModes = [
@@ -453,6 +585,7 @@ watch(groupedItems, (groups) => {
 
 interface TotalRow {
   name: string
+  typeId: number
   total: number
   locations: { vault: string; qty: number }[]
 }
@@ -472,16 +605,17 @@ function toggleTotalSort(col: 'name' | 'qty') {
 }
 
 const itemTotals = computed<TotalRow[]>(() => {
-  const map = new Map<string, { total: number; locs: Map<string, number> }>()
+  const map = new Map<string, { typeId: number; total: number; locs: Map<string, number> }>()
   for (const item of filteredItems.value) {
     const vault = getLocation(item)
     let entry = map.get(item.item_name)
-    if (!entry) { entry = { total: 0, locs: new Map() }; map.set(item.item_name, entry) }
+    if (!entry) { entry = { typeId: item.type_id, total: 0, locs: new Map() }; map.set(item.item_name, entry) }
     entry.total += item.stack_size
     entry.locs.set(vault, (entry.locs.get(vault) || 0) + item.stack_size)
   }
   return [...map.entries()].map(([name, data]) => ({
     name,
+    typeId: data.typeId,
     total: data.total,
     locations: [...data.locs.entries()].map(([vault, qty]) => ({ vault, qty })).sort((a, b) => a.vault.localeCompare(b.vault)),
   }))

@@ -20,6 +20,7 @@ import type {
   SnapshotItem,
   InventoryImportResult,
   InventorySummary,
+  CrossCharacterItem,
 } from '../types/database'
 
 export const useCharacterStore = defineStore('character', () => {
@@ -45,6 +46,11 @@ export const useCharacterStore = defineStore('character', () => {
   const inventoryItems = ref<SnapshotItem[]>([])
   const inventorySummary = ref<InventorySummary | null>(null)
   const lastInventoryImport = ref<InventoryImportResult | null>(null)
+
+  // Cross-character storage search state (latest snapshot per character)
+  const allCharacterItems = ref<CrossCharacterItem[]>([])
+  const allCharacterItemsLoading = ref(false)
+  const allCharacterItemsLoaded = ref(false)
 
   async function importCharacterReport(): Promise<ImportResult | null> {
     const settingsStore = useSettingsStore()
@@ -413,6 +419,42 @@ export const useCharacterStore = defineStore('character', () => {
     }
   }
 
+  /**
+   * Load the latest inventory snapshot of every character on the active server
+   * for the cross-character storage search. First backfills inventory reports
+   * for characters that haven't been loaded recently (best-effort), then pulls
+   * the aggregated item set. Caches results; pass `force` to refresh.
+   */
+  async function loadAllCharacterItems(force = false) {
+    if (allCharacterItemsLoaded.value && !force) return
+
+    const settingsStore = useSettingsStore()
+    const serverName = settingsStore.settings.activeServerName || undefined
+
+    allCharacterItemsLoading.value = true
+    try {
+      // Backfill inventory reports for every character on this server so the
+      // search sees characters the user hasn't opened recently. Best-effort —
+      // a missing Reports folder or file just yields fewer results.
+      if (serverName) {
+        try {
+          await invoke<number>('import_all_inventory_for_server', { serverName })
+        } catch (e) {
+          console.warn('Cross-character inventory backfill:', e)
+        }
+      }
+
+      allCharacterItems.value = await invoke<CrossCharacterItem[]>('get_all_character_items', {
+        serverName,
+      })
+      allCharacterItemsLoaded.value = true
+    } catch (e) {
+      error.value = String(e)
+    } finally {
+      allCharacterItemsLoading.value = false
+    }
+  }
+
   return {
     characters,
     snapshots,
@@ -448,5 +490,10 @@ export const useCharacterStore = defineStore('character', () => {
     loadInventorySnapshots,
     selectInventorySnapshot,
     initInventoryForActiveCharacter,
+    // Cross-character storage search
+    allCharacterItems,
+    allCharacterItemsLoading,
+    allCharacterItemsLoaded,
+    loadAllCharacterItems,
   }
 })
