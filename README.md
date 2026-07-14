@@ -13,7 +13,7 @@ A desktop companion app for **[Project: Gorgon](https://projectgorgon.com)**. gl
 
 https://www.youtube.com/watch?v=wXSaIyMzuuA
 
-############ Original Owners Info ############
+## Original Owners Info
 
 - Thanks Reyetta, Wogan, Kaeus, Fidge, TwinkleofToes, DisasterGaymer, Cakedydidooda, Lucyfeir and Deradon! Feedback and early testing was super helpful in getting Glogger to where it is now. :D
 - Some things only will work with VIP! This is just a limitation of how and where I can access data. The DataBrowser works no matter what though, and it is a very handy. Nothing in here is intentionally broken because of non-vip. I just can only work with what I have.
