@@ -7,8 +7,11 @@ A desktop companion app for **[Project: Gorgon](https://projectgorgon.com)**. gl
 ## About
 
 - Community fork managed by oddio of arisetsu. 
-- Huge shoutout to Super for helping figure out how to operate this stuff. Zenith/Danielout - for creating the base application. To Chompynibblers for the inspiration, sharing your database knowledge, and helping finding the necessary tags in the log files to properly implement it. To Derava, your friendship keeps me coming back to the game. May this app continue to serve the entire community on the shoulders of these giants.
+- Huge shoutout to Super for helping figure out how to operate this stuff. Zenith/Danielout - for creating the base application. To Chompynibblers for the inspiration, sharing your database knowledge, and help finding the necessary tags in the log files to properly implement it. To Derava, your friendship keeps me coming back to the game. May this app continue to serve the entire community on the shoulders of these giants.
 
+## What is glogger?
+
+https://www.youtube.com/watch?v=wXSaIyMzuuA
 
 ############ Original Owners Info ############
 
