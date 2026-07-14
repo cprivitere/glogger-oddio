@@ -1,7 +1,7 @@
-## What's Changed since v0.11.35
+## What's Changed since v0.11.36
 
-### Fixes
-- fix(database): dedup Player-prev backfill kills against live rows regardless of server (`6a7ef8c`)
+### Features
+- feat(inventory): add cross-character storage search toggle (`83cc25a`)
 
 ---
-*2 commits since v0.11.35*
+*2 commits since v0.11.36*
