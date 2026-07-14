@@ -1,7 +1,7 @@
 {
   "name": "glogger",
   "private": true,
-  "version": "0.11.36",
+  "version": "0.11.37",
   "type": "module",
   "license": "GPL-3.0",
   "repository": {
