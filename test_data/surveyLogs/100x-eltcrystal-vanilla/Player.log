@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffbf241f46e (UnityPlayer) UnityMain
 0x00007ffbf24d3c1e (UnityPlayer) UnityMain
 0x00007ffbf1259605 (UnityPlayer) 
-0x00007ffbe34d660e (GameAssembly) 
-0x00007ffbe3545033 (GameAssembly) 
-0x00007ffbe34d84e6 (GameAssembly) 
-0x00007ffbe271aabc (GameAssembly) 
-0x00007ffbe271a09d (GameAssembly) 
-0x00007ffbe27175ff (GameAssembly) 
-0x00007ffbe27176ee (GameAssembly) 
-0x00007ffbe2716d8f (GameAssembly) 
-0x00007ffbe1375622 (GameAssembly) 
-0x00007ffbe13772de (GameAssembly) 
-0x00007ffbe135a88e (GameAssembly) 
-0x00007ffbe1359bff (GameAssembly) 
-0x00007ffbe3cf1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffbe3cf1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffbf19b6977 (UnityPlayer) 
 0x00007ffbf19718b9 (UnityPlayer) 
 0x00007ffbf1971d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffbf241f46e (UnityPlayer) UnityMain
 0x00007ffbf24d3c1e (UnityPlayer) UnityMain
 0x00007ffbf1259605 (UnityPlayer) 
-0x00007ffbe34d660e (GameAssembly) 
-0x00007ffbe3545033 (GameAssembly) 
-0x00007ffbe34d84e6 (GameAssembly) 
-0x00007ffbe271aabc (GameAssembly) 
-0x00007ffbe271a09d (GameAssembly) 
-0x00007ffbe135d6d5 (GameAssembly) 
-0x00007ffbe1356a3c (GameAssembly) 
-0x00007ffbe1359cf1 (GameAssembly) 
-0x00007ffbe3cf1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffbe3cf1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffbf19b6977 (UnityPlayer) 
 0x00007ffbf19718b9 (UnityPlayer) 
 0x00007ffbf1971d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffbf241f46e (UnityPlayer) UnityMain
 0x00007ffbf24d3c1e (UnityPlayer) UnityMain
 0x00007ffbf1259605 (UnityPlayer) 
-0x00007ffbe34d660e (GameAssembly) 
-0x00007ffbe3545033 (GameAssembly) 
-0x00007ffbe34d84e6 (GameAssembly) 
-0x00007ffbe271aabc (GameAssembly) 
-0x00007ffbe271a09d (GameAssembly) 
-0x00007ffbe135f5f1 (GameAssembly) 
-0x00007ffbe1360511 (GameAssembly) 
-0x00007ffbe1357150 (GameAssembly) 
-0x00007ffbe1359cf1 (GameAssembly) 
-0x00007ffbe3cf1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffbe3cf1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffbf19b6977 (UnityPlayer) 
 0x00007ffbf19718b9 (UnityPlayer) 
 0x00007ffbf1971d67 (UnityPlayer) 
@@ -20280,9 +20245,6 @@ Animator.GotoState: State could not be found
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215544]
 
@@ -20290,9 +20252,6 @@ Invalid Layer Index '-1'
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215768]
 
@@ -20301,9 +20260,6 @@ Animator.GotoState: State could not be found
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215544]
 
@@ -20311,9 +20267,6 @@ Invalid Layer Index '-1'
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215768]
 
@@ -20322,9 +20275,6 @@ Animator.GotoState: State could not be found
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215544]
 
@@ -20332,9 +20282,6 @@ Invalid Layer Index '-1'
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215768]
 
@@ -20358,9 +20305,6 @@ Animator.GotoState: State could not be found
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215544]
 
@@ -20368,9 +20312,6 @@ Invalid Layer Index '-1'
 MecanimEx:SetMode(AnimationMode, AnimationStyle, Int32, Boolean, Boolean, Boolean)
 MecanimEx:ServerSaysPlay(AnimationMode, AnimationStyle)
 AreaCmdProcessor_NewGui:ProcessNewAnimation(AnimationMode, AnimationStyle, Int32)
-AreaCmdManager:OnAreaCmd(ServerCommand, BinaryReader)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [ line -2144215768]
 
@@ -56622,9 +56563,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [14:16:12] entity_1811121: OnAttackHitMe(Bee Stab). Evaded = False
 [14:16:12] entity_1755880: OnAttackHitMe(PetUndeadArrow1). Evaded = False
@@ -74858,8 +74796,6 @@ dragon>0>0>dragon>dragon
 Cancelling Steam Auth Session Ticket #2
 Exception in read thread! Cannot access a disposed object.
 Object name: 'System.Net.Sockets.NetworkStream'.. Stack:   at System.Net.Sockets.NetworkStream.Read (System.Byte[] buffer, System.Int32 offset, System.Int32 size) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadBytesWithDebugPadding (System.IO.BinaryReader reader, System.Int32 count) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadProc () [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.RunInternal (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state, System.Boolean preserveSyncCtx) [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.Run (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state) [0x00000] in <00000000000000000000000000000000>:0 
 ReadProc ending!
@@ -74870,7 +74806,6 @@ UnityEngine.Logger:Log(LogType, Object, Object)
 UnityEngine.Debug:LogError(Object, Object)
 Gorgon.Logging:Log(String, LogPriority, Object, String)
 Gorgon.Logging:Error(String)
-NetworkManager:get_State()
 LoadingManager:Update()
 
 [14:27:46] New Network State: InitializedArea -> Unconnected)

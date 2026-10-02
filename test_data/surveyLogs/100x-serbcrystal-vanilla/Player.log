@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffb02fdf46e (UnityPlayer) UnityMain
 0x00007ffb03093c1e (UnityPlayer) UnityMain
 0x00007ffb01e19605 (UnityPlayer) 
-0x00007ffb000b660e (GameAssembly) 
-0x00007ffb00125033 (GameAssembly) 
-0x00007ffb000b84e6 (GameAssembly) 
-0x00007ffaff2faabc (GameAssembly) 
-0x00007ffaff2fa09d (GameAssembly) 
-0x00007ffaff2f75ff (GameAssembly) 
-0x00007ffaff2f76ee (GameAssembly) 
-0x00007ffaff2f6d8f (GameAssembly) 
-0x00007ffafdf55622 (GameAssembly) 
-0x00007ffafdf572de (GameAssembly) 
-0x00007ffafdf3a88e (GameAssembly) 
-0x00007ffafdf39bff (GameAssembly) 
-0x00007ffb008d1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffb008d1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffb02576977 (UnityPlayer) 
 0x00007ffb025318b9 (UnityPlayer) 
 0x00007ffb02531d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffb02fdf46e (UnityPlayer) UnityMain
 0x00007ffb03093c1e (UnityPlayer) UnityMain
 0x00007ffb01e19605 (UnityPlayer) 
-0x00007ffb000b660e (GameAssembly) 
-0x00007ffb00125033 (GameAssembly) 
-0x00007ffb000b84e6 (GameAssembly) 
-0x00007ffaff2faabc (GameAssembly) 
-0x00007ffaff2fa09d (GameAssembly) 
-0x00007ffafdf3d6d5 (GameAssembly) 
-0x00007ffafdf36a3c (GameAssembly) 
-0x00007ffafdf39cf1 (GameAssembly) 
-0x00007ffb008d1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffb008d1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffb02576977 (UnityPlayer) 
 0x00007ffb025318b9 (UnityPlayer) 
 0x00007ffb02531d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffb02fdf46e (UnityPlayer) UnityMain
 0x00007ffb03093c1e (UnityPlayer) UnityMain
 0x00007ffb01e19605 (UnityPlayer) 
-0x00007ffb000b660e (GameAssembly) 
-0x00007ffb00125033 (GameAssembly) 
-0x00007ffb000b84e6 (GameAssembly) 
-0x00007ffaff2faabc (GameAssembly) 
-0x00007ffaff2fa09d (GameAssembly) 
-0x00007ffafdf3f5f1 (GameAssembly) 
-0x00007ffafdf40511 (GameAssembly) 
-0x00007ffafdf37150 (GameAssembly) 
-0x00007ffafdf39cf1 (GameAssembly) 
-0x00007ffb008d1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffb008d1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffb02576977 (UnityPlayer) 
 0x00007ffb025318b9 (UnityPlayer) 
 0x00007ffb02531d67 (UnityPlayer) 
@@ -48262,9 +48227,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [12:53:45] LocalPlayer: ProcessCombatModeStatus(NotInCombat, [])
 [12:53:45] ProcessUpdateDescription(987723, "Thirsty Cotton Plant", "This cotton plant needs water!", "Water Cotton Plant", UseItem, "Flower11(Scale=0.7)", 0)
@@ -48426,9 +48388,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [12:53:57] LocalPlayer: ProcessMusicPerformance(MusicPerformanceManager+PerformanceInfo)
 [12:53:57] ProcessUpdateDescription(987598, "Growing Cotton Plant", "This cotton plant is growing nicely.", "Check Cotton Plant", UseItem, "Flower11(Scale=0.9)", 0)
@@ -55183,9 +55142,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:01:06] Download appearance loop @Invisible is done
 [13:01:06] Download appearance loop @Invisible is done
@@ -57763,9 +57719,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:03:40] LoadAssetAsync: deerfemale2. Status=None. Done=False. PercentComplete=0.75
 [13:03:40] Download appearance loop @DeerFemale2(skin=^Mat-Deer2-Body, eyes=^Mat-Deer2-Eye) is waiting on Appearance deerfemale2
@@ -59377,9 +59330,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:04:06] Download appearance loop @VendorTable_Empty is done
 [13:04:06] Download appearance loop @Base2-f(sex=f, race=r, age=0.250, facew=1.000, faceh=1.000, faceld=0.000, cheekw=1.000, cheekh=0.000, jaww=1.500, chinw=1.500, chinh=0.000, chind=0.000, chinr=0.000, earsr=0.500, eyebrowoa=0.000, eyebrowia=0.000, eyessc=1.000, eyesh=0.000, eyesd=0.000, eyesie=0.000, eyesoe=0.500, eyesul=0.000, eyesll=-0.000, eyesr=0.500, eyesw=0.000, eyeballsh=0.000, pupils=0.500, retinas=1.400, noses=0.900, noseh=0.000, nosed=0.000, noser=0.000, noset=0.000, nosebridgew=2.000, nosebridged=1.000, nosetips=1.000, nosetipd=0.000, nosewings=1.500, mouthw=1.000, mouthl=0.750, mouthh=0.000, mouthuw=1.000, mouthul=1.000, mouthlw=1.000, mouthll=1.000, mouthg=0.400, mouthr=0.000, height=1.000, chests=1.000, neck=1.000, armsl=1.000, upperarm=1.000, lowerarm=1.000, belly=0.850, waist=0.900, hips=1.000, upperleg=1.000, lowerleg=1.000, breast=50.000, face=@eq-r-f2-head-0(faceskin=^r-f2-face-1, faceskinpalcolor=7, faceskinpalcolor1=1, faceskincolor2=black, faceskinpalcolor3=7, rakshasa=100, eyebrowdown=100), eyes=@eq-x-f2-eyes-0(eyesskin=^r-x2-eyes-1, eyesskincovering=^x-f2-eyes-covering-1, eyesskinpalcolor1=1), skinpalcolor=7, skinpalcolor1=1, skinpalcolor2=1, skintexture=&t-f2-r-body-01, skinnormal=&t-f2-r-body-n-01, skindetailnormal=&t-f2-r-body-n-01, feettexture=&t-f2-r-feet-01, handstexture=&t-f2-r-hands-01, earsskin=^r-x2-ears-1, earsfur=^r-x2-fur-1, teeth=@eq-x-f2-teeth-0(teethskin=^x-x2-teeth-1, rakshasa=100), racialname=Rakshasa, earss=0, muscularity=1, tails=0.750, racialvalue2=0.750, racialvalue3=0.500, hair=@eq-x-f2-hair-19(scalphair=^f2-hair-3-6, scalphairpalcolor=7, scalphairpalcolor1=7, scalphairpalcolor2=7), scalp=&t-f2-x-head-hair-09, tail=@eq-r-x2-tail-2(tailskin=^r-x2-tail-2, tailfur=^r-x2-fur-3, tailskinpalcolor=7, tailfurpalcolor=7), whiskers=&t-blank, ears=@eq-r-f2-ears-1(earsskin=^r-x2-ears-1, earsfur=^r-x2-fur-1, earsskinpalcolor=7, earsfurpalcolor=7), facepattern=&t-blank, chest=@eq-f2-chest-padded-01(armor=^f2-body-padded-01, color1=7F7F20, color2=777777, color3=C0C040), legs=@eq-f2-legs-leather-02(armor=^f2-legs-leather-02, color1=7F7F20, color2=777777, color3=C0C040), hands=@eq-f2-hands-cestus-steel-01(armor=^f2-hands-cestus-steel-01, color1=7F7F20, color2=777777, color3=C0C040), feet=@eq-f2-feet-boots-hard-01(armor=^f2-feet-boots-hard-01, color1=7F7F20, color2=777777, color3=C0C040), ring=@none, interiorentity=y) is done
@@ -59703,9 +59653,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:04:15] Download appearance loop @Invisible is done
 [13:04:15] Download appearance loop @Invisible is done
@@ -59719,9 +59666,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:04:16] LocalPlayer: ProcessDoDelayLoop(0.5, Unset, "Using Serbule Green Mineral Survey", 5305, AbortIfAttacked)
 [13:04:16] Download appearance loop @Invisible is done
@@ -60103,9 +60047,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [13:04:28] Download appearance loop @Flower11(scale=0.8) is done
 [13:04:28] LocalPlayer: ProcessMusicPerformance(MusicPerformanceManager+PerformanceInfo)
@@ -75966,8 +75907,6 @@ dragon>0>0>dragon>dragon
 Cancelling Steam Auth Session Ticket #3
 Exception in read thread! Cannot access a disposed object.
 Object name: 'System.Net.Sockets.NetworkStream'.. Stack:   at System.Net.Sockets.NetworkStream.Read (System.Byte[] buffer, System.Int32 offset, System.Int32 size) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadBytesWithDebugPadding (System.IO.BinaryReader reader, System.Int32 count) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadProc () [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.RunInternal (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state, System.Boolean preserveSyncCtx) [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.Run (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state) [0x00000] in <00000000000000000000000000000000>:0 
 ReadProc ending!
@@ -75979,7 +75918,6 @@ UnityEngine.Logger:Log(LogType, Object, Object)
 UnityEngine.Debug:LogError(Object, Object)
 Gorgon.Logging:Log(String, LogPriority, Object, String)
 Gorgon.Logging:Error(String)
-NetworkManager:get_State()
 LoadingManager:Update()
 
 [13:26:53] New Network State: InitializedArea -> Unconnected)

@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeab64405e (GameAssembly) 
-0x00007ffeab6b2a83 (GameAssembly) 
-0x00007ffeab645f36 (GameAssembly) 
-0x00007ffeaa88a05c (GameAssembly) 
-0x00007ffeaa88963d (GameAssembly) 
-0x00007ffeaa884cdf (GameAssembly) 
-0x00007ffeaa884dce (GameAssembly) 
-0x00007ffeaa88446f (GameAssembly) 
-0x00007ffea94e6ed2 (GameAssembly) 
-0x00007ffea94e8b8e (GameAssembly) 
-0x00007ffea94cc70e (GameAssembly) 
-0x00007ffea94cba7f (GameAssembly) 
-0x00007ffeabe60309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeabe5fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeab64405e (GameAssembly) 
-0x00007ffeab6b2a83 (GameAssembly) 
-0x00007ffeab645f36 (GameAssembly) 
-0x00007ffeaa88a05c (GameAssembly) 
-0x00007ffeaa88963d (GameAssembly) 
-0x00007ffea94cf555 (GameAssembly) 
-0x00007ffea94c88bc (GameAssembly) 
-0x00007ffea94cbb71 (GameAssembly) 
-0x00007ffeabe60309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeabe5fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeab64405e (GameAssembly) 
-0x00007ffeab6b2a83 (GameAssembly) 
-0x00007ffeab645f36 (GameAssembly) 
-0x00007ffeaa88a05c (GameAssembly) 
-0x00007ffeaa88963d (GameAssembly) 
-0x00007ffea94d1471 (GameAssembly) 
-0x00007ffea94d2391 (GameAssembly) 
-0x00007ffea94c8fd0 (GameAssembly) 
-0x00007ffea94cbb71 (GameAssembly) 
-0x00007ffeabe60309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeabe5fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -24242,7 +24207,6 @@ Exception while dispatching event of type ReadPacket: Object reference not set t
 UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
-GorgonClient:DispatchMessages()
 
 Uploading Crash Report
 NullReferenceException: Object reference not set to an instance of an object.
@@ -24251,12 +24215,9 @@ NullReferenceException: Object reference not set to an instance of an object.
   at HumanoidAppearanceConfig.SetSpecialMode (AnimationMode mode) [0x00000] in <00000000000000000000000000000000>:0 
   at MecanimEx.ServerSaysPlay (AnimationMode mode, AnimationStyle style) [0x00000] in <00000000000000000000000000000000>:0 
   at AreaCmdProcessor_NewGui.ProcessNewAnimation (AnimationMode anim, AnimationStyle style, System.Int32 entityId) [0x00000] in <00000000000000000000000000000000>:0 
-  at AreaCmdManager.OnAreaCmd (ServerCommand cmd, System.IO.BinaryReader r) [0x00000] in <00000000000000000000000000000000>:0 
   at NetworkManager.OnReadPacket (System.Byte[] packet) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.DispatchMessages () [0x00000] in <00000000000000000000000000000000>:0 
 UnityEngine.Logger:LogException(Exception, Object)
 UnityEngine.Debug:LogException(Exception)
-GorgonClient:DispatchMessages()
 
 [15:29:28] entity_16256404: OnAttackHitMe(Bite). Evaded = False
 [15:29:28] LocalPlayer: ProcessDoDelayLoop(5, UseTeleportationCircle, "Surveying", 5305, AbortIfAttacked)
@@ -28437,9 +28398,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:40:21] Download appearance loop @Invisible is done
 [15:40:21] Attempted to SetAppearance for Geilian to the same Description, ignoring!  [entity_16362665:Appearance:-1559518]
@@ -28760,9 +28718,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:41:04] Download appearance loop @Invisible is done
 [15:41:04] entity_16362665: OnAttackHitMe(Lope). Evaded = False

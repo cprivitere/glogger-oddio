@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeb59d405e (GameAssembly) 
-0x00007ffeb5a42a83 (GameAssembly) 
-0x00007ffeb59d5f36 (GameAssembly) 
-0x00007ffeb4c1a05c (GameAssembly) 
-0x00007ffeb4c1963d (GameAssembly) 
-0x00007ffeb4c14cdf (GameAssembly) 
-0x00007ffeb4c14dce (GameAssembly) 
-0x00007ffeb4c1446f (GameAssembly) 
-0x00007ffeb3876ed2 (GameAssembly) 
-0x00007ffeb3878b8e (GameAssembly) 
-0x00007ffeb385c70e (GameAssembly) 
-0x00007ffeb385ba7f (GameAssembly) 
-0x00007ffeb61f0309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61efdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeb59d405e (GameAssembly) 
-0x00007ffeb5a42a83 (GameAssembly) 
-0x00007ffeb59d5f36 (GameAssembly) 
-0x00007ffeb4c1a05c (GameAssembly) 
-0x00007ffeb4c1963d (GameAssembly) 
-0x00007ffeb385f555 (GameAssembly) 
-0x00007ffeb38588bc (GameAssembly) 
-0x00007ffeb385bb71 (GameAssembly) 
-0x00007ffeb61f0309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61efdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffedb47f46e (UnityPlayer) UnityMain
 0x00007ffedb533c1e (UnityPlayer) UnityMain
 0x00007ffeda2b9605 (UnityPlayer) 
-0x00007ffeb59d405e (GameAssembly) 
-0x00007ffeb5a42a83 (GameAssembly) 
-0x00007ffeb59d5f36 (GameAssembly) 
-0x00007ffeb4c1a05c (GameAssembly) 
-0x00007ffeb4c1963d (GameAssembly) 
-0x00007ffeb3861471 (GameAssembly) 
-0x00007ffeb3862391 (GameAssembly) 
-0x00007ffeb3858fd0 (GameAssembly) 
-0x00007ffeb385bb71 (GameAssembly) 
-0x00007ffeb61f0309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61efdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffedaa16977 (UnityPlayer) 
 0x00007ffeda9d18b9 (UnityPlayer) 
 0x00007ffeda9d1d67 (UnityPlayer) 
@@ -77372,8 +77337,6 @@ dragon>0>0>dragon>dragon
 Cancelling Steam Auth Session Ticket #118
 Exception in read thread! Cannot access a disposed object.
 Object name: 'System.Net.Sockets.NetworkStream'.. Stack:   at System.Net.Sockets.NetworkStream.Read (System.Byte[] buffer, System.Int32 offset, System.Int32 size) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadBytesWithDebugPadding (System.IO.BinaryReader reader, System.Int32 count) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadProc () [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.RunInternal (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state, System.Boolean preserveSyncCtx) [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.Run (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state) [0x00000] in <00000000000000000000000000000000>:0 
 ReadProc ending!
@@ -77384,7 +77347,6 @@ UnityEngine.Logger:Log(LogType, Object, Object)
 UnityEngine.Debug:LogError(Object, Object)
 Gorgon.Logging:Log(String, LogPriority, Object, String)
 Gorgon.Logging:Error(String)
-NetworkManager:get_State()
 LoadingManager:Update()
 
 [20:07:56] New Network State: Not Connected To Server. (InitializedArea -> Unconnected)

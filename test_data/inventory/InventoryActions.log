@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffec1a3f46e (UnityPlayer) UnityMain
 0x00007ffec1af3c1e (UnityPlayer) UnityMain
 0x00007ffec0879605 (UnityPlayer) 
-0x00007ffeb59d661e (GameAssembly) 
-0x00007ffeb5a45043 (GameAssembly) 
-0x00007ffeb59d84f6 (GameAssembly) 
-0x00007ffeb4c1aacc (GameAssembly) 
-0x00007ffeb4c1a0ad (GameAssembly) 
-0x00007ffeb4c1760f (GameAssembly) 
-0x00007ffeb4c176fe (GameAssembly) 
-0x00007ffeb4c16d9f (GameAssembly) 
-0x00007ffeb3875632 (GameAssembly) 
-0x00007ffeb38772ee (GameAssembly) 
-0x00007ffeb385a89e (GameAssembly) 
-0x00007ffeb3859c0f (GameAssembly) 
-0x00007ffeb61f1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61f1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffec0fd6977 (UnityPlayer) 
 0x00007ffec0f918b9 (UnityPlayer) 
 0x00007ffec0f91d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffec1a3f46e (UnityPlayer) UnityMain
 0x00007ffec1af3c1e (UnityPlayer) UnityMain
 0x00007ffec0879605 (UnityPlayer) 
-0x00007ffeb59d661e (GameAssembly) 
-0x00007ffeb5a45043 (GameAssembly) 
-0x00007ffeb59d84f6 (GameAssembly) 
-0x00007ffeb4c1aacc (GameAssembly) 
-0x00007ffeb4c1a0ad (GameAssembly) 
-0x00007ffeb385d6e5 (GameAssembly) 
-0x00007ffeb3856a4c (GameAssembly) 
-0x00007ffeb3859d01 (GameAssembly) 
-0x00007ffeb61f1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61f1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffec0fd6977 (UnityPlayer) 
 0x00007ffec0f918b9 (UnityPlayer) 
 0x00007ffec0f91d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffec1a3f46e (UnityPlayer) UnityMain
 0x00007ffec1af3c1e (UnityPlayer) UnityMain
 0x00007ffec0879605 (UnityPlayer) 
-0x00007ffeb59d661e (GameAssembly) 
-0x00007ffeb5a45043 (GameAssembly) 
-0x00007ffeb59d84f6 (GameAssembly) 
-0x00007ffeb4c1aacc (GameAssembly) 
-0x00007ffeb4c1a0ad (GameAssembly) 
-0x00007ffeb385f601 (GameAssembly) 
-0x00007ffeb3860521 (GameAssembly) 
-0x00007ffeb3857160 (GameAssembly) 
-0x00007ffeb3859d01 (GameAssembly) 
-0x00007ffeb61f1f79 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffeb61f1a29 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffec0fd6977 (UnityPlayer) 
 0x00007ffec0f918b9 (UnityPlayer) 
 0x00007ffec0f91d67 (UnityPlayer) 
@@ -10216,9 +10181,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:42:09] Download appearance loop @Invisible is done
 [15:42:09] Download appearance loop @Barley(scale=0.5) is done
@@ -10239,9 +10201,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:42:13] ProcessUpdateDescription(299588, "Hungry Cotton Plant", "This cotton plant needs fertilizer!", "Fertilize Cotton Plant", UseItem, "Flower11(Scale=0.8)", 0)
 [15:42:13] Download appearance loop @Flower11(scale=0.8) is done
@@ -10271,9 +10230,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:42:16] Download appearance loop @Invisible is done
 [15:42:16] Download appearance loop @Invisible is done
@@ -11115,9 +11071,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:42:58] Download appearance loop @PepperBushGreen(scale=0.55) is done
 [15:42:58] LoadAssetAsync: eq-x-m2-mustache-5. Status=None. Done=False. PercentComplete=0.8571429
@@ -11280,9 +11233,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:06] ProcessUpdateDescription(300065, "Blooming Violet", "This violet is fully grown and in peak condition.", "Pick Violet", UseItem, "Flower3(Scale=1)", 0)
 [15:43:06] LocalPlayer: ProcessMusicPerformance(MusicPerformanceManager+PerformanceInfo)
@@ -11353,9 +11303,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:10] ProcessUpdateDescription(300066, "Blooming Violet", "This violet is fully grown and in peak condition.", "Pick Violet", UseItem, "Flower3(Scale=1)", 0)
 [15:43:10] ProcessUpdateDescription(300031, "Hungry Barley", "This barley needs fertilizer!", "Fertilize Barley", UseItem, "Barley(Scale=0.8)", 0)
@@ -11381,9 +11328,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:13] ProcessUpdateDescription(300123, "Hungry Cotton Plant", "This cotton plant needs fertilizer!", "Fertilize Cotton Plant", UseItem, "Flower11(Scale=0.8)", 0)
 [15:43:13] Download appearance loop @Flower11(scale=0.8) is done
@@ -11626,9 +11570,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:20] ProcessUpdateDescription(300127, "Growing Cotton Plant", "This cotton plant is growing nicely.", "Check Cotton Plant", UseItem, "Flower11(Scale=0.9)", 0)
 [15:43:20] Download appearance loop @Flower11(scale=0.9) is done
@@ -11727,9 +11668,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:23] Download appearance loop @Bag is done
 [15:43:23] Download appearance loop @Mantis(skin=^MantisGreen, hat=bowler) is done
@@ -11943,9 +11881,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:43:29] Download appearance loop @Mantis(skin=^MantisGreen, hat=bowler) is done
 [15:43:29] LocalPlayer: ProcessMusicPerformance(MusicPerformanceManager+PerformanceInfo)
@@ -13390,39 +13325,27 @@ Failed to process command ANIMATION : Object reference not set to an instance of
 UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 Uploading Crash Report
 NullReferenceException: Object reference not set to an instance of an object.
   at MecanimEx.ServerSaysPlay (AnimationMode mode, AnimationStyle style) [0x00000] in <00000000000000000000000000000000>:0 
   at AreaCmdProcessor_NewGui.ProcessNewAnimation (AnimationMode anim, AnimationStyle style, System.Int32 entityId) [0x00000] in <00000000000000000000000000000000>:0 
-  at AreaCmdManager.OnAreaCmd (ServerCommand cmd, System.IO.BinaryReader r) [0x00000] in <00000000000000000000000000000000>:0 
   at NetworkManager.OnReadPacket (System.Byte[] packet) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.DispatchMessages () [0x00000] in <00000000000000000000000000000000>:0 
 UnityEngine.Logger:LogException(Exception, Object)
 UnityEngine.Debug:LogException(Exception)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:44:34] entity_288766: OnAttackHitMe(Bite). Evaded = False
 Failed to process command ANIMATION : Object reference not set to an instance of an object.
 UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 NullReferenceException: Object reference not set to an instance of an object.
   at MecanimEx.ServerSaysPlay (AnimationMode mode, AnimationStyle style) [0x00000] in <00000000000000000000000000000000>:0 
   at AreaCmdProcessor_NewGui.ProcessNewAnimation (AnimationMode anim, AnimationStyle style, System.Int32 entityId) [0x00000] in <00000000000000000000000000000000>:0 
-  at AreaCmdManager.OnAreaCmd (ServerCommand cmd, System.IO.BinaryReader r) [0x00000] in <00000000000000000000000000000000>:0 
   at NetworkManager.OnReadPacket (System.Byte[] packet) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.DispatchMessages () [0x00000] in <00000000000000000000000000000000>:0 
 UnityEngine.Logger:LogException(Exception, Object)
 UnityEngine.Debug:LogException(Exception)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:44:34] entity_284405: OnAttackHitMe(Power Spore Coating). Evaded = False
 [15:44:34] entity_292391: OnAttackHitMe(Power Spore Coating). Evaded = False
@@ -13431,21 +13354,15 @@ Failed to process command ATTACK : Object reference not set to an instance of an
 UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 Uploading Crash Report
 NullReferenceException: Object reference not set to an instance of an object.
   at Combatant.OnAttackHitMe (Attack attack, System.Boolean isProjectile) [0x00000] in <00000000000000000000000000000000>:0 
   at Combatant.OnIAttacked (Attack attack) [0x00000] in <00000000000000000000000000000000>:0 
   at AreaCmdProcessor_NewGui.ProcessAttack (Attack attack) [0x00000] in <00000000000000000000000000000000>:0 
-  at AreaCmdManager.OnAreaCmd (ServerCommand cmd, System.IO.BinaryReader r) [0x00000] in <00000000000000000000000000000000>:0 
   at NetworkManager.OnReadPacket (System.Byte[] packet) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.DispatchMessages () [0x00000] in <00000000000000000000000000000000>:0 
 UnityEngine.Logger:LogException(Exception, Object)
 UnityEngine.Debug:LogException(Exception)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:44:34] entity_298997: OnAttackHitMe(Poison Bomb Toss 8). Evaded = False
 [15:44:34] entity_292391: OnAttackHitMe(Sic 'Em 9). Evaded = False
@@ -28323,9 +28240,6 @@ UnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)
 UnityEngine.Logger:Log(LogType, Object)
 UnityEngine.Debug:LogError(Object)
 UIHighlightSelectionController:ShowBubbleText(Selectable, String)
-ServerCmdProcessor:ProcessEntitySpeech(Int32, String, ChatFlair, Int32, String, Boolean, Int32[], List`1)
-NetworkManager:OnReadPacket(Byte[])
-GorgonClient:DispatchMessages()
 
 [15:50:07] Download appearance loop @GiantCrab is done
 AudioSource not fully 3D! Fixing
@@ -34168,8 +34082,6 @@ dragon>0>0>dragon>dragon
 Cancelling Steam Auth Session Ticket #125
 Exception in read thread! Cannot access a disposed object.
 Object name: 'System.Net.Sockets.NetworkStream'.. Stack:   at System.Net.Sockets.NetworkStream.Read (System.Byte[] buffer, System.Int32 offset, System.Int32 size) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadBytesWithDebugPadding (System.IO.BinaryReader reader, System.Int32 count) [0x00000] in <00000000000000000000000000000000>:0 
-  at GorgonClient.ReadProc () [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.RunInternal (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state, System.Boolean preserveSyncCtx) [0x00000] in <00000000000000000000000000000000>:0 
   at System.Threading.ExecutionContext.Run (System.Threading.ExecutionContext executionContext, System.Threading.ContextCallback callback, System.Object state) [0x00000] in <00000000000000000000000000000000>:0 
 ReadProc ending!
@@ -34181,7 +34093,6 @@ UnityEngine.Logger:Log(LogType, Object, Object)
 UnityEngine.Debug:LogError(Object, Object)
 Gorgon.Logging:Log(String, LogPriority, Object, String)
 Gorgon.Logging:Error(String)
-NetworkManager:get_State()
 LoadingManager:Update()
 
 [15:59:36] New Network State: InitializedArea -> Unconnected)

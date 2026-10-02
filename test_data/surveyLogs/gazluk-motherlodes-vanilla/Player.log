@@ -35,20 +35,6 @@ Loading preferences from C:/Users/TestUser/AppData/LocalLow/Elder Game/Project G
 0x00007ffee14df46e (UnityPlayer) UnityMain
 0x00007ffee1593c1e (UnityPlayer) UnityMain
 0x00007ffee0319605 (UnityPlayer) 
-0x00007ffea7a3405e (GameAssembly) 
-0x00007ffea7aa2a83 (GameAssembly) 
-0x00007ffea7a35f36 (GameAssembly) 
-0x00007ffea6c7a05c (GameAssembly) 
-0x00007ffea6c7963d (GameAssembly) 
-0x00007ffea6c74cdf (GameAssembly) 
-0x00007ffea6c74dce (GameAssembly) 
-0x00007ffea6c7446f (GameAssembly) 
-0x00007ffea58d6ed2 (GameAssembly) 
-0x00007ffea58d8b8e (GameAssembly) 
-0x00007ffea58bc70e (GameAssembly) 
-0x00007ffea58bba7f (GameAssembly) 
-0x00007ffea8250309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffea824fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffee0a76977 (UnityPlayer) 
 0x00007ffee0a318b9 (UnityPlayer) 
 0x00007ffee0a31d67 (UnityPlayer) 
@@ -73,16 +59,6 @@ Applying special settings:
 0x00007ffee14df46e (UnityPlayer) UnityMain
 0x00007ffee1593c1e (UnityPlayer) UnityMain
 0x00007ffee0319605 (UnityPlayer) 
-0x00007ffea7a3405e (GameAssembly) 
-0x00007ffea7aa2a83 (GameAssembly) 
-0x00007ffea7a35f36 (GameAssembly) 
-0x00007ffea6c7a05c (GameAssembly) 
-0x00007ffea6c7963d (GameAssembly) 
-0x00007ffea58bf555 (GameAssembly) 
-0x00007ffea58b88bc (GameAssembly) 
-0x00007ffea58bbb71 (GameAssembly) 
-0x00007ffea8250309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffea824fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffee0a76977 (UnityPlayer) 
 0x00007ffee0a318b9 (UnityPlayer) 
 0x00007ffee0a31d67 (UnityPlayer) 
@@ -107,17 +83,6 @@ Setting quality level to 6: 4: Great
 0x00007ffee14df46e (UnityPlayer) UnityMain
 0x00007ffee1593c1e (UnityPlayer) UnityMain
 0x00007ffee0319605 (UnityPlayer) 
-0x00007ffea7a3405e (GameAssembly) 
-0x00007ffea7aa2a83 (GameAssembly) 
-0x00007ffea7a35f36 (GameAssembly) 
-0x00007ffea6c7a05c (GameAssembly) 
-0x00007ffea6c7963d (GameAssembly) 
-0x00007ffea58c1471 (GameAssembly) 
-0x00007ffea58c2391 (GameAssembly) 
-0x00007ffea58b8fd0 (GameAssembly) 
-0x00007ffea58bbb71 (GameAssembly) 
-0x00007ffea8250309 (GameAssembly) il2cpp_runtime_class_init
-0x00007ffea824fdb9 (GameAssembly) il2cpp_runtime_class_init
 0x00007ffee0a76977 (UnityPlayer) 
 0x00007ffee0a318b9 (UnityPlayer) 
 0x00007ffee0a31d67 (UnityPlayer) 
@@ -33222,7 +33187,6 @@ UnityEngine.Logger:Log(LogType, Object, Object)
 UnityEngine.Debug:LogError(Object, Object)
 Gorgon.Logging:Log(String, LogPriority, Object, String)
 Gorgon.Logging:Error(String)
-NetworkManager:get_State()
 LoadingManager:Update()
 
 [23:20:06] New Network State: Not Connected To Server. (InitializedArea -> Unconnected)
