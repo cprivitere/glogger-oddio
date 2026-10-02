@@ -6,4 +6,4 @@ if [ -n "$GLOGGER_SKIP_CONSTRAINTS" ]; then
   echo "[glogger] WARNING: constraint check skipped via GLOGGER_SKIP_CONSTRAINTS" >&2
   exit 0
 fi
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check-glogger-constraints.ps1" || exit 1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '$(git rev-parse --show-toplevel | tr -d '\r')/scripts/check-glogger-constraints.ps1'; exit \$LASTEXITCODE" || exit 1
