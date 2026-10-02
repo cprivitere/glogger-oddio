@@ -33,8 +33,8 @@ third-party tools. Everything else about the game is off-limits.
 
 | TOS/CoC clause | Verbatim prohibition | glogger rule — absolute |
 |---|---|---|
-| §5 bullet 1 | "Reverse engineer, decompile, disassemble, modify, adapt, or create derivative works from the Game client or Services" | **Never decompile, disassemble, or dump the client.** No Il2CppDumper/Cpp2IL runs, no `GameAssembly.dll`/`global-metadata.dat` analysis, no dump outputs anywhere, ever — even "offline", even "personal use", even in spike dirs outside the repo. Nothing derived from the client enters glogger. |
-| §5 bullet 2 | "Use bots, macros, scripts, automation, data mining tools, packet interception tools, memory editing tools, or any unauthorized software or hardware in connection with the Services" | **No packet interception in any form.** glogger ships no capture component, never bundles or recommends Npcap/WinDivert, never runs pktmon captures, never reads pcap files, never decodes wire protocols, never documents wire framing/command ids. No wire-reading features of any kind — the "user runs it themselves" framing is gone: glogger must not depend on, encourage, or integrate with interception. |
+| §5 bullet 1 | "Reverse engineer, decompile, disassemble, modify, adapt, or create derivative works from the Game client or Services" | **Never decompile, disassemble, or dump the client.** No client-binary analysis of any kind, no dump outputs anywhere, ever — even "offline", even "personal use", even in scratch dirs outside the repo. Nothing derived from the client enters glogger. |
+| §5 bullet 2 | "Use bots, macros, scripts, automation, data mining tools, packet interception tools, memory editing tools, or any unauthorized software or hardware in connection with the Services" | **No packet interception in any form.** glogger ships no capture component, never bundles or recommends capture drivers, never starts or reads traffic captures, never decodes wire protocols, never documents wire framing/command ids. No wire-reading features of any kind — glogger must not depend on, encourage, or integrate with interception. |
 | Conduct §4.C bullet 3 | "Reverse engineering, tampering with, intercepting, or modifying game data, communications, or technical protections" | Same as both rows above; also **never touch** the client's own telemetry, update checks, or technical protections. |
 | §5 bullet 3 | "Operate, assist, develop, advertise, or use private servers, emulators, cheats, exploits, or unauthorized modifications" | No private-server/emulator compatibility, no exploit documentation or tooling, ever. |
 | §5 bullet 4 | "Exploit the Game or Services for commercial purposes without Elder Game's prior written consent" | glogger stays free. Never monetize game-derived data: no premium tiers on game-derived features, no ads against game data, no selling "market intelligence". |
@@ -74,18 +74,16 @@ No release merges without a green `scripts/check-glogger-constraints.ps1`
   tokens, no game-server connections of any kind outside the running client.
 - **HTTP to glogger's own services** for glogger's own data.
 
-## 4. History note — the Phase C spike (removed)
+## 4. History note — an earlier draft (removed)
 
-An earlier draft of this work explored network packet capture and IL2CPP
-protocol analysis. On reading the actual TOS text, that work was **removed
-completely**: the spike directory was deleted, the wire-protocol research doc
-was removed from repo history, the packet/IL2CPP tooling was uninstalled, and
-the test fixtures were scrubbed of client-internals stack traces. Phase A
-(guided capture panel from logs) and Phase B (screen OCR) remain the shipped
-approach for stall pricing — they need nothing the TOS prohibits. Do not
-reintroduce any packet-level or binary-analysis approach; this section
-exists so future sessions don't rediscover the same idea and redo the same
-mistake.
+An earlier draft of this work explored approaches that §1 prohibits. On
+reading the actual TOS text, that work was **removed completely** — the
+scratch directory, the research doc, the tooling, and incidental
+client-internal references in test fixtures. Phases A (guided capture panel
+from logs) and B (screen OCR) remain the shipped approach for stall pricing
+— they need nothing the TOS prohibits. Do not reintroduce any approach from
+the prohibited list; this section exists so future sessions don't rediscover
+the same idea and redo the same mistake.
 
 ## 5. What else is *definitely* safe (feature ideas within the lines)
 
@@ -121,20 +119,20 @@ Runs on every push (`.githooks/pre-push`, active since
 `core.hooksPath=.githooks`). In full-compliance mode the scanner checks:
 
 - §2's forbidden APIs (`src-tauri/*.rs`),
-- **packet tooling names** in `src-tauri/*.rs` (WinDivert, Npcap, pcap,
-  pcapng, pktmon, tcpdump/tshark/windump), plus any `9002` socket reference,
-- **reverse-engineering artifacts** across the whole repo (GameAssembly,
-  global-metadata, il2cpp_data, dump.cs, DummyDll, Cpp2IL, Il2CppDumper) —
-  including docs and test fixtures,
-- **wire-protocol knowledge** across the whole repo (LEB128, GorgonClient,
-  GorgonProtocolUtils, ServerCommand/ClientCommand, ReadBytesWithDebugPadding).
+- **capture-tooling identifiers** in `src-tauri/*.rs` (driver and packet-tool
+  names — see the script for the list), plus any game-port socket reference,
+- **client-derived artifacts** across the whole repo (client binaries,
+  metadata files, dump outputs, analysis-tool names) — including docs and
+  test fixtures,
+- **wire-protocol knowledge** across the whole repo (framing encodings,
+  client/network class names, protocol reader identifiers).
 
 Verified: green on the compliant repo, red on probe violations. Skippable
 only with `GLOGGER_SKIP_CONSTRAINTS=1` (prints a warning — never silent).
-`Cargo.lock` is excluded from the wire-pattern scan (`leb128fmt` is an
-unrelated font-decoding crate); the checker script excludes itself (it must
-name the patterns it greps for). Raw log fixtures in `test_data/` are the
-game's own output; native stack-trace lines referencing client internals
+`Cargo.lock` is excluded from the wire-pattern scan (an unrelated
+font-decoding crate shares a name fragment); the checker script excludes
+itself (it must name the patterns it greps for). Raw log fixtures in
+`test_data/` are the game's own output; incidental client-internals lines
 were stripped from them (the parser never reads those lines — verified by
 the full test suite, 582 passing).
 

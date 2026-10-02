@@ -56,8 +56,10 @@ foreach ($pat in $forbiddenPatterns) {
     }
 }
 
-# ── 2. Packet interception tooling (TOS §5 bullet 2, §8) — prohibited by ────
-#     name. glogger ships no capture component and never touches port 9002.
+# ── 2. Traffic-capture tooling (TOS §5 bullet 2, §8) — prohibited by name ───
+#     glogger ships no capture component and never touches the game port.
+#     The literal names below are the known tool identifiers; they are data,
+#     not documentation — this file is excluded from its own scan.
 $packetPatterns = @(
     'WinDivert',
     'Npcap',
@@ -67,7 +69,7 @@ $packetPatterns = @(
     'PacketMon',
     'CapturePacket',
     'PacketCapture',
-    'tcp.port|tcpdump|tshark|windump'
+    'tcp\.port|tcpdump|tshark|windump'
 )
 foreach ($pat in $packetPatterns) {
     $hits = Get-ChildItem -Path $src -Recurse -Filter '*.rs' |
