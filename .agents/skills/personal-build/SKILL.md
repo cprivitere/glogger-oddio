@@ -1,3 +1,8 @@
+---
+name: personal-build
+description: Operate the glogger personal daily-driver pipeline — integrate tested work into the local/integration branch, build/install the glogger.Personal app (npm run tauri:build:personal), keep %APPDATA%\glogger.Personal data safe, and never PR personal-only files upstream.
+---
+
 # Glogger Personal Build — Daily Driver Pipeline
 
 ## Overview
@@ -19,7 +24,7 @@ Operate the user's personal glogger daily-driver: integrate tested work into the
 
 - **Which profile is the user running?** Window title: `glogger v<ver> PERSONAL` = daily driver (appdata `glogger.Personal`, data persists forever). `EXPERIMENTAL` = sandbox, auto-reseeds (wipes) on version bump — never treat its data as valuable. Plain `glogger` (installed) = production Release (appdata `glogger.Release`) — do not overwrite its DB with test data.
 - **Where does new work live?** Committed work goes on `local/integration` in logical chunks (commit prefixes: `feat:`/`fix:`/`impv:`/`docs:`/`test:`/`build:`). Upstreamable fixes may also land on reviewable side branches (`fix/*`, `feat/*`) for later cherry-picking per `four-pr-plan.md` (cut from `upstream/dev`, target `crisp-oddio/glogger-oddio` base `dev`).
-- **Never PR to upstream:** `.gitignore`d `local/` files, `AGENTS.md`, `four-pr-plan.md`, and anything referencing `glogger.Personal` or personal data. The personal profile config (`src-tauri/tauri.personal.conf.json`) IS committed to `local/integration` but must be excluded from any upstream PR branch.
+- **Never PR to upstream:** personal-only files — `AGENTS.md`, `four-pr-plan.md`, `.agents/skills/personal-build/`, `src-tauri/tauri.personal.conf.json` — and anything referencing `glogger.Personal` or personal data. All are committed to `local/integration` and excluded from upstream PR branches purely at cherry-pick time (commit-level exclusion).
 - **DB safety:** copy DBs only when the source app is closed; copy `glogger.db` + `-wal` + `-shm` together; verify with count-diff (`words_of_power`, `character_resuscitations`). Migrations are upward-only — never open a newer-schema DB with an older build.
 
 ## Build pipeline details
@@ -41,3 +46,7 @@ If the Personal DB drifts stale and the user wants a fresh production snapshot: 
 - npm only (Node 24). No bun/yarn/pnpm.
 - Do not run two glogger instances against the same data dir simultaneously.
 - `version:bump` does NOT wipe Personal data (no seed gate on `glogger.Personal`); it DOES wipe Experimental data — that's by design.
+
+## Deep reference
+
+Branch map, seed-gate internals, and upstream PR cutting details: read `skill://personal-build/reference.md` (same directory as this file).
