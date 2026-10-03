@@ -46,6 +46,7 @@ If the Personal DB drifts stale and the user wants a fresh production snapshot: 
 - npm only (Node 24). No bun/yarn/pnpm.
 - Do not run two glogger instances against the same data dir simultaneously.
 - `version:bump` does NOT wipe Personal data (no seed gate on `glogger.Personal`); it DOES wipe Experimental data — that's by design.
+- Updater signing: `tauri.conf.json` has `createUpdaterArtifacts: true`, so builds error at the signing step unless `TAURI_SIGNING_PRIVATE_KEY` is set. The personal profile already overrides it to `false` (`tauri.personal.conf.json`) — if that override ever disappears, the error is benign (installer is already produced).
 
 ## Deep reference
 
