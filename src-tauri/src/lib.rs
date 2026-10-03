@@ -1,4 +1,5 @@
 mod arena_parser;
+mod books_watcher;
 mod cdn;
 mod cdn_commands;
 mod cdn_diff;
@@ -503,6 +504,17 @@ pub fn run() {
             // sessions played without glogger running by ingesting Player-prev.log
             // into the kill/loot database when the game rotates it.
             replay::spawn_player_prev_watcher(settings_manager.clone(), db_pool.clone());
+
+            // Step 5c+1: Books-dir backfill watcher — ingests the game's
+            // <game_data>/Books/*.txt book exports (written both live and while
+            // glogger was closed), mirroring the live ProcessBook ingest via
+            // coordinator's shared ingestion helpers. Per-file mtime tracking,
+            // 30s cadence.
+            books_watcher::spawn_books_watcher(
+                settings_manager.clone(),
+                db_pool.clone(),
+                app_handle.clone(),
+            );
 
             // Step 5d: One-shot backfill of Combat Wisdom awards from the
             // historical ChatLogs so the Combat Wisdom widget's per-monster
