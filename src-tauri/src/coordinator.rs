@@ -811,13 +811,17 @@ impl DataIngestCoordinator {
                             self.persist_book_report(timestamp, title, content, book_type);
 
                             // Auto-import gourmand report when the Foods Consumed
-                            // skill report is opened.
+                            // skill report is opened. Content is normalized first:
+                            // live ProcessBook content carries escaped newlines but
+                            // the gourmand parser is line-based (historically the
+                            // live path parsed 0 entries and no-op'd).
                             if book_type == "SkillReport"
                                 && content.trim_start().starts_with("Foods Consumed:")
                             {
+                                let content = normalize_book_content(content);
                                 if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::gourmand_commands::import_gourmand_from_content(
-                                        &conn, content,
+                                        &conn, &content,
                                     ) {
                                         Ok(n) if n > 0 => {
                                             startup_log!(
@@ -2029,27 +2033,18 @@ impl DataIngestCoordinator {
         content: &str,
         book_type: &str,
     ) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-        let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get_write() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        conn.execute(
-            "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(character_name, server_name, book_type, title) DO UPDATE SET
-                content = excluded.content,
-                captured_at = excluded.captured_at",
-            rusqlite::params![character, server, book_type, title, content, dt],
-        )
-        .ok();
-        self.app_handle
-            .emit("game-state-updated", vec!["books"])
-            .ok();
+        let _ = persist_book_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            book_type,
+            title,
+            content,
+        );
     }
 
     /// Parse the Gardening Almanac HTML content and persist structured events
@@ -2208,38 +2203,17 @@ impl DataIngestCoordinator {
     /// Parse structured stats from PlayerAge or Behavior Report books and
     /// persist them to the `character_stats` table as key-value pairs.
     fn ingest_report_stats(&self, book_type: &str, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
-        };
-        let stats = match book_type {
-            "PlayerAge" => crate::report_stats::parse_player_age(content),
-            "HelpScreen" => crate::report_stats::parse_behavior_report(content),
-            _ => return,
-        };
-        if stats.is_empty() {
+        let Some((character, server)) = self.active_character_server() else {
             return;
-        }
-        let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get_write() {
-            Ok(c) => c,
-            Err(_) => return,
         };
-        match crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt) {
-            Ok(n) => {
-                startup_log!(
-                    "[coordinator] Imported {} stats from {} report",
-                    n,
-                    book_type,
-                );
-                self.app_handle
-                    .emit("game-state-updated", vec!["report_stats"])
-                    .ok();
-            }
-            Err(e) => {
-                eprintln!("[coordinator] Failed to persist report stats: {e}");
-            }
-        }
+        ingest_report_stats_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            book_type,
+            content,
+        );
     }
 
     // ── Milking timers ────────────────────────────────────────────
@@ -2338,56 +2312,21 @@ impl DataIngestCoordinator {
     /// Most Common Destination: Serbule\n
     /// ```
     fn ingest_teleportation_binds(&self, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-
-        let primary = Self::extract_bind_field(content, "Primary Bind Location:");
-        let secondary = Self::extract_bind_field(content, "Secondary Bind Location:");
-
-        let conn = match self.db_pool.get_write() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let dt = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO game_state_teleportation
-                (character_name, server_name, primary_bind, secondary_bind, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(character_name, server_name) DO UPDATE SET
-                primary_bind = excluded.primary_bind,
-                secondary_bind = excluded.secondary_bind,
-                last_updated = excluded.last_updated",
-            rusqlite::params![character, server, primary, secondary, dt],
-        )
-        .ok();
-
-        startup_log!(
-            "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
-            primary,
-            secondary
+        // Live ProcessBook content carries escaped newlines; the file path
+        // carries real ones. Normalize once here so `extract_bind_field`
+        // sees real line breaks on both paths (historically the live path
+        // silently matched no fields).
+        let content = normalize_book_content(content);
+        ingest_teleport_binds_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            &content,
         );
-        self.app_handle
-            .emit("game-state-updated", vec!["teleportation"])
-            .ok();
-    }
-
-    /// Extract a named field value from teleportation status text.
-    /// Returns `None` if the field is missing or has value "(none)".
-    fn extract_bind_field(content: &str, field: &str) -> Option<String> {
-        for line in content.split('\n') {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix(field) {
-                let value = rest.trim();
-                if value.is_empty() || value == "(none)" {
-                    return None;
-                }
-                return Some(value.to_string());
-            }
-        }
-        None
     }
 
     /// Parse a hoplology "Equipment Studied:" skill report and backfill studied items.
@@ -2395,58 +2334,24 @@ impl DataIngestCoordinator {
     /// Content format (escaped newlines):
     ///   "Equipment Studied:\n\n  CrudBurst's Hammer of Thumping\n  Thentree Harness\n"
     fn ingest_hoplology_report(&self, _timestamp: &str, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-
-        let conn = match self.db_pool.get_write() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        // Use current wall-clock time as the "first seen" timestamp for
-        // report-backfilled items (the player.log timestamp is just HH:MM:SS
-        // which isn't a valid datetime).
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-        // Try to acquire CDN data for base-name resolution
-        let game_data = self.game_data.try_read().ok();
-
-        let mut inserted = 0u32;
-        // Content uses literal \n (escaped in the log line) — split on those
-        for line in content.split("\\n") {
-            let trimmed = line.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("Equipment Studied:")
-            {
-                continue;
-            }
-            // Resolve to base equipment name if CDN data is available
-            let base_name = game_data
-                .as_ref()
-                .and_then(|gd| gd.find_equipment_base_name(trimmed))
-                .unwrap_or_else(|| trimmed.to_string());
-
-            match crate::db::hoplology_commands::insert_hoplology_study_from_report(
-                &conn, &character, &server, &base_name, &now,
-            ) {
-                Ok(Some(_)) => inserted += 1,
-                Ok(None) => {} // already known
-                Err(e) => {
-                    eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
-                }
-            }
-        }
-
-        if inserted > 0 {
-            startup_log!(
-                "[coordinator] Hoplology report: backfilled {} new items",
-                inserted
-            );
-            self.app_handle
-                .emit("game-state-updated", vec!["hoplology"])
-                .ok();
+        // Live ProcessBook content carries escaped newlines; the file path
+        // carries real ones. Normalize once here so the line splitter sees
+        // real line breaks on both paths (historically the live path split
+        // on literal `\n` only).
+        let content = normalize_book_content(content);
+        let inserted = ingest_hoplology_content(
+            &self.db_pool,
+            &self.game_data,
+            &self.app_handle,
+            &character,
+            &server,
+            &content,
+        );
+        if inserted == 0 {
+            startup_log!("[coordinator] Hoplology report: no new items");
         }
     }
 
@@ -3210,6 +3115,220 @@ fn parse_duration_text(text: &str) -> Option<chrono::Duration> {
     } else {
         None
     }
+}
+
+// ============================================================
+// Book-content ingestion (shared by live ProcessBook dispatch and
+// the Books-directory backfill watcher)
+// ============================================================
+
+/// Normalize ProcessBook's escaped-newline content into real newlines.
+///
+/// Live `ProcessBook` content carries literal `\n` (and `\t`) escape
+/// sequences; files in `<game_data>/Books/` carry real newlines. Feeding
+/// both through this no-op-on-real-newlines replace makes every downstream
+/// line splitter behave identically on either shape. (Extracted per-shape
+/// helpers historically normalized inconsistently — `parse_shop_log` and
+/// `parse_player_age` did, the teleport-bind / hoplology / gourmand
+/// splitters did not — so live-path bind parsing silently matched nothing.)
+pub(crate) fn normalize_book_content(content: &str) -> String {
+    content.replace("\\n", "\n").replace("\\t", "\t")
+}
+
+/// Persist a book report to `game_state_books`, upserting by
+/// (character, server, book_type, title) so re-running a report overwrites.
+/// Shared by the live coordinator and the Books-directory watcher.
+///
+/// Mirrors the live `persist_book_report` behavior exactly (swallows SQL
+/// errors to keep ingest flowing) but returns `Err` on pool acquisition
+/// failure so callers can log it.
+pub fn persist_book_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    book_type: &str,
+    title: &str,
+    content: &str,
+) -> Result<(), String> {
+    let dt = chrono::Utc::now().to_rfc3339();
+    let conn = db.get().map_err(|e| format!("Database connection error: {e}"))?;
+    conn.execute(
+        "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(character_name, server_name, book_type, title) DO UPDATE SET
+            content = excluded.content,
+            captured_at = excluded.captured_at",
+        rusqlite::params![character, server, book_type, title, content, dt],
+    )
+    .ok();
+    app_handle
+        .emit("game-state-updated", vec!["books"])
+        .ok();
+    Ok(())
+}
+
+/// Parse structured stats from a PlayerAge or Behavior Report (HelpScreen)
+/// book and persist them to `character_report_stats`. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_report_stats_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    book_type: &str,
+    content: &str,
+) {
+    let stats = match book_type {
+        "PlayerAge" => crate::report_stats::parse_player_age(content),
+        "HelpScreen" => crate::report_stats::parse_behavior_report(content),
+        _ => return,
+    };
+    if stats.is_empty() {
+        return;
+    }
+    let dt = chrono::Utc::now().to_rfc3339();
+    let conn = match db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[coordinator] Failed to persist report stats: {e}");
+            return;
+        }
+    };
+    match crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt) {
+        Ok(n) => {
+            startup_log!(
+                "[coordinator] Imported {} stats from {} report",
+                n,
+                book_type,
+            );
+            app_handle
+                .emit("game-state-updated", vec!["report_stats"])
+                .ok();
+        }
+        Err(e) => {
+            eprintln!("[coordinator] Failed to persist report stats: {e}");
+        }
+    }
+}
+
+/// Extract a named field value from teleportation status text.
+/// Returns `None` if the field is missing or has value "(none)".
+pub(crate) fn extract_bind_field(content: &str, field: &str) -> Option<String> {
+    for line in content.split('\n') {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(field) {
+            let value = rest.trim();
+            if value.is_empty() || value == "(none)" {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Parse teleportation bind locations from a "Skill Info" SkillReport book
+/// and persist them to `game_state_teleportation`. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_teleport_binds_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    content: &str,
+) {
+    let primary = extract_bind_field(content, "Primary Bind Location:");
+    let secondary = extract_bind_field(content, "Secondary Bind Location:");
+
+    let conn = match db.get() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let dt = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO game_state_teleportation
+            (character_name, server_name, primary_bind, secondary_bind, last_updated)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(character_name, server_name) DO UPDATE SET
+            primary_bind = excluded.primary_bind,
+            secondary_bind = excluded.secondary_bind,
+            last_updated = excluded.last_updated",
+        rusqlite::params![character, server, primary, secondary, dt],
+    )
+    .ok();
+
+    startup_log!(
+        "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
+        primary,
+        secondary
+    );
+    app_handle
+        .emit("game-state-updated", vec!["teleportation"])
+        .ok();
+}
+
+/// Parse a hoplology "Equipment Studied:" skill report and backfill studied
+/// items. Returns the number of newly inserted studies. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_hoplology_content(
+    db: &DbPool,
+    game_data: &GameDataState,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    content: &str,
+) -> usize {
+    let conn = match db.get() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    // Use current wall-clock time as the "first seen" timestamp for
+    // report-backfilled items (the player.log timestamp is just HH:MM:SS
+    // which isn't a valid datetime).
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Try to acquire CDN data for base-name resolution
+    let game_data = game_data.try_read().ok();
+
+    let mut inserted = 0usize;
+    // Normalized content (real newlines) — one entry per line
+    for line in content.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Equipment Studied:")
+        {
+            continue;
+        }
+        // Resolve to base equipment name if CDN data is available
+        let base_name = game_data
+            .as_ref()
+            .and_then(|gd| gd.find_equipment_base_name(trimmed))
+            .unwrap_or_else(|| trimmed.to_string());
+
+        match crate::db::hoplology_commands::insert_hoplology_study_from_report(
+            &conn, &character, &server, &base_name, &now,
+        ) {
+            Ok(Some(_)) => inserted += 1,
+            Ok(None) => {} // already known
+            Err(e) => {
+                eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
+            }
+        }
+    }
+
+    if inserted > 0 {
+        startup_log!(
+            "[coordinator] Hoplology report: backfilled {} new items",
+            inserted
+        );
+        app_handle
+            .emit("game-state-updated", vec!["hoplology"])
+            .ok();
+    }
+    inserted
 }
 
 /// Normalize an equipped combat-skill pair into a stable, order-independent key
