@@ -1,8 +1,10 @@
 /// Chat [Action Emotes] parser — detects resuscitate events from action emote messages.
 ///
-/// Parses two patterns from the [Action Emotes] channel:
+/// Parses three patterns from the [Action Emotes] channel:
 /// - `"CasterName resuscitates TargetName"` (successful rez)
 /// - `"CasterName futilely attempts to resuscitate TargetName"` (failed rez)
+/// - `"<Target> comes back to life!"` (successful rez, no caster in the line —
+///   caster recorded as "Unknown")
 ///
 /// Note: [Action Emotes] messages have no colon separator, so the chat parser
 /// treats them as system messages with `sender: None`. The caster and target
@@ -56,6 +58,24 @@ pub fn parse_resuscitate_message(msg: &ChatMessage) -> Option<ChatResuscitateEve
         });
     }
 
+    // "<Target> comes back to life!" — a second rez phrasing (observed in real
+    // logs alongside `resuscitates`, e.g. group/shrine rezzes) with no caster
+    // named in the line. Record the event with an unknown caster so rez
+    // counting stays complete; the caster-name UIs simply won't credit
+    // anyone. The trailing "!" is stripped.
+    if let Some(target) = text.strip_suffix(" comes back to life!") {
+        let target = target.trim();
+        // Any non-empty remainder is a target name (may contain spaces,
+        // e.g. "Bee so for real right now").
+        if !target.is_empty() {
+            return Some(ChatResuscitateEvent::Resuscitated {
+                timestamp: ts,
+                caster_name: "Unknown".to_string(),
+                target_name: target.to_string(),
+            });
+        }
+    }
+
     None
 }
 
@@ -95,6 +115,56 @@ mod tests {
                 assert_eq!(target_name, "Mellow Yellow");
             }
             _ => panic!("Expected Resuscitated"),
+        }
+    }
+
+    #[test]
+    fn test_comes_back_to_life_no_caster() {
+        // Real log line: "[Action Emotes] Duffrey comes back to life!" — a
+        // second rez phrasing with no caster named in the line.
+        let msg = action_emote_msg("Duffrey comes back to life!");
+        let event = parse_resuscitate_message(&msg).unwrap();
+        match event {
+            ChatResuscitateEvent::Resuscitated {
+                caster_name,
+                target_name,
+                ..
+            } => {
+                assert_eq!(caster_name, "Unknown");
+                assert_eq!(target_name, "Duffrey");
+            }
+            other => panic!("Expected Resuscitated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_come_back_to_life_with_spaced_target() {
+        // Targets can have spaces (real example from the DB:
+        // "Bee so for real right now").
+        let msg = action_emote_msg("Bee so for real right now comes back to life!");
+        let event = parse_resuscitate_message(&msg).unwrap();
+        match event {
+            ChatResuscitateEvent::Resuscitated {
+                target_name, ..
+            } => {
+                assert_eq!(target_name, "Bee so for real right now");
+            }
+            other => panic!("Expected Resuscitated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resuscitates_takes_precedence_over_come_back() {
+        // A caster line must not be confused with the target-only pattern.
+        let msg = action_emote_msg("Orrion resuscitates Your Toxicology Report");
+        let event = parse_resuscitate_message(&msg).unwrap();
+        match event {
+            ChatResuscitateEvent::Resuscitated {
+                caster_name, ..
+            } => {
+                assert_eq!(caster_name, "Orrion");
+            }
+            other => panic!("Expected Resuscitated, got {:?}", other),
         }
     }
 
