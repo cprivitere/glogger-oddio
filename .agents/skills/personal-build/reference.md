@@ -2,9 +2,9 @@
 
 Skill for managing the **`local/integration`** branch: merging work in,
 building the `glogger.Personal` daily driver, and keeping data intact.
-Everything here is fork-local by design (`.gitignore`d under `local/`) —
-NEVER PR any of this to `crisp-oddio/glogger-oddio` or push `local/*`
-branches to the fork.
+Everything here is fork-local by design — tracked on `local/integration`
+but never PR'd to `crisp-oddio/glogger-oddio`, and `local/*` branches
+are never pushed to the fork.
 
 ## Branch map
 
