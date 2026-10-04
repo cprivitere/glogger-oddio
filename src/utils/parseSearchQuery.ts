@@ -61,41 +61,72 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   const textWords = text ? text.split(/\s+/).filter(Boolean) : []
 
   // Derive highlight tokens with the same phrase/prefix rules as the
-  // backend's build_fts_match_expr: `"exact phrase"` stays whole (minus
-  // quotes), a bare word ending in exactly one `*` matches as a prefix,
-  // everything else is a literal word. Tokens the backend would reject
-  // (misplaced `*`, unbalanced quotes, operators) are still highlighted as
-  // plain words so the LIKE-fallback results get marked too.
-  const highlightTerms: string[] = []
-  const termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[] = []
-  const rawTokens: string[] = []
+  // backend's build_fts_match_expr, INCLUDING its query-scope bail: the
+  // backend returns None for the WHOLE query when any token is malformed,
+  // and get_chat_messages then falls back to substring LIKE for every
+  // word. In that state all words must highlight as `literal` — marking a
+  // valid-looking word `exact`/`prefix` would leave it unhighlighted
+  // even though the backend matched it as a substring (e.g. `hello
+  // go*rg` LIKE-matches "hello" too).
+  //
+  // Backend bail rules (build_fts_match_expr):
+  //   1. unterminated quote            (odd number of `"`)
+  //   2. quote in the middle of a word (open + close inside one token)
+  //   3. star in any non-trailing position (leading / internal /
+  //      repeated: `*go`, `go*rg`, `gorg**`)
+  //   4. bare `*` token
+  //   5. FTS operator characters `()^:,+-` anywhere
+  const tokens: { word: string, quoted: boolean, phrase: string }[] = []
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
   while ((tok = tokenRe.exec(text)) !== null) {
     if (tok[1] !== undefined) {
-      rawTokens.push(`"${tok[1]}"`)
-      const phrase = tok[1].trim()
-      if (phrase) {
-        highlightTerms.push(phrase)
-        termKinds.push({ term: phrase, kind: 'phrase' })
+      tokens.push({ word: `"${tok[1]}"`, quoted: true, phrase: tok[1].trim() })
+    } else {
+      tokens.push({ word: tok[2], quoted: false, phrase: '' })
+    }
+  }
+
+  const quoteCount = (text.match(/"/g) ?? []).length
+  const anyInvalid =
+    quoteCount % 2 === 1 ||           // (1) unterminated quote
+    tokens.some(t => {
+      if (t.quoted) return false
+      const w = t.word
+      // (2) quote mid-word: a word token containing a `"` (balanced, or
+      // the parser above would have made it a phrase token)
+      if (w.includes('"')) return true
+      // (3)(4) star position checks
+      if (!w.includes('*')) return false
+      if (w === '*') return true      // (4) bare star
+      return /\*\S/.test(w) || w.includes('**') // internal/repeated/leading
+    }) ||
+    /[()^:,+-]/.test(text) || // (5) FTS operator chars anywhere
+    false
+
+  const highlightTerms: string[] = []
+  const termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[] = []
+  const rawTokens: string[] = []
+
+  for (const t of tokens) {
+    if (t.quoted) {
+      rawTokens.push(t.word)
+      if (t.phrase) {
+        highlightTerms.push(t.phrase)
+        termKinds.push({ term: t.phrase, kind: anyInvalid ? 'literal' : 'phrase' })
       }
     } else {
-      const word = tok[2]
-      rawTokens.push(word)
-      const m = /^([^*]+)\*?$/.exec(word)
-      if (m) {
-        const stem = m[1].trim()
-        if (stem) {
-          // Trailing `*` = FTS5 prefix match; bare word = whole-token match
-          const kind = word.endsWith('*') ? 'prefix' : 'exact'
-          highlightTerms.push(stem)
-          termKinds.push({ term: stem, kind })
-        }
+      rawTokens.push(t.word)
+      const m = /^([^*]+)(\*)?$/.exec(t.word)
+      const stem = m?.[1]?.trim() ?? ''
+      if (stem) {
+        const kind = anyInvalid ? 'literal' : (m && m[2]) ? 'prefix' : 'exact'
+        highlightTerms.push(stem)
+        termKinds.push({ term: stem, kind })
       } else {
-        // Star(s) in unsupported positions: highlight the literal token,
-        // mirroring the LIKE fallback which matches substrings
-        highlightTerms.push(word)
-        termKinds.push({ term: word, kind: 'literal' })
+        // Bare `*` or a token made only of stars: literal
+        highlightTerms.push(t.word)
+        termKinds.push({ term: t.word, kind: 'literal' })
       }
     }
   }

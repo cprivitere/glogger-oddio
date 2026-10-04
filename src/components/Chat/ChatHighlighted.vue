@@ -32,10 +32,10 @@ interface HighlightPart {
   matched: boolean
 }
 
-/** FTS5 token characters: alphanumeric runs (the default unicode61
- *  tokenizer splits on everything else). Used to build token-boundary
- *  aware patterns. */
-const TOKEN_CHAR = '[\\p{L}\\p{N}_]'
+/** FTS5 token characters under the default unicode61 tokenizer: letter and
+ *  number runs. `_` is a SEPARATOR in unicode61 (not part of tokens), so
+ *  FTS matches `foo` inside `foo_bar` — the boundary class must match. */
+const TOKEN_CHAR = '[\\p{L}\\p{N}]'
 
 const parts = computed((): HighlightPart[] => {
   const patterns: string[] = []
