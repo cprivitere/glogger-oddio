@@ -102,7 +102,7 @@
                   <span class="text-text-dim text-xs">{{ formatTime(msg.timestamp) }}</span>
                 </div>
                 <span class="text-text-primary text-sm break-words">
-                  <MessageWithItemLinks v-if="msg.item_links && msg.item_links.length > 0" :message="msg.message" :item-links="msg.item_links" />
+                  <MessageWithItemLinks v-if="msg.item_links && msg.item_links.length > 0" :message="msg.message" :item-links="msg.item_links" :highlight-terms="highlightTerms ?? []" />
                   <ChatHighlighted v-else-if="(highlightTerms ?? []).length > 0" :message="msg.message" :terms="highlightTerms ?? []" />
                   <template v-else>{{ msg.message }}</template>
                 </span>
@@ -141,7 +141,7 @@
               </span>
               <span v-if="msg.sender" class="shrink-0 text-sender font-medium">{{ formatSender(msg) }}:</span>
               <span class="flex-1 text-text-primary break-words" :class="{ 'text-text-system italic': msg.is_system }">
-                <MessageWithItemLinks v-if="msg.item_links && msg.item_links.length > 0" :message="msg.message" :item-links="msg.item_links" />
+                <MessageWithItemLinks v-if="msg.item_links && msg.item_links.length > 0" :message="msg.message" :item-links="msg.item_links" :highlight-terms="highlightTerms ?? []" />
                 <ChatHighlighted v-else-if="(highlightTerms ?? []).length > 0" :message="msg.message" :terms="highlightTerms ?? []" />
                 <template v-else>{{ msg.message }}</template>
               </span>

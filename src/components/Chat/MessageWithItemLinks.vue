@@ -1,7 +1,14 @@
 <template>
   <span>
     <template v-for="(part, index) in messageParts" :key="index">
-      <template v-if="part.type === 'text'">{{ part.content }}</template>
+      <template v-if="part.type === 'text'">
+        <ChatHighlighted
+          v-if="highlightTerms && highlightTerms.length > 0"
+          :message="part.content ?? ''"
+          :terms="highlightTerms"
+        />
+        <template v-else>{{ part.content }}</template>
+      </template>
       <ItemInline
         v-else-if="part.type === 'item' && part.link"
         :reference="part.link.item_name"
@@ -14,10 +21,14 @@
 import { computed } from 'vue'
 import type { ChatItemLink } from '../../types/database'
 import ItemInline from '../Shared/Item/ItemInline.vue'
+import ChatHighlighted from './ChatHighlighted.vue'
 
 const props = defineProps<{
   message: string
   itemLinks: ChatItemLink[]
+  /** Search terms to highlight in the non-link text parts (plain words,
+   *  already normalized). Empty/absent = no highlighting. */
+  highlightTerms?: string[]
 }>()
 
 interface MessagePart {

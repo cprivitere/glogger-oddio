@@ -104,31 +104,22 @@ watch(() => dateNav.activeDay.value, (day) => {
 async function loadAroundDay(day: string) {
   loading.value = true
   try {
-    const channel = 'Status'
-    const result = await fetchMessagesAroundTime(`${day} 12:00:00`, channel, 60)
+    // Day window in the current sort order, full channel filter applied —
+    // same filter semantics as loadMessages(). The window is bounded to the
+    // day, so continuation is ordinary offset pagination (loadMessages
+    // merges the day bounds via filterParams()).
+    const result = await fetchMessagesAroundTime(
+      day,
+      { channel: 'Status', sortOrder: sortOrder.value },
+      LIMIT,
+    )
     messages.value = result
+    offset.value = result.length
     if (result.length === 0) {
       hasMore.value = false
       return
     }
-    // Continue in-day paging from the newest loaded row (channel-filtered).
-    const youngest = result.reduce((a, b) => (a.timestamp > b.timestamp ? a : b))
-    const skip = await invoke<number>('count_chat_messages', {
-      channel,
-      startTime: `${day} 00:00:00`,
-      endTime: youngest.timestamp.slice(0, 19),
-    })
-    offset.value = skip - 1
-    const more = await invoke<ChatMessage[]>('get_chat_messages', {
-      channel,
-      startTime: `${day} 00:00:00`,
-      endTime: `${day} 23:59:59`,
-      limit: 1,
-      offset: offset.value + 1,
-      sortOrder: 'desc',
-    })
-    hasMore.value = more.length > 0
-    if (more.length === 0) offset.value = 0
+    hasMore.value = result.length === LIMIT
   } catch (e) {
     console.error('Failed to load messages around day:', e)
     offset.value = 0

@@ -24,7 +24,7 @@
       <!-- Active filter chips -->
       <div v-if="parsed.sender || parsed.channel || parsed.textWords.length > 0" class="flex gap-2 mt-2 flex-wrap">
         <span
-          v-for="word in parsed.textWords"
+          v-for="word in parsed.highlightTerms.length > 0 ? parsed.highlightTerms : parsed.textWords"
           :key="'text-' + word"
           class="inline-flex items-center gap-1 px-2.5 py-1 bg-text-secondary/15 text-text-primary text-sm rounded-full"
         >
@@ -85,7 +85,7 @@
       :sort-order="contextMessageId ? undefined : sortOrder"
       :clickable="!contextMessageId"
       :highlight-id="contextMessageId ?? undefined"
-      :highlight-terms="contextMessageId ? [] : parsed.textWords"
+      :highlight-terms="contextMessageId ? [] : parsed.highlightTerms"
       :date-nav="dateNav"
       @load-more="loadMore"
       @toggle-sort="toggleSort"
@@ -122,6 +122,9 @@ const contextLoading = ref(false)
 const contextChannel = ref<string | null>(null)
 
 let searchTimeout: number | null = null
+// Generation token: a slow count for an older query must never overwrite
+// resultCount for a newer one.
+let searchGeneration = 0
 
 const parsed = computed(() => parseSearchQuery(rawQuery.value))
 
@@ -131,6 +134,7 @@ const displayMessages = computed(() =>
 
 async function loadMessages() {
   loading.value = true
+  const generation = ++searchGeneration
   try {
     const p = parsed.value
     const filter: ChatFilter = {
@@ -144,6 +148,9 @@ async function loadMessages() {
     }
 
     const newMessages = await invoke<ChatMessage[]>('get_chat_messages', filter)
+
+    // A newer search started while this one was in flight: discard.
+    if (generation !== searchGeneration) return
 
     if (offset.value === 0) {
       messages.value = newMessages
@@ -162,13 +169,15 @@ async function loadMessages() {
         channel: p.channel || undefined,
         ...dateNav.filterParams(),
       })
-        .then(n => { resultCount.value = n })
+        .then(n => {
+          if (generation === searchGeneration) resultCount.value = n
+        })
         .catch(e => console.error('Failed to count messages:', e))
     }
   } catch (e) {
     console.error('Failed to search messages:', e)
   } finally {
-    loading.value = false
+    if (generation === searchGeneration) loading.value = false
   }
 }
 
@@ -281,34 +290,44 @@ watch(() => dateNav.activeDay.value, (day, prev) => {
 
 async function loadAroundDay(day: string) {
   loading.value = true
+  const generation = ++searchGeneration
   try {
-    const result = await fetchMessagesAroundTime(`${day} 12:00:00`, null, 60)
+    // Day window in the current sort order with the complete parsed search
+    // filter (text + sender + channel chips) preserved — same filter
+    // semantics as loadMessages(). The window is bounded to the day, so
+    // continuation is ordinary offset pagination.
+    const p = parsed.value
+    const result = await fetchMessagesAroundTime(
+      day,
+      {
+        searchText: p.text || undefined,
+        sender: p.sender || undefined,
+        channel: p.channel || undefined,
+        sortOrder: sortOrder.value,
+      },
+      LIMIT,
+    )
+    if (generation !== searchGeneration) return
     messages.value = result
+    offset.value = result.length
     resultCount.value = null
     if (result.length === 0) {
       hasMore.value = false
       return
     }
-    // Continue in-day paging from the newest loaded row: the next day-bounds
-    // page (newest-first) starts right after what the around-window loaded.
-    const youngest = result.reduce((a, b) => (a.timestamp > b.timestamp ? a : b))
-    const dayStart = `${day} 00:00:00`
-    const skip = await invoke<number>('count_chat_messages', {
-      startTime: dayStart,
-      endTime: `${youngest.timestamp.slice(0, 19)}`,
-    })
-    offset.value = skip - 1 // the youngest window row itself is page 0's first row
-    hasMore.value = offset.value + LIMIT < Number.MAX_SAFE_INTEGER
-    // Probe whether more in-day rows exist beyond the window
-    const more = await invoke<ChatMessage[]>('get_chat_messages', {
-      startTime: dayStart,
+    hasMore.value = result.length === LIMIT
+    // Recompute the count over the full filter + day bounds.
+    invoke<number>('count_chat_messages', {
+      searchText: p.text || undefined,
+      sender: p.sender || undefined,
+      channel: p.channel || undefined,
+      startTime: `${day} 00:00:00`,
       endTime: `${day} 23:59:59`,
-      limit: 1,
-      offset: offset.value + 1,
-      sortOrder: 'desc',
     })
-    hasMore.value = more.length > 0
-    if (more.length === 0) offset.value = 0
+      .then(n => {
+        if (generation === searchGeneration) resultCount.value = n
+      })
+      .catch(e => console.error('Failed to count messages:', e))
   } catch (e) {
     console.error('Failed to load messages around day:', e)
     // Fall back to day-filtered paging
@@ -316,7 +335,7 @@ async function loadAroundDay(day: string) {
     hasMore.value = true
     loadMessages()
   } finally {
-    loading.value = false
+    if (generation === searchGeneration) loading.value = false
   }
 }
 
