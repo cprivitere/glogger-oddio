@@ -516,49 +516,30 @@ pub struct ChatDayRow {
     pub count: i64,
 }
 
-/// Get messages starting at a time anchor: a DAY anchor (`YYYY-MM-DD`)
-/// returns that day's rows in the requested sort order; a full-timestamp
-/// anchor returns up to `context_count` rows at-or-before (desc) or
-/// at-or-after (asc) the anchor, in the requested sort order. Caller
-/// filters (channel, sender, search) always apply. No offset math — uses
-/// the timestamp index for O(log n) boundary seeks.
+/// Get a day's messages in the requested sort order. Every caller passes a
+/// `YYYY-MM-DD` day anchor (day jump / prev-day navigation); the window is
+/// exactly that day's rows — never leaks adjacent days, and the ordering
+/// matches the sort toggle so continuation pagination composes cleanly.
+/// Caller filters (channel, sender, search, item filters) always apply.
+/// No offset math — uses the timestamp index for O(log n) boundary seeks.
 pub fn get_messages_around_time(
     conn: &DbConnection,
     anchor_time: &str,
     filter: &ChatMessageFilter,
     context_count: i64,
 ) -> Result<Vec<ChatMessageRow>> {
-    // Accept a bare `YYYY-MM-DD` day (day-jump case) or a full timestamp.
-    let day = if anchor_time.len() == 10 {
-        anchor_time.to_string()
-    } else {
-        anchor_time.get(..10).unwrap_or(anchor_time).to_string()
-    };
+    // The anchor is a bare `YYYY-MM-DD` day (day-jump case).
+    let day = anchor_time.get(..10).unwrap_or(anchor_time).to_string();
 
-    // Day-jump semantics: the window is that DAY's rows in the requested
-    // sort order — never leaks adjacent days, and the ordering matches the
-    // sort toggle so continuation pagination composes cleanly. A full
-    // timestamp anchor bounds the window at that instant instead (desc:
-    // at-or-before the anchor, asc: at-or-after). Bounds and caller filters
-    // build in ONE filter so parameter indexes stay contiguous.
-    let day_only = anchor_time.len() == 10;
+    // Bounds and caller filters build in ONE filter so parameter indexes
+    // stay contiguous.
     let desc = filter.sort_order != "asc";
     let mut combined = filter.clone();
     combined.start_time = Some(format!("{} 00:00:00", day));
     combined.end_time = Some(format!("{} 23:59:59", day));
     combined.limit = context_count;
     combined.offset = 0;
-    let (mut conditions, mut params) = build_chat_where(&combined);
-
-    if !day_only {
-        let anchor_cond = if desc {
-            format!("cm.timestamp <= ?{}", params.len() + 1)
-        } else {
-            format!("cm.timestamp >= ?{}", params.len() + 1)
-        };
-        conditions.push(anchor_cond);
-        params.push(Box::new(anchor_time.to_string()));
-    }
+    let (conditions, params) = build_chat_where(&combined);
 
     let order = if desc {
         "ORDER BY cm.timestamp DESC, cm.id DESC"

@@ -101,9 +101,11 @@ export function useChatDateNav(): ChatDateNav {
   }
 }
 
-/** Load a day window around a time anchor (day jump / prev-day navigation).
- *  Accepts the view's complete filter (search, sender, item filters,
- *  tell partner, sort order) so the window matches the normal query path. */
+/** Load a day's messages (day jump / prev-day navigation). The anchor is a
+ *  `YYYY-MM-DD` day; the window is that day's rows in the requested sort
+ *  order. Accepts the view's complete filter (search, sender, item
+ *  filters, tell partner, sort order) so the window matches the normal
+ *  query path. */
 export async function fetchMessagesAroundTime(
   anchorTime: string,
   filter: ChatFilter = {},
