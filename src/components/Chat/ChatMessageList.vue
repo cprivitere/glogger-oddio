@@ -170,7 +170,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import type { ChatMessage } from '../../types/database'
 import MessageWithItemLinks from './MessageWithItemLinks.vue'
-import ChatHighlighted from './ChatHighlighted.vue'
+import ChatHighlighted, { type HighlightTerm } from './ChatHighlighted.vue'
 import { formatSmart } from '../../composables/useTimestamp'
 import { chatDayOf, type ChatDateNav } from '../../composables/useChatDateNav'
 
@@ -184,7 +184,7 @@ const props = defineProps<{
   clickable?: boolean
   highlightId?: number
   /** Search terms highlighted in message bodies (FTS results) */
-  highlightTerms?: string[]
+  highlightTerms?: HighlightTerm[]
   /** Date navigation state; omit to hide the date toolbar entirely */
   dateNav?: ChatDateNav
 }>()

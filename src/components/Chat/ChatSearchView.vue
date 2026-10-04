@@ -85,7 +85,7 @@
       :sort-order="contextMessageId ? undefined : sortOrder"
       :clickable="!contextMessageId"
       :highlight-id="contextMessageId ?? undefined"
-      :highlight-terms="contextMessageId ? [] : parsed.highlightTerms"
+      :highlight-terms="contextMessageId ? [] : parsed.termKinds"
       :date-nav="dateNav"
       @load-more="loadMore"
       @toggle-sort="toggleSort"

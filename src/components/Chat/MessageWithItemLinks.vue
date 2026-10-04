@@ -21,14 +21,14 @@
 import { computed } from 'vue'
 import type { ChatItemLink } from '../../types/database'
 import ItemInline from '../Shared/Item/ItemInline.vue'
-import ChatHighlighted from './ChatHighlighted.vue'
+import ChatHighlighted, { type HighlightTerm } from './ChatHighlighted.vue'
 
 const props = defineProps<{
   message: string
   itemLinks: ChatItemLink[]
-  /** Search terms to highlight in the non-link text parts (plain words,
-   *  already normalized). Empty/absent = no highlighting. */
-  highlightTerms?: string[]
+  /** Search terms to highlight in the non-link text parts, with their
+   *  FTS match kinds. Empty/absent = no highlighting. */
+  highlightTerms?: HighlightTerm[]
 }>()
 
 interface MessagePart {

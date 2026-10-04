@@ -9,6 +9,15 @@ export interface ParsedSearchQuery {
    *  `"hello world"`). Filter chips render these directly and remove
    *  using them, so removing a chip strips the whole original token. */
   rawTokens: string[]
+  /** Highlight terms carrying their backend FTS match kind so the
+   *  highlighter can mirror FTS5 token semantics:
+   *  - `exact`: the term must match a whole token (word boundary)
+   *  - `phrase`: the phrase must appear as-is (substring; FTS5 phrases
+   *    are contiguous token sequences — substring is the closest DOM
+   *    approximation)
+   *  - `prefix`: the term must start a token (FTS5 `term*`)
+   *  - `literal`: malformed token — substring, mirrors the LIKE fallback */
+  termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[]
   sender?: string
   channel?: string
 }
@@ -58,6 +67,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   // (misplaced `*`, unbalanced quotes, operators) are still highlighted as
   // plain words so the LIKE-fallback results get marked too.
   const highlightTerms: string[] = []
+  const termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[] = []
   const rawTokens: string[] = []
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
@@ -65,17 +75,27 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     if (tok[1] !== undefined) {
       rawTokens.push(`"${tok[1]}"`)
       const phrase = tok[1].trim()
-      if (phrase) highlightTerms.push(phrase)
+      if (phrase) {
+        highlightTerms.push(phrase)
+        termKinds.push({ term: phrase, kind: 'phrase' })
+      }
     } else {
       const word = tok[2]
       rawTokens.push(word)
       const m = /^([^*]+)\*?$/.exec(word)
       if (m) {
         const stem = m[1].trim()
-        if (stem) highlightTerms.push(stem)
+        if (stem) {
+          // Trailing `*` = FTS5 prefix match; bare word = whole-token match
+          const kind = word.endsWith('*') ? 'prefix' : 'exact'
+          highlightTerms.push(stem)
+          termKinds.push({ term: stem, kind })
+        }
       } else {
-        // Star(s) in unsupported positions: highlight the literal token
+        // Star(s) in unsupported positions: highlight the literal token,
+        // mirroring the LIKE fallback which matches substrings
         highlightTerms.push(word)
+        termKinds.push({ term: word, kind: 'literal' })
       }
     }
   }
@@ -84,6 +104,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     text,
     textWords,
     highlightTerms,
+    termKinds,
     rawTokens,
     ...(sender && { sender }),
     ...(channel && { channel }),

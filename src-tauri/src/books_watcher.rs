@@ -271,7 +271,8 @@ pub(crate) fn process_book_file(
                 }
             }
             if content.contains("Primary Bind Location:") {
-                ingest_teleport_binds_content(db, app, character, server, &content);
+                ingest_teleport_binds_content(db, app, character, server, &content)
+                    .map_err(|e| format!("teleportation binds failed: {e}"))?;
                 notes.push("binds updated".to_string());
             }
             Ok(notes.join(", "))

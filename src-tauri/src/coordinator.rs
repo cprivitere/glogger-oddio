@@ -2326,13 +2326,15 @@ impl DataIngestCoordinator {
         // sees real line breaks on both paths (historically the live path
         // silently matched no fields).
         let content = normalize_book_content(content);
-        ingest_teleport_binds_content(
+        if let Err(e) = ingest_teleport_binds_content(
             &self.db_pool,
             &self.app_handle,
             &character,
             &server,
             &content,
-        );
+        ) {
+            eprintln!("[coordinator] Teleportation binds failed: {e}");
+        }
     }
 
     /// Parse a hoplology "Equipment Studied:" skill report and backfill studied items.
@@ -3238,17 +3240,14 @@ pub fn ingest_teleport_binds_content(
     character: &str,
     server: &str,
     content: &str,
-) {
+) -> Result<(), String> {
     let primary = extract_bind_field(content, "Primary Bind Location:");
     let secondary = extract_bind_field(content, "Secondary Bind Location:");
 
     // Upsert MUST run on the writer connection: the read pool is
     // PRAGMA query_only, so `get()` here silently dropped every bind
     // update (execute failure swallowed by `.ok()`).
-    let conn = match db.get_write() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     let dt = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -3261,7 +3260,7 @@ pub fn ingest_teleport_binds_content(
             last_updated = excluded.last_updated",
         rusqlite::params![character, server, primary, secondary, dt],
     )
-    .ok();
+    .map_err(|e| format!("Failed to upsert teleportation binds: {e}"))?;
 
     startup_log!(
         "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
@@ -3271,6 +3270,7 @@ pub fn ingest_teleport_binds_content(
     app_handle
         .emit("game-state-updated", vec!["teleportation"])
         .ok();
+    Ok(())
 }
 
 /// Parse a hoplology "Equipment Studied:" skill report and backfill studied
