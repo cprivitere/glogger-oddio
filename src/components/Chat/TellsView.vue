@@ -54,10 +54,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
+import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
+
+const dateNav = useChatDateNav()
 
 interface Conversation {
   name: string
@@ -95,6 +98,7 @@ async function loadMessages() {
   loading.value = true
   try {
     const filter: ChatFilter = {
+      ...dateNav.filterParams(),
       tellPartner: selectedConversation.value,
       limit: LIMIT,
       offset: offset.value,
@@ -136,7 +140,35 @@ function toggleSort() {
   loadMessages()
 }
 
+// Day filter changes reload from the day boundary
+watch(() => dateNav.activeDay.value, (day) => {
+  if (day) {
+    loadAroundDay(day)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
+})
+
+async function loadAroundDay(day: string) {
+  loading.value = true
+  try {
+    const result = await fetchMessagesAroundTime(`${day} 12:00:00`, 'Tell', 60)
+    messages.value = result
+    hasMore.value = false
+  } catch (e) {
+    console.error('Failed to load messages around day:', e)
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(() => {
+  dateNav.loadDays()
   loadConversations()
 })
 </script>
