@@ -135,6 +135,9 @@ const displayMessages = computed(() =>
 async function loadMessages() {
   loading.value = true
   const generation = ++searchGeneration
+  // Page-0 loads are new queries: drop the previous count immediately so
+  // the label can't show a stale number during the debounce/loading window.
+  if (offset.value === 0) resultCount.value = null
   try {
     const p = parsed.value
     const filter: ChatFilter = {
@@ -224,9 +227,15 @@ function toggleSort() {
 }
 
 function removeTextWord(word: string) {
-  // Remove the first occurrence of this word (not inside an operator)
+  // Remove the token exactly as it appears in the query. `\b` boundaries
+  // fail on tokens starting/ending with non-word chars (quotes, `*`), so
+  // match the escaped token between whitespace boundaries instead.
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  rawQuery.value = rawQuery.value.replace(new RegExp(`\\b${escaped}\\b`, 'i'), '').trim().replace(/\s+/g, ' ')
+  rawQuery.value = rawQuery.value
+    .replace(new RegExp(`(?:^|(?<=\\s))${escaped}(?:(?=\\s)|$)`, 'i'), '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/""/g, '')
   if (dateNav.activeDay.value) {
     loadAroundDay(dateNav.activeDay.value)
   } else {
