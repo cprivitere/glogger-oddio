@@ -149,7 +149,7 @@ pub fn survey_tracker_start_session(
         .active_character_server()
         .ok_or_else(|| "no active character".to_string())?;
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     coord
         .survey_aggregator_mut()
         .start_manual_session(&conn, &character, &server, &now)
@@ -167,7 +167,7 @@ pub fn survey_tracker_end_session(
         None => return Ok(None),
     };
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     coord
         .survey_aggregator_mut()
         .end_active_session(&conn, &character, &server, &now)
@@ -705,7 +705,7 @@ pub fn survey_tracker_update_session_notes(
     notes: String,
 ) -> Result<(), String> {
     let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     let updated = conn
         .execute(
             "UPDATE survey_sessions SET notes = ?2 WHERE id = ?1",
@@ -727,7 +727,7 @@ pub fn survey_tracker_update_session_name(
     name: String,
 ) -> Result<(), String> {
     let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     persistence::update_session_name(&conn, session_id, &name).map_err(|e| e.to_string())
 }
 
@@ -741,7 +741,7 @@ pub fn survey_tracker_update_session_times(
     user_ended_at: Option<String>,
 ) -> Result<(), String> {
     let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     persistence::update_session_user_times(
         &conn,
         session_id,
@@ -762,7 +762,7 @@ pub fn survey_tracker_delete_session(
     session_id: i64,
 ) -> Result<(), String> {
     let mut coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     // Delete uses first (no cascade defined). Then delete the session header.
     conn.execute(
         "DELETE FROM survey_uses WHERE session_id = ?1",
