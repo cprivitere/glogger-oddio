@@ -104,7 +104,9 @@ pub fn init_pool(db_path: PathBuf, tz_offset_seconds: Option<i32>) -> Result<DbP
         .min_idle(Some(1))
         .build(manager)?;
 
-    // Reads: concurrent in WAL mode, never block the writer.
+    // Reads: concurrent in WAL mode, never block the writer. query_only
+    // fails fast (instead of silently racing the writer) if a future write
+    // path ever grabs a read connection by mistake.
     let reads = r2d2::Pool::builder()
         .max_size(12)
         .build(SqliteConnectionManager::file(&db_path).with_init(|conn| {
@@ -112,7 +114,8 @@ pub fn init_pool(db_path: PathBuf, tz_offset_seconds: Option<i32>) -> Result<DbP
                 "PRAGMA journal_mode=WAL;
                      PRAGMA busy_timeout=5000;
                      PRAGMA synchronous=NORMAL;
-                     PRAGMA foreign_keys=ON;",
+                     PRAGMA foreign_keys=ON;
+                     PRAGMA query_only=ON;",
             )
         }))?;
 
