@@ -140,10 +140,6 @@ pub fn backfill_from_chat_logs(
         return Ok(0);
     }
 
-    let mut conn = db
-        .get_write()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
     let entries = fs::read_dir(&dir).map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?;
 
     let mut inserted = 0usize;
@@ -164,6 +160,12 @@ pub fn backfill_from_chat_logs(
         // concurrently and a whole-scan transaction holds the write lock
         // long enough for the others' busy_timeout (5s) to expire.
         // Inserts are idempotent (unique index), so per-file is safe.
+        // The WRITER CONNECTION is scoped per file too: the app's single
+        // pooled writer must not stay held across the whole directory scan,
+        // or live-ingest writers can't interleave between files.
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -186,7 +188,7 @@ pub fn backfill_from_chat_logs(
             }
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-    }
+            }
 
     Ok(inserted)
 }
