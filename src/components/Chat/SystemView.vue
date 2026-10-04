@@ -24,8 +24,10 @@ import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
 import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
+import { useChatRequestGuard } from '../../composables/useChatRequestGuard'
 
 const dateNav = useChatDateNav()
+const reqGuard = useChatRequestGuard()
 
 const messages = ref<ChatMessage[]>([])
 const loading = ref(false)
@@ -36,6 +38,7 @@ const LIMIT = 100
 
 async function loadMessages() {
   loading.value = true
+  const generation = reqGuard.begin()
   try {
     const filter: ChatFilter = {
       ...dateNav.filterParams(),
@@ -47,6 +50,7 @@ async function loadMessages() {
 
     const newMessages = await invoke<ChatMessage[]>('get_chat_messages', filter)
 
+    if (!reqGuard.isCurrent(generation)) return
     if (offset.value === 0) {
       messages.value = newMessages
     } else {
@@ -58,7 +62,7 @@ async function loadMessages() {
   } catch (e) {
     console.error('Failed to load messages:', e)
   } finally {
-    loading.value = false
+    if (reqGuard.isCurrent(generation)) loading.value = false
   }
 }
 
@@ -103,6 +107,7 @@ watch(() => dateNav.activeDay.value, (day) => {
 
 async function loadAroundDay(day: string) {
   loading.value = true
+  const generation = reqGuard.begin()
   try {
     // Day window in the current sort order, full channel filter applied —
     // same filter semantics as loadMessages(). The window is bounded to the
@@ -113,6 +118,7 @@ async function loadAroundDay(day: string) {
       { channel: 'Status', sortOrder: sortOrder.value },
       LIMIT,
     )
+    if (!reqGuard.isCurrent(generation)) return
     messages.value = result
     offset.value = result.length
     if (result.length === 0) {
@@ -129,7 +135,7 @@ async function loadAroundDay(day: string) {
     await loadMessages()
     return
   } finally {
-    loading.value = false
+    if (reqGuard.isCurrent(generation)) loading.value = false
   }
 }
 

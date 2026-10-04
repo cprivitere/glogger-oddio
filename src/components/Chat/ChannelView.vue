@@ -61,8 +61,10 @@ import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter, ChannelStat } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
 import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
+import { useChatRequestGuard } from '../../composables/useChatRequestGuard'
 
 const dateNav = useChatDateNav()
+const reqGuard = useChatRequestGuard()
 
 const selectedChannel = ref<string | null>(null)
 const messages = ref<ChatMessage[]>([])
@@ -123,6 +125,7 @@ async function loadMessages() {
 
     const newMessages = await invoke<ChatMessage[]>('get_chat_messages', filter)
 
+    if (!reqGuard.isCurrent(generation)) return
     if (offset.value === 0) {
       messages.value = newMessages
     } else {
@@ -134,7 +137,7 @@ async function loadMessages() {
   } catch (e) {
     console.error('Failed to load messages:', e)
   } finally {
-    loading.value = false
+    if (reqGuard.isCurrent(generation)) loading.value = false
   }
 }
 
@@ -192,6 +195,7 @@ watch(() => dateNav.activeDay.value, (day) => {
 
 async function loadAroundDay(day: string) {
   loading.value = true
+  const generation = reqGuard.begin()
   try {
     // Day window in the current sort order with the selected channel and
     // active search preserved — same filter semantics as loadMessages().
@@ -206,6 +210,7 @@ async function loadAroundDay(day: string) {
       },
       LIMIT,
     )
+    if (!reqGuard.isCurrent(generation)) return
     messages.value = result
     offset.value = result.length
     if (result.length === 0) {
@@ -219,7 +224,7 @@ async function loadAroundDay(day: string) {
     hasMore.value = true
     loadMessages()
   } finally {
-    loading.value = false
+    if (reqGuard.isCurrent(generation)) loading.value = false
   }
 }
 
