@@ -295,10 +295,6 @@ pub fn backfill_from_chat_logs(
         return Ok(0);
     }
 
-    let mut conn = db
-        .get_write()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
     // Read files in name order so timestamps advance monotonically across the
     // backfill (Chat-YY-MM-DD.log sorts chronologically).
     let mut paths: Vec<_> = fs::read_dir(&dir)
@@ -328,6 +324,14 @@ pub fn backfill_from_chat_logs(
         // BEGIN IMMEDIATE (not DEFERRED) keeps busy_timeout applying to the
         // acquisition; inserts are idempotent (unique index), so per-file is
         // safe.
+        // The WRITER CONNECTION is also scoped per file: holding the app's
+        // single pooled writer across the whole directory scan blocks every
+        // live-ingest writer (checkout timeout) for the entire backfill.
+        // Checkout after parsing begins — the pool serializes writers, so
+        // interleaving happens between files, which is exactly the goal.
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -354,7 +358,7 @@ pub fn backfill_from_chat_logs(
             }
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-    }
+            }
 
     Ok(inserted)
 }
@@ -402,10 +406,9 @@ pub fn backfill_bets_from_player_logs(
     // holds the write lock across both Player logs while live ingest waits.
     // The bet tracker still spans files in order — only the transaction
     // boundary is per file. Idempotent (unique index), so per-file is safe.
-    let mut conn = db
-        .get_write()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
+    // The WRITER CONNECTION is scoped per file as well: the tracker keeps its
+    // own state across files, so releasing the app's single pooled writer
+    // between files lets live-ingest writers interleave.
     let mut tracker = ArenaBetTracker::new();
     let mut inserted = 0usize;
 
@@ -419,6 +422,9 @@ pub fn backfill_bets_from_player_logs(
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -444,7 +450,7 @@ pub fn backfill_bets_from_player_logs(
             }
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-    }
+            }
 
     Ok(inserted)
 }
