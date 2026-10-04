@@ -334,6 +334,12 @@ export interface ChannelStat {
   count: number;
 }
 
+// Chat day navigation
+export interface ChatDay {
+  day: string;
+  count: number;
+}
+
 // Character import types
 
 export interface CharacterSnapshotSummary {

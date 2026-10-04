@@ -130,7 +130,81 @@ pub fn get_chat_messages(
 ) -> Result<Vec<ChatMessageRow>> {
     eprintln!("[DEBUG] get_chat_messages filter: {:?}", filter);
 
-    // Build the query using a consistent approach for all filter combos
+    let (conditions, params) = build_chat_where(filter);
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let order_dir = if filter.sort_order == "asc" { "ASC" } else { "DESC" };
+    let query = format!(
+        "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player \
+         FROM chat_messages cm {} ORDER BY cm.timestamp {} LIMIT {} OFFSET {}",
+        where_clause, order_dir, filter.limit, filter.offset
+    );
+
+    eprintln!("[DEBUG] Chat query: {}", query);
+
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&query)?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(ChatMessageRow {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            channel: row.get(2)?,
+            sender: row.get(3)?,
+            message: row.get(4)?,
+            is_system: row.get(5)?,
+            from_player: row.get(6)?,
+            item_links: Vec::new(),
+        })
+    })?;
+
+    let mut messages = Vec::new();
+    for row in rows {
+        let mut msg = row?;
+        msg.item_links = get_item_links_for_message(conn, msg.id)?;
+        messages.push(msg);
+    }
+
+    Ok(messages)
+}
+
+/// Count chat messages matching the same filter semantics as `get_chat_messages`
+/// (shared WHERE builder, including the FTS MATCH path).
+pub fn count_chat_messages(
+    conn: &DbConnection,
+    filter: &ChatMessageFilter,
+) -> Result<i64> {
+    let (conditions, params) = build_chat_where(filter);
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let query = format!(
+        "SELECT COUNT(*) FROM chat_messages cm{}",
+        where_clause
+    );
+
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&query)?;
+    let count: i64 = stmt.query_row(params_refs.as_slice(), |row| row.get(0))?;
+    Ok(count)
+}
+
+/// Shared WHERE builder for chat message queries: conditions + bound params,
+/// with the FTS MATCH condition already slotted in. Used by the row query and
+/// the count query so both always agree on filter semantics.
+fn build_chat_where(
+    filter: &ChatMessageFilter,
+) -> (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut conditions: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut param_idx = 1;
@@ -193,60 +267,45 @@ pub fn get_chat_messages(
         param_idx += 1;
     }
 
-    // Text search: use LIKE for each word (case-insensitive substring matching)
+    // Text search: FTS5 index when the query parses as plain words/phrases,
+    // LIKE fallback when it contains FTS syntax the user is experimenting with.
+    let mut fts_sql: Option<(String, String)> = None; // (sql, match_param)
     if let Some(search_text) = &filter.search_text {
-        for word in search_text.split_whitespace() {
-            let clean: String = word.chars().filter(|c| *c != '%' && *c != '_').collect();
-            if !clean.is_empty() {
-                conditions.push(format!("cm.message LIKE ?{}", param_idx));
-                params.push(Box::new(format!("%{}%", clean)));
-                param_idx += 1;
+        let text = search_text.trim();
+        if !text.is_empty() {
+            match build_fts_match_expr(text) {
+                Some(match_expr) => {
+                    fts_sql = Some((
+                        "cm.id IN (SELECT rowid FROM chat_messages_fts WHERE chat_messages_fts MATCH ?{IDX})"
+                            .to_string(),
+                        match_expr,
+                    ));
+                }
+                None => {
+                    // FTS syntax error / unsupported operators: fall back to LIKE per word
+                    for word in text.split_whitespace() {
+                        let clean: String = word.chars().filter(|c| *c != '%' && *c != '_').collect();
+                        if !clean.is_empty() {
+                            conditions.push(format!("cm.message LIKE ?{}", param_idx));
+                            params.push(Box::new(format!("%{}%", clean)));
+                            param_idx += 1;
+                        }
+                    }
+                }
             }
         }
     }
 
-    let from_clause = "FROM chat_messages cm";
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", conditions.join(" AND "))
-    };
-
-    let order_dir = if filter.sort_order == "asc" { "ASC" } else { "DESC" };
-    let query = format!(
-        "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player \
-         {} {} ORDER BY cm.timestamp {} LIMIT {} OFFSET {}",
-        from_clause, where_clause, order_dir, filter.limit, filter.offset
-    );
-
-    eprintln!("[DEBUG] Chat query: {}", query);
-
-    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
-    let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(ChatMessageRow {
-            id: row.get(0)?,
-            timestamp: row.get(1)?,
-            channel: row.get(2)?,
-            sender: row.get(3)?,
-            message: row.get(4)?,
-            is_system: row.get(5)?,
-            from_player: row.get(6)?,
-            item_links: Vec::new(),
-        })
-    })?;
-
-    let mut messages = Vec::new();
-    for row in rows {
-        let mut msg = row?;
-        msg.item_links = get_item_links_for_message(conn, msg.id)?;
-        messages.push(msg);
+    // Slot the FTS MATCH condition into the AND chain at the next free parameter slot
+    if let Some((sql, match_param)) = &fts_sql {
+        let sql = sql.replace("{IDX}", &param_idx.to_string());
+        params.push(Box::new(match_param.clone()));
+        conditions.push(sql);
     }
 
-    Ok(messages)
+    (conditions, params)
 }
+
 
 /// Get item links for a specific message
 fn get_item_links_for_message(
@@ -329,6 +388,209 @@ pub fn get_messages_around(
     }
 
     Ok(messages)
+}
+
+/// Build an FTS5 MATCH expression from a user search string.
+///
+/// Plain words become quoted tokens joined implicitly with AND. Phrases in
+/// double quotes become quoted FTS phrases. A trailing `*` becomes a prefix
+/// query (`"gorg"*`). Tokens containing FTS syntax (parens, column filters,
+/// `NEAR`, stray operators) are rejected with `None` so the caller can fall
+/// back to LIKE substring matching instead of surfacing an FTS error.
+pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut chars = search_text.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if c == '"' {
+            // Quoted phrase: consume up to the closing quote
+            chars.next();
+            let mut phrase = String::new();
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                if ch == '"' {
+                    closed = true;
+                    break;
+                }
+                phrase.push(ch);
+            }
+            let phrase = phrase.trim();
+            if !phrase.is_empty() {
+                parts.push(format!("\"{}\"", phrase.replace('"', "")));
+            }
+            if !closed {
+                // Unterminated quote: treat the whole query as FTS-malformed
+                return None;
+            }
+        } else {
+            // Bare word: consume until whitespace, preserving a trailing `*`
+            let mut word = String::new();
+            let mut prefix = false;
+            for ch in chars.by_ref() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                if ch == '"' {
+                    // Quote in the middle of a word: FTS syntax, bail out
+                    return None;
+                }
+                if ch == '*' {
+                    prefix = true;
+                    continue;
+                }
+                if "()^:,+-".contains(ch) {
+                    // FTS operators / column filters: not plain words
+                    return None;
+                }
+                word.push(ch);
+            }
+            let word = word.trim();
+            if word.is_empty() {
+                if prefix {
+                    return None; // bare `*` is an FTS syntax error
+                }
+                continue;
+            }
+            if prefix {
+                parts.push(format!("\"{}\"*", word));
+            } else {
+                parts.push(format!("\"{}\"", word));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// Days (UTC, from stored timestamps) that contain chat messages, newest first.
+pub fn get_chat_days(conn: &DbConnection) -> Result<Vec<ChatDayRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS count
+         FROM chat_messages
+         GROUP BY day
+         ORDER BY day DESC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ChatDayRow {
+            day: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?;
+
+    let mut days = Vec::new();
+    for row in rows {
+        days.push(row?);
+    }
+
+    Ok(days)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatDayRow {
+    /// UTC day as `YYYY-MM-DD`
+    pub day: String,
+    pub count: i64,
+}
+
+/// Get messages centered on a time anchor: up to `context_count` messages at
+/// or after `anchor_time` and up to `context_count` before it, in the same
+/// channel when one is given, returned chronologically. No offset math —
+/// uses the timestamp index for O(log n) boundary seeks.
+pub fn get_messages_around_time(
+    conn: &DbConnection,
+    anchor_time: &str,
+    channel: Option<&str>,
+    context_count: i64,
+) -> Result<Vec<ChatMessageRow>> {
+    // Accept a bare `YYYY-MM-DD` day and anchor at midnight on that day
+    let anchor = if anchor_time.len() == 10 {
+        format!("{} 00:00:00", anchor_time)
+    } else {
+        anchor_time.to_string()
+    };
+
+    let col_select =
+        "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player";
+    let (channel_where, channel_params): (String, Vec<&str>) = match channel {
+        Some(ch) => (" AND cm.channel = ?2".to_string(), vec![ch]),
+        None => (String::new(), Vec::new()),
+    };
+
+    // `context_count` messages strictly before the anchor (newest-first, reversed later)
+    let before_sql = format!(
+        "{} FROM chat_messages cm WHERE cm.timestamp < ?1{} \
+         ORDER BY cm.timestamp DESC, cm.id DESC LIMIT {}",
+        col_select, channel_where, context_count
+    );
+    // The center row (first at-or-after the anchor) plus `context_count` following
+    let at_or_after_sql = format!(
+        "{} FROM chat_messages cm WHERE cm.timestamp >= ?1{} \
+         ORDER BY cm.timestamp ASC, cm.id ASC LIMIT {}",
+        col_select,
+        channel_where,
+        context_count + 1
+    );
+
+    let mut before: Vec<ChatMessageRow> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&before_sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = std::iter::once(&anchor as &dyn rusqlite::ToSql)
+            .chain(channel_params.iter().map(|p| p as &dyn rusqlite::ToSql))
+            .collect();
+        let rows = stmt.query_map(params_refs.as_slice(), map_chat_row)?;
+        for row in rows {
+            let mut msg = row?;
+            msg.item_links = get_item_links_for_message(conn, msg.id)?;
+            before.push(msg);
+        }
+    }
+    before.reverse();
+
+    let mut at_or_after: Vec<ChatMessageRow> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&at_or_after_sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = std::iter::once(&anchor as &dyn rusqlite::ToSql)
+            .chain(channel_params.iter().map(|p| p as &dyn rusqlite::ToSql))
+            .collect();
+        let rows = stmt.query_map(params_refs.as_slice(), map_chat_row)?;
+        for row in rows {
+            let mut msg = row?;
+            msg.item_links = get_item_links_for_message(conn, msg.id)?;
+            at_or_after.push(msg);
+        }
+    }
+
+    before.append(&mut at_or_after);
+    Ok(before)
+}
+
+fn map_chat_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow> {
+    Ok(ChatMessageRow {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        channel: row.get(2)?,
+        sender: row.get(3)?,
+        message: row.get(4)?,
+        is_system: row.get(5)?,
+        from_player: row.get(6)?,
+        item_links: Vec::new(),
+    })
+}
+
+/// Force a full rebuild of the chat FTS index (call after bulk backfills so
+/// the index is guaranteed consistent even if a historical trigger was missed).
+pub fn rebuild_chat_fts(conn: &DbConnection) -> Result<()> {
+    conn.execute("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild')", [])?;
+    Ok(())
 }
 
 /// Get unique channels
@@ -605,4 +867,330 @@ pub fn get_watch_rule_messages(
     }
 
     Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrations::run_migrations;
+    use r2d2::Pool;
+    use r2d2_sqlite::SqliteConnectionManager;
+
+    fn setup() -> DbConnection {
+        let manager = SqliteConnectionManager::memory();
+        let pool = Pool::builder().build(manager).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&conn, None).unwrap();
+        conn
+    }
+
+    fn msg_with(conn: &DbConnection, timestamp: &str, channel: &str, sender: &str, message: &str) {
+        conn.execute(
+            "INSERT INTO chat_messages (timestamp, channel, sender, message, is_system, log_file, from_player)
+             VALUES (?1, ?2, ?3, ?4, 0, 'Chat-test.log', 0)",
+            rusqlite::params![timestamp, channel, sender, message],
+        )
+        .unwrap();
+    }
+
+    fn filter_with(search_text: Option<&str>) -> ChatMessageFilter {
+        ChatMessageFilter {
+            search_text: search_text.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_plain_words() {
+        let expr = build_fts_match_expr("hello world").unwrap();
+        assert_eq!(expr, r#""hello" "world""#);
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_phrase() {
+        let expr = build_fts_match_expr("say \"exact phrase\" now").unwrap();
+        assert_eq!(expr, r#""say" "exact phrase" "now""#);
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_prefix() {
+        let expr = build_fts_match_expr("gorg*").unwrap();
+        assert_eq!(expr, r#""gorg"*"#);
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_rejects_fts_syntax() {
+        assert!(build_fts_match_expr("NEAR(a b, 5)").is_none());
+        assert!(build_fts_match_expr("message:hello").is_none());
+        assert!(build_fts_match_expr("(a OR b)").is_none());
+        assert!(build_fts_match_expr("a \"unclosed").is_none());
+        assert!(build_fts_match_expr("*").is_none());
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_edge_cases() {
+        assert!(build_fts_match_expr("").is_none());
+        assert!(build_fts_match_expr("   ").is_none());
+        // Unclosed quote: FTS-malformed → None → LIKE fallback
+        assert!(build_fts_match_expr("hello \"unclosed").is_none());
+    }
+
+    #[test]
+    fn test_fts_search_finds_words_case_insensitively() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "Hello Gorgon fans");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "nothing to see here");
+        msg_with(&conn, "2026-07-02 10:00:00", "Trade", "Cara", "GORGON rises again");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("gorgon"))).unwrap();
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_fts_search_multiple_words_are_anded() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "hello world");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello there");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("hello world"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message, "hello world");
+    }
+
+    #[test]
+    fn test_fts_search_phrase_requires_adjacency() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "world hello");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello world");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("\"hello world\""))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_fts_prefix_query() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgonite says hi");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "no match here");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("gorg*"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_like_fallback_on_fts_syntax() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "message:hello friends");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello again");
+
+        // `message:hello` would be a column filter in FTS; falls back to LIKE substring
+        let messages = get_chat_messages(&conn, &filter_with(Some("message:hello"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_fts_combined_with_channel_filter() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon for sale");
+        msg_with(&conn, "2026-07-01 10:01:00", "Trade", "Bob", "gorgon for sale");
+
+        let filter = ChatMessageFilter {
+            channel: Some("Trade".to_string()),
+            ..filter_with(Some("gorgon"))
+        };
+        let messages = get_chat_messages(&conn, &filter).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].channel.as_deref().unwrap(), "Trade");
+    }
+
+    #[test]
+    fn test_fts_combined_with_time_range() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon early");
+        msg_with(&conn, "2026-07-05 10:00:00", "General", "Bob", "gorgon late");
+
+        let filter = ChatMessageFilter {
+            start_time: Some("2026-07-03".to_string()),
+            ..filter_with(Some("gorgon"))
+        };
+        let messages = get_chat_messages(&conn, &filter).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_fts_searches_sender_column_via_query() {
+        // FTS indexes message+sender; a plain word may match the sender only
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Zaxxas", "selling ores");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("zaxxas"))).unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_fts_syntax_like_fallback_matches_nothing_safely() {
+        // Hyphen-prefixed token is FTS column-op shape → LIKE fallback; no SQL error
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "plain message");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "plain message");
+
+        let filter = ChatMessageFilter {
+            search_text: Some("-message".to_string()),
+            ..Default::default()
+        };
+        let messages = get_chat_messages(&conn, &filter).unwrap();
+        assert_eq!(messages.len(), 0);
+    }
+
+    #[test]
+    fn test_fts_parens_like_fallback_matches_raw_text() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "counting (one) two");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "counting three four");
+
+        // Parens are FTS syntax → LIKE fallback over the raw text
+        let messages = get_chat_messages(&conn, &filter_with(Some("(one)"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_fts_search_sort_order_respected() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon one");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "gorgon two");
+        msg_with(&conn, "2026-07-01 10:02:00", "General", "Cara", "gorgon three");
+
+        let filter = ChatMessageFilter {
+            sort_order: "asc".to_string(),
+            ..filter_with(Some("gorgon"))
+        };
+        let messages = get_chat_messages(&conn, &filter).unwrap();
+        assert_eq!(messages[0].message, "gorgon one");
+        assert_eq!(messages[2].message, "gorgon three");
+    }
+
+    #[test]
+    fn test_fts_search_respects_limit_offset() {
+        let conn = setup();
+        for i in 0..5 {
+            msg_with(&conn, &format!("2026-07-01 10:0{}:00", i), "General", "A", "gorgon spam");
+        }
+        let filter = ChatMessageFilter {
+            limit: 2,
+            offset: 1,
+            ..filter_with(Some("gorgon"))
+        };
+        let messages = get_chat_messages(&conn, &filter).unwrap();
+        assert_eq!(messages.len(), 2);
+        // desc order: newest first; offset skips the newest
+        assert_eq!(messages[0].timestamp, "2026-07-01 10:03:00");
+    }
+
+    #[test]
+    fn test_get_chat_days() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "one");
+        msg_with(&conn, "2026-07-01 15:30:00", "General", "B", "two");
+        msg_with(&conn, "2026-07-03 09:00:00", "General", "C", "three");
+
+        let days = get_chat_days(&conn).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].day, "2026-07-03");
+        assert_eq!(days[0].count, 1);
+        assert_eq!(days[1].day, "2026-07-01");
+        assert_eq!(days[1].count, 2);
+    }
+
+    #[test]
+    fn test_get_messages_around_time_day_anchor() {
+        let conn = setup();
+        // Day before, day of, day after
+        msg_with(&conn, "2026-06-30 22:00:00", "General", "A", "before day");
+        msg_with(&conn, "2026-07-01 09:00:00", "General", "B", "morning");
+        msg_with(&conn, "2026-07-01 18:00:00", "General", "C", "evening");
+        msg_with(&conn, "2026-07-02 09:00:00", "General", "D", "next day");
+
+        // context 1 → 1 strictly-before (A) + 2 at-or-after (B, C): centered on B
+        let messages = get_messages_around_time(&conn, "2026-07-01", None, 1).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
+        assert_eq!(messages[2].sender.as_deref().unwrap(), "C");
+    }
+
+    #[test]
+    fn test_get_messages_around_time_midday_anchor() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 09:00:00", "General", "A", "one");
+        msg_with(&conn, "2026-07-01 12:00:00", "General", "B", "two");
+        msg_with(&conn, "2026-07-01 15:00:00", "General", "C", "three");
+        msg_with(&conn, "2026-07-01 18:00:00", "General", "D", "four");
+
+        let messages = get_messages_around_time(&conn, "2026-07-01 12:00:00", None, 1).unwrap();
+        // 1 before (A) + center B + 1 after (C) → 3 chronological
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
+        assert_eq!(messages[2].sender.as_deref().unwrap(), "C");
+    }
+
+    #[test]
+    fn test_get_messages_around_time_channel_filter() {
+        let conn = setup();
+        msg_with(&conn, "2026-06-30 22:00:00", "General", "A", "gen before");
+        msg_with(&conn, "2026-07-01 09:00:00", "Trade", "B", "trade one");
+        msg_with(&conn, "2026-07-01 12:00:00", "General", "C", "gen mid");
+        msg_with(&conn, "2026-07-01 15:00:00", "Trade", "D", "trade two");
+        msg_with(&conn, "2026-07-01 18:00:00", "Trade", "E", "trade three");
+
+        let messages = get_messages_around_time(&conn, "2026-07-01", Some("Trade"), 2).unwrap();
+        // Trade only: before-anchor has 0; at-or-after = B, D, E (limit 2+1 → B, D, E)
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "B");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "D");
+        assert_eq!(messages[2].sender.as_deref().unwrap(), "E");
+    }
+
+    #[test]
+    fn test_get_messages_around_time_empty_day_returns_following_context() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "only day");
+        msg_with(&conn, "2026-07-05 10:00:00", "General", "B", "later day");
+
+        // Anchor on a day with no messages: centered on the first row after it
+        let messages = get_messages_around_time(&conn, "2026-06-15", None, 25).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
+    }
+
+    #[test]
+    fn test_get_messages_around_time_before_first_row() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "first");
+        msg_with(&conn, "2026-07-01 11:00:00", "General", "B", "second");
+
+        // Anchor before everything: everything is "at or after"
+        let messages = get_messages_around_time(&conn, "2026-06-01", None, 25).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+    }
+
+    #[test]
+    fn test_rebuild_chat_fts_and_search_after_bulk_insert() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "rebuild me");
+        // Simulate a missed trigger: manually gut the index, then rebuild
+        conn.execute("DELETE FROM chat_messages_fts", []).unwrap();
+        rebuild_chat_fts(&conn).unwrap();
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("rebuild"))).unwrap();
+        assert_eq!(messages.len(), 1);
+    }
 }

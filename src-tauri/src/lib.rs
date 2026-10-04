@@ -141,9 +141,10 @@ use db::brewing_commands::{
     scan_snapshot_for_brewing_discoveries,
 };
 use chat_commands::{
-    delete_all_chat_messages, get_chat_channel_stats, get_chat_channels, get_chat_messages,
-    get_chat_messages_around, get_chat_stats, get_tell_conversations, get_watch_rule_messages,
-    purge_chat_messages, scan_chat_log_file, scan_chat_logs, tail_chat_log,
+    delete_all_chat_messages, count_chat_messages, get_chat_channel_stats, get_chat_channels,
+    get_chat_days, get_chat_messages, get_chat_messages_around, get_chat_messages_around_time,
+    get_chat_stats, get_tell_conversations, get_watch_rule_messages, purge_chat_messages,
+    scan_chat_log_file, scan_chat_logs, tail_chat_log,
 };
 use commands::parse_log;
 use debug_capture::replay_capture_file;
@@ -840,7 +841,10 @@ pub fn run() {
             scan_chat_logs,
             scan_chat_log_file,
             get_chat_messages,
+            count_chat_messages,
             get_chat_messages_around,
+            get_chat_messages_around_time,
+            get_chat_days,
             get_chat_channels,
             get_chat_channel_stats,
             get_chat_stats,
