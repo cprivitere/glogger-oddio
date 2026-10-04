@@ -35,7 +35,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Timestamped log line for startup diagnostics.
 macro_rules! startup_log {
     ($($arg:tt)*) => {
-        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*));
+        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*))
     };
 }
 
@@ -1419,11 +1419,13 @@ impl DataIngestCoordinator {
                                 _ => String::new(),
                             });
                         } else {
-                            if let crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } = &rez_event {
-                                self.last_rez_dedup = Some((target_name.clone(), timestamp.clone()));
-                            }
                             if let Err(e) = self.persist_resuscitate_event(&rez_event) {
                                 eprintln!("Failed to persist resuscitate event: {}", e);
+                            } else if let crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } = &rez_event {
+                                // Arm the dedup guard only AFTER a successful
+                                // persist: if the insert fails, the paired
+                                // line must still be able to produce a row.
+                                self.last_rez_dedup = Some((target_name.clone(), timestamp.clone()));
                             }
                             self.app_handle
                                 .emit("character-resuscitated", &rez_event)
@@ -2346,16 +2348,17 @@ impl DataIngestCoordinator {
         // real line breaks on both paths (historically the live path split
         // on literal `\n` only).
         let content = normalize_book_content(content);
-        let inserted = ingest_hoplology_content(
+        match ingest_hoplology_content(
             &self.db_pool,
             &self.game_data,
             &self.app_handle,
             &character,
             &server,
             &content,
-        );
-        if inserted == 0 {
-            startup_log!("[coordinator] Hoplology report: no new items");
+        ) {
+            Ok(0) => startup_log!("[coordinator] Hoplology report: no new items"),
+            Ok(_) => {} // logged inside
+            Err(e) => eprintln!("[coordinator] Hoplology report failed: {e}"),
         }
     }
 
@@ -3277,11 +3280,11 @@ pub fn ingest_hoplology_content(
     character: &str,
     server: &str,
     content: &str,
-) -> usize {
-    let conn = match db.get() {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
+) -> Result<usize, String> {
+    // Inserts MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every study
+    // row. Failures propagate so the Books watcher can retry the file.
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     // Use current wall-clock time as the "first seen" timestamp for
     // report-backfilled items (the player.log timestamp is just HH:MM:SS
@@ -3326,7 +3329,7 @@ pub fn ingest_hoplology_content(
             .emit("game-state-updated", vec!["hoplology"])
             .ok();
     }
-    inserted
+    Ok(inserted)
 }
 
 /// Normalize an equipped combat-skill pair into a stable, order-independent key

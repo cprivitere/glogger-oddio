@@ -207,44 +207,56 @@ pub fn backfill_from_chat_logs(
         // the write lock long enough for the others' busy_timeout (5s) to
         // expire. Per-file keeps each lock hold short; the inserts are
         // idempotent (unique index) so a crash mid-scan just re-runs.
-        // The WRITER CONNECTION is scoped per file too: holding the app's
-        // single pooled writer across the whole directory scan would block
-        // every other writer (live ingest) for the full backfill duration.
+        // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
+        // file is read and parsed — collect the records, then acquire the
+        // writer only around the insert transaction.
+        let earns: Vec<(String, u32, Option<String>, String, Option<String>)> = {
+            let reader = BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                let Some(msg) = parse_chat_line(&line) else {
+                    continue;
+                };
+                if let Some(ChatStatusEvent::CombatWisdomEarned {
+                    timestamp,
+                    amount,
+                    source_name,
+                    verb,
+                    zone,
+                }) = parse_status_message(&msg)
+                {
+                    if source_name.is_none() {
+                        continue;
+                    }
+                    out.push((timestamp, amount, source_name, verb, zone));
+                }
+            }
+            out
+        };
+        if earns.is_empty() {
+            continue;
+        }
+
         let mut conn = db
             .get_write()
             .map_err(|e| format!("Database connection error: {e}"))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Some(msg) = parse_chat_line(&line) else {
-                continue;
-            };
-            if let Some(ChatStatusEvent::CombatWisdomEarned {
-                timestamp,
-                amount,
-                source_name,
-                verb,
-                zone,
-            }) = parse_status_message(&msg)
-            {
-                if source_name.is_none() {
-                    continue;
-                }
-                let n = tx
-                    .execute(
-                        "INSERT OR IGNORE INTO combat_wisdom_earns
-                         (earned_at, amount, source_name, verb, zone)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![timestamp, amount, source_name, verb, zone],
-                    )
-                    .map_err(|e| format!("Insert error: {e}"))?;
-                inserted += n;
-            }
+        for (timestamp, amount, source_name, verb, zone) in &earns {
+            let n = tx
+                .execute(
+                    "INSERT OR IGNORE INTO combat_wisdom_earns
+                     (earned_at, amount, source_name, verb, zone)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![timestamp, amount, source_name, verb, zone],
+                )
+                .map_err(|e| format!("Insert error: {e}"))?;
+            inserted += n;
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-            }
+        drop(conn); // release the writer before the next file
+    }
 
     Ok(inserted)
 }

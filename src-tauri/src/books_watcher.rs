@@ -264,8 +264,8 @@ pub(crate) fn process_book_file(
                     .try_state::<GameDataState>()
                     .map(|s| s.inner().clone())
                     .ok_or_else(|| "GameDataState not managed yet".to_string())?;
-                let inserted =
-                    ingest_hoplology_content(db, &game_data, app, character, server, &content);
+                let inserted = ingest_hoplology_content(db, &game_data, app, character, server, &content)
+                    .map_err(|e| format!("hoplology ingest failed: {e}"))?;
                 if inserted > 0 {
                     notes.push(format!("hoplology +{inserted}"));
                 }

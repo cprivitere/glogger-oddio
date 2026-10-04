@@ -367,26 +367,42 @@ pub fn backfill_used_words_from_chat_logs(
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
+        // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
+        // file is read and parsed — collect the used words, then acquire the
+        // writer only around the delete transaction. Deletes are idempotent,
+        // so collecting first then deleting loses nothing.
+        let used: Vec<String> = {
+            let reader = std::io::BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                let Some(msg) = parse_chat_line(&line) else {
+                    continue;
+                };
+                if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
+                    parse_status_message(&msg)
+                {
+                    out.push(word);
+                }
+            }
+            out
+        };
+        if used.is_empty() {
+            continue;
+        }
+
         let mut conn = db
             .get_write()
             .map_err(|e| format!("Database connection error: {e}"))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Some(msg) = parse_chat_line(&line) else {
-                continue;
-            };
-            if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
-                parse_status_message(&msg)
-            {
-                deleted += delete_words_by_word(&tx, &word)
-                    .map_err(|e| format!("Delete error: {e}"))?;
-            }
+        for word in &used {
+            deleted += delete_words_by_word(&tx, word)
+                .map_err(|e| format!("Delete error: {e}"))?;
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-            }
+        drop(conn); // release the writer before the next file
+    }
 
     Ok(deleted)
 }

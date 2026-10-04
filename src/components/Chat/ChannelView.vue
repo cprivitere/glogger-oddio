@@ -183,8 +183,13 @@ function toggleSort() {
   }
 }
 
-// Day filter changes reload from the day boundary
+// Day filter changes reload from the day boundary. Guard: without a
+// selected channel there is nothing to scope to — the day toolbar is
+// visible before any channel is chosen, and jumping days from that state
+// would fill the "Select a Channel" placeholder with every channel's
+// messages.
 watch(() => dateNav.activeDay.value, (day) => {
+  if (!selectedChannel.value) return
   if (day) {
     loadAroundDay(day)
   } else {
@@ -195,6 +200,7 @@ watch(() => dateNav.activeDay.value, (day) => {
 })
 
 async function loadAroundDay(day: string) {
+  if (!selectedChannel.value) return
   loading.value = true
   const generation = reqGuard.begin()
   try {
