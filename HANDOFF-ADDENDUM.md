@@ -45,3 +45,14 @@
 2. Date input clamped to `min`/`max` of the play-day list (picker + typed-value clamp in `onDayInput`).
 3. All 8 views: refresh, search-debounce, sort-toggle, and chip-removal paths now route through `loadAroundDay(activeDay)` when a day filter is active — around-time returns context rows even on empty days, so the view never blanks.
 4. Latent bug found while fixing: `dayGroups` initialized each group's `day` to null and never assigned it, so multi-day headers never rendered. Now set on group creation (single-day windows still suppress headers).
+
+## Writer-queue refactor (`d378393`, user-approved)
+
+User asked whether the backfill fixes matched online best practice. Research verdict: pieces matched (BEGIN IMMEDIATE for write txns — deferred read→write upgrade returns instant SQLITE_BUSY that busy_timeout can't retry; short transactions; serialized backfill group), but the endgame is an **app-side single write queue** (kerkour: "1 write connection behind a mutex, writes queued in the app"; silvermine tauri-plugin-sqlite ships "exclusive write connection" + read pool). User chose the full refactor.
+
+- `DbPool` = struct{reads: r2d2 pool (12), writes: r2d2 pool (max_size=1)}. `get()` → read conn, `get_write()` → the single write conn. Zero signature churn (all fns still take `&DbPool`); routing a site is `get()` → `get_write()`.
+- Routed writers: coordinator (27 sites), game_state batch/character/vendor/mushroom, chat scan/tail/purge/delete, market set/bulk/import, brewing write paths, stall events + price CRUD, timers, WOP CRUD+backfill, auto-purge, CDN persist, replay ingest, books persist + gourmand import. `get_*`/SELECT-only (incl. debug-capture snapshot) stay on the read pool.
+- Migrations run through the write pool at init. `busy_timeout=5000` retained as belt-and-braces for external processes.
+- Test-pool gotcha: two `SqliteConnectionManager::memory()` pools = two DIFFERENT in-memory DBs — migrations must run on the same DB the tests read. Use shared-cache memory URIs (`file:<name>?mode=memory&cache=shared`) with unique names per test (parallel tests + `table already exists`).
+- `DbPool::from_pools` (cfg(test)) added for constructing test pool pairs.
+- 622 tests green; the per-file BEGIN IMMEDIATE + sequential-chain backfills stay as-is — they now never contend because all writers queue behind one connection.
