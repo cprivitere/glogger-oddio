@@ -140,17 +140,47 @@ pub mod log_positions {
         player_name: Option<&str>,
         metadata: Option<&str>,
     ) -> Result<()> {
-        // Monotonic guard: never move a stored cursor BACKWARD. A stale
+        // Monotonic by default: never move a stored cursor BACKWARD. A stale
         // backfill racing the live tail reads an old offset, parses, then
         // commits last — without this guard it would overwrite the tail's
         // larger position, regressing the cursor and replaying lines the
         // tail already ingested. MAX() keeps the larger of old/new even if
         // the stale scan commits later.
+        //
+        // Legitimate resets (log truncation / rotation: the watcher saw the
+        // file shrink and restarted from 0) must NOT be blocked by MAX —
+        // use force_position() for those.
         conn.execute(
             "INSERT INTO log_file_positions (file_path, file_type, last_position, player_name, metadata, last_processed)
              VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
              ON CONFLICT(file_path) DO UPDATE SET
                 last_position = MAX(last_position, ?3),
+                player_name = COALESCE(?4, player_name),
+                metadata = COALESCE(?5, metadata),
+                last_processed = CURRENT_TIMESTAMP",
+            params![file_path, file_type, position as i64, player_name, metadata],
+        )?;
+
+        Ok(())
+    }
+
+    /// Force the stored position to an exact value — used ONLY for
+    /// legitimate cursor resets (log truncation / rotation detected by the
+    /// watcher: file size < saved position). Bypasses the monotonic MAX
+    /// guard.
+    pub fn force_position(
+        conn: &rusqlite::Connection,
+        file_path: &str,
+        file_type: &str,
+        position: u64,
+        player_name: Option<&str>,
+        metadata: Option<&str>,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO log_file_positions (file_path, file_type, last_position, player_name, metadata, last_processed)
+             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+             ON CONFLICT(file_path) DO UPDATE SET
+                last_position = ?3,
                 player_name = COALESCE(?4, player_name),
                 metadata = COALESCE(?5, metadata),
                 last_processed = CURRENT_TIMESTAMP",

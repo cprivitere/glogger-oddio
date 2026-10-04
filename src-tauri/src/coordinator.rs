@@ -582,20 +582,22 @@ impl DataIngestCoordinator {
 
         // Persist watcher positions every poll cycle so a crash doesn't
         // lose all progress and cause a full re-parse on next launch.
-        self.save_watcher_positions();
+        self.save_watcher_positions_mut();
 
         Ok(())
     }
 
     /// Persist current watcher byte offsets to the database.
     /// Called every poll cycle so a crash only loses ~1 polling interval of progress.
-    fn save_watcher_positions(&self) {
+    /// `&mut self` because a detected truncation/rotation must also force the
+    /// stored cursor down (and clear the watcher's reset flag).
+    fn save_watcher_positions_mut(&mut self) {
         let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
 
-        if let Some(watcher) = &self.player_watcher {
+        if let Some(watcher) = &mut self.player_watcher {
             if let Some(path) = self.settings.get_player_log_path() {
                 log_positions::update_position(
                     &conn,
@@ -606,10 +608,25 @@ impl DataIngestCoordinator {
                     None,
                 )
                 .ok();
+                if watcher.position_was_reset() {
+                    // Truncation/rotation this cycle: the monotonic MAX guard
+                    // would keep the stale larger offset — force the cursor
+                    // down, then clear the flag so the force runs once.
+                    log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        watcher.get_position(),
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .ok();
+                    watcher.clear_position_reset();
+                }
             }
         }
 
-        if let Some(watcher) = &self.chat_watcher {
+        if let Some(watcher) = &mut self.chat_watcher {
             let file_path_str = watcher.get_file_path().to_string_lossy().to_string();
             let file_name = watcher.get_file_name().to_string();
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
@@ -622,6 +639,18 @@ impl DataIngestCoordinator {
                 Some(&metadata),
             )
             .ok();
+            if watcher.position_was_reset() {
+                log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    watcher.get_position(),
+                    None,
+                    Some(&metadata),
+                )
+                .ok();
+                watcher.clear_position_reset();
+            }
         }
     }
 
