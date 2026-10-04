@@ -178,35 +178,53 @@ function loadMore() {
 }
 
 function refresh() {
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  // With a day filter active, refresh re-centers on that day (the plain
+  // day-bounds query can legitimately be empty; around-time keeps context).
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function onSearchInput() {
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = window.setTimeout(() => {
     exitContext()
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
+    if (dateNav.activeDay.value) {
+      loadAroundDay(dateNav.activeDay.value)
+    } else {
+      offset.value = 0
+      hasMore.value = true
+      loadMessages()
+    }
   }, 300)
 }
 
 function toggleSort() {
   sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc'
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function removeTextWord(word: string) {
   // Remove the first occurrence of this word (not inside an operator)
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   rawQuery.value = rawQuery.value.replace(new RegExp(`\\b${escaped}\\b`, 'i'), '').trim().replace(/\s+/g, ' ')
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function removeOperator(op: 'from' | 'in') {
@@ -215,9 +233,13 @@ function removeOperator(op: 'from' | 'in') {
     ? /\bfrom:(?:"[^"]*"|[\S]+)/gi
     : /\bin:(?:"[^"]*"|[\S]+)/gi
   rawQuery.value = rawQuery.value.replace(pattern, '').trim().replace(/\s+/g, ' ')
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 async function onMessageClick(msg: ChatMessage) {
