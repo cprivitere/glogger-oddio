@@ -3315,7 +3315,12 @@ pub fn ingest_hoplology_content(
             Ok(Some(_)) => inserted += 1,
             Ok(None) => {} // already known
             Err(e) => {
+                // Propagate the first failure: already-inserted rows are
+                // idempotent, so returning Err makes the Books watcher treat
+                // the file as unseen and retry it — instead of marking the
+                // mtime seen over a partial import.
                 eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
+                return Err(format!("hoplology insert failed for '{}': {e}", trimmed));
             }
         }
     }
