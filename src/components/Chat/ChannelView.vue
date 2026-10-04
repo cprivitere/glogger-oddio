@@ -113,6 +113,7 @@ async function loadMessages() {
   if (!selectedChannel.value) return
 
   loading.value = true
+  const generation = reqGuard.begin()
   try {
     const filter: ChatFilter = {
       ...dateNav.filterParams(),
