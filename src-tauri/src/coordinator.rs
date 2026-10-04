@@ -347,7 +347,13 @@ impl DataIngestCoordinator {
             .map(|mtime| chrono::DateTime::<chrono::Utc>::from(mtime).date_naive());
 
         let mut conn = self.db_pool.get().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // BEGIN IMMEDIATE: runs at startup alongside other backfills; a deferred
+        // tx that upgrades read→write on its first INSERT gets an instant
+        // SQLITE_BUSY that busy_timeout can't retry. Acquiring the write lock up
+        // front makes busy_timeout apply to the acquisition instead.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let mut inserted = 0usize;
         {
             let mut stmt = tx
