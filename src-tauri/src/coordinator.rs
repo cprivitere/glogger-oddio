@@ -352,8 +352,14 @@ impl DataIngestCoordinator {
             .ok()
             .map(|mtime| chrono::DateTime::<chrono::Utc>::from(mtime).date_naive());
 
-        let mut conn = self.db_pool.get().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut conn = self.db_pool.get_write().map_err(|e| e.to_string())?;
+        // BEGIN IMMEDIATE: runs at startup alongside other backfills; a deferred
+        // tx that upgrades read→write on its first INSERT gets an instant
+        // SQLITE_BUSY that busy_timeout can't retry. Acquiring the write lock up
+        // front makes busy_timeout apply to the acquisition instead.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let mut inserted = 0usize;
         {
             let mut stmt = tx
@@ -449,7 +455,7 @@ impl DataIngestCoordinator {
                     if !events.is_empty() {
                         startup_log!("Final flush: {} events from old chat log", events.len());
                         // Process inline to avoid borrow issues with self
-                        let conn = self.db_pool.get()
+                        let conn = self.db_pool.get_write()
                             .map_err(|e| format!("Database error: {}", e))?;
                         let log_file = watcher.get_file_name().to_string();
                         let excluded_channels = &self.settings.get().excluded_chat_channels;
@@ -579,7 +585,7 @@ impl DataIngestCoordinator {
     /// Persist current watcher byte offsets to the database.
     /// Called every poll cycle so a crash only loses ~1 polling interval of progress.
     fn save_watcher_positions(&self) {
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -721,7 +727,7 @@ impl DataIngestCoordinator {
                         self.game_state.get_active_character(),
                         self.game_state.get_active_server(),
                     ) {
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             conn.execute(
                                 "INSERT INTO game_state_area (character_name, server_name, area_name, last_confirmed_at)
                                  VALUES (?1, ?2, ?3, datetime('now'))
@@ -742,7 +748,7 @@ impl DataIngestCoordinator {
                         self.game_state.get_active_character(),
                         self.game_state.get_active_server(),
                     ) {
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             // Resolve skill name → canonical ID + display name
                             let (skill_id, display_name) = {
                                 let guard = self.game_data.blocking_read();
@@ -809,7 +815,7 @@ impl DataIngestCoordinator {
                             if book_type == "SkillReport"
                                 && content.trim_start().starts_with("Foods Consumed:")
                             {
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::gourmand_commands::import_gourmand_from_content(
                                         &conn, content,
                                     ) {
@@ -921,7 +927,7 @@ impl DataIngestCoordinator {
                             action_type, label, ..
                         } if action_type == "Eat" => {
                             if let Some(food_name) = label.strip_prefix("Using ") {
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::gourmand_commands::record_food_eaten(
                                         &conn, food_name,
                                     ) {
@@ -955,7 +961,7 @@ impl DataIngestCoordinator {
                         .get_active_server()
                         .map(String::from);
                     if let (Some(character), Some(server), Ok(conn)) =
-                        (active_char, active_server, self.db_pool.get())
+                        (active_char, active_server, self.db_pool.get_write())
                     {
                         let agg_events = self.survey_aggregator.process_event(
                             &mut player_event,
@@ -1033,7 +1039,7 @@ impl DataIngestCoordinator {
                         &local_ts,
                     ) {
                         let mut arena_changed = false;
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             if let Ok(1) = crate::db::arena_commands::record_arena_match(
                                 &conn,
                                 &m.fought_at,
@@ -1169,7 +1175,7 @@ impl DataIngestCoordinator {
                                     self.game_state.get_active_character().map(String::from),
                                     self.game_state.get_active_server().map(String::from),
                                 ) {
-                                    if let Ok(conn) = self.db_pool.get() {
+                                    if let Ok(conn) = self.db_pool.get_write() {
                                         // Only "loot" gains can belong to a
                                         // survey; summoned items never do.
                                         let survey_use_id = if context == "loot" {
@@ -1228,7 +1234,7 @@ impl DataIngestCoordinator {
                                     .and_then(|gd| gd.find_equipment_base_name(item_name))
                                     .unwrap_or_else(|| item_name.to_string());
 
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     if let (Some(character), Some(server)) = (
                                         self.game_state.get_active_character(),
                                         self.game_state.get_active_server(),
@@ -1264,7 +1270,7 @@ impl DataIngestCoordinator {
                                 // widget's per-monster cooldowns. Non-monster
                                 // (prodigy-level) awards are skipped by the
                                 // recorder; they still reach the frontend below.
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     crate::db::combat_wisdom_commands::record_combat_wisdom_earn(
                                         &conn,
                                         &local_ts,
@@ -1289,7 +1295,7 @@ impl DataIngestCoordinator {
                             ChatStatusEvent::RouletteResult { timestamp, number } => {
                                 // Persist the casino roulette spin outcome for the
                                 // Roulette widget's history pie chart. Idempotent.
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     crate::db::roulette_commands::record_roulette_result(
                                         &conn, timestamp, *number,
                                     )
@@ -1301,7 +1307,7 @@ impl DataIngestCoordinator {
                                 // every saved copy so the Words of Power widget
                                 // stops offering a dead word. Idempotent (a
                                 // replayed use line deletes nothing).
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::words_of_power_commands::delete_words_by_word(
                                         &conn, word,
                                     ) {
@@ -1443,7 +1449,7 @@ impl DataIngestCoordinator {
                     }
 
                     // Auto-create server record
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO servers (server_name) VALUES (?1) ON CONFLICT DO NOTHING",
                             rusqlite::params![server_name],
@@ -1470,7 +1476,7 @@ impl DataIngestCoordinator {
                         .ok();
 
                     // Auto-register character with current server
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO user_characters (character_name, server_name, source, last_login_time)
                              VALUES (?1, COALESCE(?2, 'Unknown'), 'login', CURRENT_TIMESTAMP)
@@ -1569,7 +1575,7 @@ impl DataIngestCoordinator {
         ) else {
             return;
         };
-        if let Ok(conn) = self.db_pool.get() {
+        if let Ok(conn) = self.db_pool.get_write() {
             conn.execute(
                 "UPDATE currency_estimate
                     SET delta_since = delta_since + ?1, updated_at = datetime('now')
@@ -1722,7 +1728,7 @@ impl DataIngestCoordinator {
             .to_string();
         let entity_id_str = corpse_entity_id.to_string();
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to get DB connection for corpse search: {e}");
@@ -1830,7 +1836,7 @@ impl DataIngestCoordinator {
                     // Store instance_id bit-preserved as a signed i64 so the same
                     // string maps to the same dedup key as the backfill path.
                     let instance_id_signed = *instance_id as i64;
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT OR IGNORE INTO enemy_kill_loot
                                 (kill_id, item_name, quantity, instance_id)
@@ -1857,7 +1863,7 @@ impl DataIngestCoordinator {
                     }
                     let character = self.game_state.get_active_character().map(String::from);
                     let server = self.game_state.get_active_server().map(String::from);
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO corpse_extracts
                                 (character_name, server_name, corpse_name, item_name,
@@ -2056,7 +2062,7 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2153,7 +2159,7 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2247,7 +2253,7 @@ impl DataIngestCoordinator {
         };
         let zone = self.current_area.clone().unwrap_or_default();
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2277,7 +2283,7 @@ impl DataIngestCoordinator {
         let zone = self.current_area.clone().unwrap_or_default();
         let backfill_time =
             (chrono::Utc::now() - chrono::Duration::minutes(59)).to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2305,7 +2311,7 @@ impl DataIngestCoordinator {
             None => return,
         };
         let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2503,7 +2509,7 @@ impl DataIngestCoordinator {
 
         let dt = chrono::Utc::now().to_rfc3339();
 
-        if let Ok(conn) = self.db_pool.get() {
+        if let Ok(conn) = self.db_pool.get_write() {
             match crate::db::words_of_power_commands::insert_word_of_power(
                 &conn,
                 &char_name,
