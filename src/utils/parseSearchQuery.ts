@@ -6,8 +6,8 @@ export interface ParsedSearchQuery {
    *  (never the raw textWords) so `gorg*` and `"hello world"` highlight. */
   highlightTerms: string[]
   /** Raw tokens exactly as they appear in the query (e.g. `gorg*`,
-   *  `"hello world"`). Filter chips display the normalized term but remove
-   *  using this, so removing a chip strips the whole original token. */
+   *  `"hello world"`). Filter chips render these directly and remove
+   *  using them, so removing a chip strips the whole original token. */
   rawTokens: string[]
   sender?: string
   channel?: string

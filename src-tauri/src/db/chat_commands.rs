@@ -141,8 +141,8 @@ pub fn get_chat_messages(
     let order_dir = if filter.sort_order == "asc" { "ASC" } else { "DESC" };
     let query = format!(
         "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player \
-         FROM chat_messages cm {} ORDER BY cm.timestamp {} LIMIT {} OFFSET {}",
-        where_clause, order_dir, filter.limit, filter.offset
+         FROM chat_messages cm {} ORDER BY cm.timestamp {}, cm.id {} LIMIT {} OFFSET {}",
+        where_clause, order_dir, order_dir, filter.limit, filter.offset
     );
 
     eprintln!("[DEBUG] Chat query: {}", query);
@@ -516,10 +516,12 @@ pub struct ChatDayRow {
     pub count: i64,
 }
 
-/// Get messages centered on a time anchor: up to `context_count` messages at
-/// or after `anchor_time` and up to `context_count` before it, in the same
-/// channel when one is given, returned chronologically. No offset math —
-/// uses the timestamp index for O(log n) boundary seeks.
+/// Get messages starting at a time anchor: a DAY anchor (`YYYY-MM-DD`)
+/// returns that day's rows in the requested sort order; a full-timestamp
+/// anchor returns up to `context_count` rows at-or-before (desc) or
+/// at-or-after (asc) the anchor, in the requested sort order. Caller
+/// filters (channel, sender, search) always apply. No offset math — uses
+/// the timestamp index for O(log n) boundary seeks.
 pub fn get_messages_around_time(
     conn: &DbConnection,
     anchor_time: &str,

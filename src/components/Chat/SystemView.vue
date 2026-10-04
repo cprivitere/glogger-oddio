@@ -124,7 +124,10 @@ async function loadAroundDay(day: string) {
     console.error('Failed to load messages around day:', e)
     offset.value = 0
     hasMore.value = true
-    loadMessages()
+    // Await the fallback so `finally` can't drop the loading flag while
+    // the retry is still in flight.
+    await loadMessages()
+    return
   } finally {
     loading.value = false
   }
