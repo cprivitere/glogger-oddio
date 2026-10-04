@@ -1,61 +1,61 @@
 <template>
   <div class="flex flex-col h-full bg-surface-base">
+    <!-- Date navigation toolbar (always visible while date nav is active) -->
+    <div v-if="dateNav" class="flex items-center gap-2 px-4 py-2 border-b border-border-default bg-surface-base flex-wrap">
+      <label class="text-xs text-text-muted" for="chat-day-select">Day</label>
+      <select
+        id="chat-day-select"
+        :value="dateNav.activeDay.value ?? ''"
+        @change="onDaySelect(($event.target as HTMLSelectElement).value)"
+        class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer focus:outline-none focus:border-accent-gold max-w-45"
+      >
+        <option value="">All history</option>
+        <option v-for="d in dateNav.days.value" :key="d.day" :value="d.day">
+          {{ d.day }} ({{ d.count }})
+        </option>
+      </select>
+      <input
+        type="date"
+        :value="dateNav.activeDay.value ?? ''"
+        :min="minDay"
+        :max="maxDay"
+        @change="onDayInput(($event.target as HTMLInputElement).value)"
+        class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer focus:outline-none focus:border-accent-gold"
+        title="Jump to a specific day"
+      />
+      <template v-if="dateNav.isPastView.value">
+        <button
+          @click="dateNav.stepDay(-1)"
+          :disabled="!dateNav.canStepDay(-1)"
+          class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer hover:bg-border-default disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Newer day"
+        >&#9664;</button>
+        <span class="text-xs font-semibold text-accent-gold">{{ dateNav.activeDay.value }}</span>
+        <button
+          @click="dateNav.stepDay(1)"
+          :disabled="!dateNav.canStepDay(1)"
+          class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer hover:bg-border-default disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Older day"
+        >&#9654;</button>
+        <button
+          @click="dateNav.jumpToDay(null)"
+          class="px-3 py-1 bg-accent-gold/90 text-surface-base text-xs font-semibold rounded-full cursor-pointer hover:bg-accent-gold transition-all"
+          title="Clear the day filter and return to live browsing"
+        >
+          &#8593; Back to Live
+        </button>
+      </template>
+    </div>
     <!-- Initial loading (no messages yet) -->
-    <div v-if="loading && messages.length === 0" class="flex flex-col items-center justify-center h-full text-text-muted">
+    <div v-if="loading && messages.length === 0" class="flex flex-col items-center justify-center flex-1 text-text-muted">
       <div class="w-10 h-10 border-3 border-border-default border-t-accent-gold rounded-full animate-spin mb-4"></div>
       <p>Loading messages...</p>
     </div>
-    <div v-else-if="!loading && messages.length === 0" class="flex flex-col items-center justify-center h-full text-text-muted">
+    <div v-else-if="!loading && messages.length === 0" class="flex flex-col items-center justify-center flex-1 text-text-muted">
       <p class="my-1">No messages found</p>
       <p class="text-sm text-text-dim">Try importing chat logs from the Management tab</p>
     </div>
-    <template v-else>
-      <!-- Date navigation toolbar -->
-      <div v-if="dateNav" class="flex items-center gap-2 px-4 py-2 border-b border-border-default bg-surface-base flex-wrap">
-        <label class="text-xs text-text-muted" for="chat-day-select">Day</label>
-        <select
-          id="chat-day-select"
-          :value="dateNav.activeDay.value ?? ''"
-          @change="onDaySelect(($event.target as HTMLSelectElement).value)"
-          class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer focus:outline-none focus:border-accent-gold max-w-45"
-        >
-          <option value="">All history</option>
-          <option v-for="d in dateNav.days.value" :key="d.day" :value="d.day">
-            {{ d.day }} ({{ d.count }})
-          </option>
-        </select>
-        <input
-          type="date"
-          :value="dateNav.activeDay.value ?? ''"
-          @change="onDayInput(($event.target as HTMLInputElement).value)"
-          class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer focus:outline-none focus:border-accent-gold"
-          title="Jump to a specific day"
-        />
-        <template v-if="dateNav.isPastView.value">
-          <button
-            @click="dateNav.stepDay(-1)"
-            :disabled="!dateNav.canStepDay(-1)"
-            class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer hover:bg-border-default disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Newer day"
-          >&#9664;</button>
-          <span class="text-xs font-semibold text-accent-gold">{{ dateNav.activeDay.value }}</span>
-          <button
-            @click="dateNav.stepDay(1)"
-            :disabled="!dateNav.canStepDay(1)"
-            class="px-2 py-1 bg-surface-elevated border border-border-light rounded text-text-primary text-xs cursor-pointer hover:bg-border-default disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Older day"
-          >&#9654;</button>
-          <button
-            @click="dateNav.jumpToDay(null)"
-            class="px-3 py-1 bg-accent-gold/90 text-surface-base text-xs font-semibold rounded-full cursor-pointer hover:bg-accent-gold transition-all"
-            title="Clear the day filter and return to live browsing"
-          >
-            &#8593; Back to Live
-          </button>
-        </template>
-      </div>
-
-      <div class="relative flex-1 overflow-y-auto p-4" ref="messagesContainer" @scroll="onScroll">
+    <div v-else class="relative flex-1 overflow-y-auto p-4" ref="messagesContainer" @scroll="onScroll">
         <!-- Sort toggle + Jump to present -->
         <div class="sticky top-0 z-10 flex justify-between items-center pb-2">
           <button
@@ -163,7 +163,6 @@
           </button>
         </div>
       </div>
-    </template>
   </div>
 </template>
 
@@ -207,7 +206,7 @@ const dayGroups = computed(() => {
     const day = chatDayOf(msg.timestamp)
     if (!current || day !== currentDay) {
       if (current && day !== currentDay) anyDayChange = true
-      current = { day: null, messages: [] }
+      current = { day, messages: [] }
       groups.push(current)
       currentDay = day
     }
@@ -219,6 +218,18 @@ const dayGroups = computed(() => {
   }
   return groups
 })
+
+// Date picker bounds: only days that actually have messages
+const minDay = computed(() =>
+  props.dateNav && props.dateNav.days.value.length > 0
+    ? props.dateNav.days.value[props.dateNav.days.value.length - 1].day
+    : undefined
+)
+const maxDay = computed(() =>
+  props.dateNav && props.dateNav.days.value.length > 0
+    ? props.dateNav.days.value[0].day
+    : undefined
+)
 
 const emit = defineEmits<{
   'load-more': []
@@ -267,7 +278,12 @@ function onDaySelect(value: string) {
 }
 
 function onDayInput(value: string) {
-  if (value) props.dateNav?.jumpToDay(value)
+  if (!value) return
+  // Clamp typed dates to the known day range (native min/max covers the picker;
+  // typed entry is validated here).
+  if (minDay.value && value < minDay.value) value = minDay.value
+  if (maxDay.value && value > maxDay.value) value = maxDay.value
+  props.dateNav?.jumpToDay(value)
 }
 
 function channelColorClass(channel: string): string {

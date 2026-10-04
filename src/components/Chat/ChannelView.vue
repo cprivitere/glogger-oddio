@@ -143,25 +143,39 @@ function loadMore() {
 }
 
 function refresh() {
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  // With a day filter active, refresh re-centers on that day (the plain
+  // day-bounds query can legitimately be empty; around-time keeps context).
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function onSearchInput() {
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = window.setTimeout(() => {
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
+    if (dateNav.activeDay.value) {
+      loadAroundDay(dateNav.activeDay.value)
+    } else {
+      offset.value = 0
+      hasMore.value = true
+      loadMessages()
+    }
   }, 300)
 }
 
 function toggleSort() {
   sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc'
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 // Day filter changes reload from the day boundary
