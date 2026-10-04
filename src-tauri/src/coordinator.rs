@@ -3242,7 +3242,10 @@ pub fn ingest_teleport_binds_content(
     let primary = extract_bind_field(content, "Primary Bind Location:");
     let secondary = extract_bind_field(content, "Secondary Bind Location:");
 
-    let conn = match db.get() {
+    // Upsert MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every bind
+    // update (execute failure swallowed by `.ok()`).
+    let conn = match db.get_write() {
         Ok(c) => c,
         Err(_) => return,
     };
