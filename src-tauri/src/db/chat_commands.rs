@@ -427,9 +427,14 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
                 return None;
             }
         } else {
-            // Bare word: consume until whitespace, preserving a trailing `*`
+            // Bare word: consume until whitespace. Only a single trailing `*`
+            // forms a prefix; a star anywhere else (leading, internal,
+            // repeated) is unsupported syntax — bail out so the query takes
+            // the LIKE fallback instead of silently matching something else
+            // (e.g. `go*rg` must not become `"gorg"*`).
             let mut word = String::new();
-            let mut prefix = false;
+            let mut saw_star = false;
+            let mut star_ended_word = false;
             for ch in chars.by_ref() {
                 if ch.is_whitespace() {
                     break;
@@ -439,9 +444,19 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
                     return None;
                 }
                 if ch == '*' {
-                    prefix = true;
+                    if saw_star {
+                        // Repeated star (`gorg**`): unsupported
+                        return None;
+                    }
+                    saw_star = true;
+                    star_ended_word = true;
                     continue;
                 }
+                if saw_star {
+                    // Star in the middle (`go*rg`): unsupported
+                    return None;
+                }
+                star_ended_word = false;
                 if "()^:,+-".contains(ch) {
                     // FTS operators / column filters: not plain words
                     return None;
@@ -450,12 +465,12 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
             }
             let word = word.trim();
             if word.is_empty() {
-                if prefix {
+                if saw_star {
                     return None; // bare `*` is an FTS syntax error
                 }
                 continue;
             }
-            if prefix {
+            if saw_star && star_ended_word {
                 parts.push(format!("\"{}\"*", word));
             } else {
                 parts.push(format!("\"{}\"", word));
@@ -508,69 +523,67 @@ pub struct ChatDayRow {
 pub fn get_messages_around_time(
     conn: &DbConnection,
     anchor_time: &str,
-    channel: Option<&str>,
+    filter: &ChatMessageFilter,
     context_count: i64,
 ) -> Result<Vec<ChatMessageRow>> {
-    // Accept a bare `YYYY-MM-DD` day and anchor at midnight on that day
-    let anchor = if anchor_time.len() == 10 {
-        format!("{} 00:00:00", anchor_time)
-    } else {
+    // Accept a bare `YYYY-MM-DD` day (day-jump case) or a full timestamp.
+    let day = if anchor_time.len() == 10 {
         anchor_time.to_string()
+    } else {
+        anchor_time.get(..10).unwrap_or(anchor_time).to_string()
     };
 
-    let col_select =
-        "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player";
-    let (channel_where, channel_params): (String, Vec<&str>) = match channel {
-        Some(ch) => (" AND cm.channel = ?2".to_string(), vec![ch]),
-        None => (String::new(), Vec::new()),
+    // Day-jump semantics: the window is that DAY's rows in the requested
+    // sort order — never leaks adjacent days, and the ordering matches the
+    // sort toggle so continuation pagination composes cleanly. A full
+    // timestamp anchor bounds the window at that instant instead (desc:
+    // at-or-before the anchor, asc: at-or-after). Bounds and caller filters
+    // build in ONE filter so parameter indexes stay contiguous.
+    let day_only = anchor_time.len() == 10;
+    let desc = filter.sort_order != "asc";
+    let mut combined = filter.clone();
+    combined.start_time = Some(format!("{} 00:00:00", day));
+    combined.end_time = Some(format!("{} 23:59:59", day));
+    combined.limit = context_count;
+    combined.offset = 0;
+    let (mut conditions, mut params) = build_chat_where(&combined);
+
+    if !day_only {
+        let anchor_cond = if desc {
+            format!("cm.timestamp <= ?{}", params.len() + 1)
+        } else {
+            format!("cm.timestamp >= ?{}", params.len() + 1)
+        };
+        conditions.push(anchor_cond);
+        params.push(Box::new(anchor_time.to_string()));
+    }
+
+    let order = if desc {
+        "ORDER BY cm.timestamp DESC, cm.id DESC"
+    } else {
+        "ORDER BY cm.timestamp ASC, cm.id ASC"
     };
 
-    // `context_count` messages strictly before the anchor (newest-first, reversed later)
-    let before_sql = format!(
-        "{} FROM chat_messages cm WHERE cm.timestamp < ?1{} \
-         ORDER BY cm.timestamp DESC, cm.id DESC LIMIT {}",
-        col_select, channel_where, context_count
-    );
-    // The center row (first at-or-after the anchor) plus `context_count` following
-    let at_or_after_sql = format!(
-        "{} FROM chat_messages cm WHERE cm.timestamp >= ?1{} \
-         ORDER BY cm.timestamp ASC, cm.id ASC LIMIT {}",
-        col_select,
-        channel_where,
-        context_count + 1
+    let sql = format!(
+        "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player \
+         FROM chat_messages cm WHERE {} {} LIMIT {}",
+        conditions.join(" AND "),
+        order,
+        context_count,
     );
 
-    let mut before: Vec<ChatMessageRow> = Vec::new();
-    {
-        let mut stmt = conn.prepare(&before_sql)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = std::iter::once(&anchor as &dyn rusqlite::ToSql)
-            .chain(channel_params.iter().map(|p| p as &dyn rusqlite::ToSql))
-            .collect();
-        let rows = stmt.query_map(params_refs.as_slice(), map_chat_row)?;
-        for row in rows {
-            let mut msg = row?;
-            msg.item_links = get_item_links_for_message(conn, msg.id)?;
-            before.push(msg);
-        }
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), map_chat_row)?;
+    let mut messages = Vec::new();
+    for row in rows {
+        let mut msg = row?;
+        msg.item_links = get_item_links_for_message(conn, msg.id)?;
+        messages.push(msg);
     }
-    before.reverse();
-
-    let mut at_or_after: Vec<ChatMessageRow> = Vec::new();
-    {
-        let mut stmt = conn.prepare(&at_or_after_sql)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = std::iter::once(&anchor as &dyn rusqlite::ToSql)
-            .chain(channel_params.iter().map(|p| p as &dyn rusqlite::ToSql))
-            .collect();
-        let rows = stmt.query_map(params_refs.as_slice(), map_chat_row)?;
-        for row in rows {
-            let mut msg = row?;
-            msg.item_links = get_item_links_for_message(conn, msg.id)?;
-            at_or_after.push(msg);
-        }
-    }
-
-    before.append(&mut at_or_after);
-    Ok(before)
+    // The window's order matches the requested sort, so the label and
+    // continuation offsets agree with get_chat_messages.
+    Ok(messages)
 }
 
 fn map_chat_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow> {
@@ -901,6 +914,13 @@ mod tests {
         }
     }
 
+    fn filter_sort(sort_order: &str) -> ChatMessageFilter {
+        ChatMessageFilter {
+            sort_order: sort_order.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_build_fts_match_expr_plain_words() {
         let expr = build_fts_match_expr("hello world").unwrap();
@@ -917,6 +937,22 @@ mod tests {
     fn test_build_fts_match_expr_prefix() {
         let expr = build_fts_match_expr("gorg*").unwrap();
         assert_eq!(expr, r#""gorg"*"#);
+        // Multi-word with a trailing prefix on the last word
+        let expr = build_fts_match_expr("gorgon ore*").unwrap();
+        assert_eq!(expr, r#""gorgon" "ore"*"#);
+    }
+
+    #[test]
+    fn test_build_fts_match_expr_rejects_misplaced_wildcards() {
+        // Only a single TRAILING `*` is a prefix. Leading/internal/repeated
+        // stars are unsupported syntax — None ⇒ LIKE fallback, so `go*rg`
+        // never silently becomes `"gorg"*`.
+        assert!(build_fts_match_expr("go*rg").is_none());
+        assert!(build_fts_match_expr("*gorg").is_none());
+        assert!(build_fts_match_expr("gorg**").is_none());
+        assert!(build_fts_match_expr("g*o*r*g").is_none());
+        // A valid prefix next to a bad token rejects the whole query too.
+        assert!(build_fts_match_expr("gorg* go*rg").is_none());
     }
 
     #[test]
@@ -1116,28 +1152,26 @@ mod tests {
         msg_with(&conn, "2026-07-01 18:00:00", "General", "C", "evening");
         msg_with(&conn, "2026-07-02 09:00:00", "General", "D", "next day");
 
-        // context 1 → 1 strictly-before (A) + 2 at-or-after (B, C): centered on B
-        let messages = get_messages_around_time(&conn, "2026-07-01", None, 1).unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        // Day-window semantics: the day's rows in the requested sort order,
+        // never leaking adjacent days (A, D excluded). Desc with context 2:
+        // newest two rows of the day.
+        let messages =
+            get_messages_around_time(&conn, "2026-07-01", &filter_sort("desc"), 2).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
-        assert_eq!(messages[2].sender.as_deref().unwrap(), "C");
-    }
-
-    #[test]
-    fn test_get_messages_around_time_midday_anchor() {
-        let conn = setup();
-        msg_with(&conn, "2026-07-01 09:00:00", "General", "A", "one");
-        msg_with(&conn, "2026-07-01 12:00:00", "General", "B", "two");
-        msg_with(&conn, "2026-07-01 15:00:00", "General", "C", "three");
-        msg_with(&conn, "2026-07-01 18:00:00", "General", "D", "four");
-
-        let messages = get_messages_around_time(&conn, "2026-07-01 12:00:00", None, 1).unwrap();
-        // 1 before (A) + center B + 1 after (C) → 3 chronological
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        // Context covering the whole day
+        let messages =
+            get_messages_around_time(&conn, "2026-07-01", &filter_sort("desc"), 5).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
-        assert_eq!(messages[2].sender.as_deref().unwrap(), "C");
+        // Oldest-first ordering honors sort_order
+        let messages =
+            get_messages_around_time(&conn, "2026-07-01", &filter_sort("asc"), 5).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "B");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "C");
     }
 
     #[test]
@@ -1149,25 +1183,48 @@ mod tests {
         msg_with(&conn, "2026-07-01 15:00:00", "Trade", "D", "trade two");
         msg_with(&conn, "2026-07-01 18:00:00", "Trade", "E", "trade three");
 
-        let messages = get_messages_around_time(&conn, "2026-07-01", Some("Trade"), 2).unwrap();
-        // Trade only: before-anchor has 0; at-or-after = B, D, E (limit 2+1 → B, D, E)
+        let filter = ChatMessageFilter {
+            channel: Some("Trade".to_string()),
+            ..Default::default()
+        };
+        let messages = get_messages_around_time(&conn, "2026-07-01", &filter, 25).unwrap();
+        // Trade only, day-bounded, newest-first: E, D, B
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].sender.as_deref().unwrap(), "B");
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "E");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "D");
-        assert_eq!(messages[2].sender.as_deref().unwrap(), "E");
+        assert_eq!(messages[2].sender.as_deref().unwrap(), "B");
     }
 
     #[test]
-    fn test_get_messages_around_time_empty_day_returns_following_context() {
+    fn test_get_messages_around_time_search_filter() {
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 09:00:00", "General", "A", "gorgon sighting");
+        msg_with(&conn, "2026-07-01 11:00:00", "General", "B", "unrelated chat");
+        msg_with(&conn, "2026-07-01 18:00:00", "General", "C", "another gorgon");
+
+        let filter = ChatMessageFilter {
+            search_text: Some("gorgon".to_string()),
+            ..Default::default()
+        };
+        let messages = get_messages_around_time(&conn, "2026-07-01", &filter, 25).unwrap();
+        // Search filter applies to the day window: A and C only, newest-first
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "A");
+    }
+
+    #[test]
+    fn test_get_messages_around_time_empty_day_is_empty() {
         let conn = setup();
         msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "only day");
         msg_with(&conn, "2026-07-05 10:00:00", "General", "B", "later day");
 
-        // Anchor on a day with no messages: centered on the first row after it
-        let messages = get_messages_around_time(&conn, "2026-06-15", None, 25).unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
-        assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
+        // Anchor on a day with no messages: empty — a day jump never
+        // fabricates rows from other days.
+        let messages =
+            get_messages_around_time(&conn, "2026-06-15", &ChatMessageFilter::default(), 25)
+                .unwrap();
+        assert_eq!(messages.len(), 0);
     }
 
     #[test]
@@ -1176,10 +1233,12 @@ mod tests {
         msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "first");
         msg_with(&conn, "2026-07-01 11:00:00", "General", "B", "second");
 
-        // Anchor before everything: everything is "at or after"
-        let messages = get_messages_around_time(&conn, "2026-06-01", None, 25).unwrap();
+        // Oldest-first window from the day start
+        let messages =
+            get_messages_around_time(&conn, "2026-07-01", &filter_sort("asc"), 25).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
+        assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
     }
 
     #[test]

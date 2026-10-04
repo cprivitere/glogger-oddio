@@ -101,15 +101,23 @@ export function useChatDateNav(): ChatDateNav {
   }
 }
 
-/** Load context around a time anchor (day jump / prev-day navigation). */
+/** Load a day window around a time anchor (day jump / prev-day navigation).
+ *  Accepts the view's complete filter (search, sender, item filters,
+ *  tell partner, sort order) so the window matches the normal query path. */
 export async function fetchMessagesAroundTime(
   anchorTime: string,
-  channel?: string | null,
+  filter: ChatFilter = {},
   contextCount = 60,
 ): Promise<ChatMessage[]> {
   return invoke<ChatMessage[]>('get_chat_messages_around_time', {
     anchorTime,
-    channel: channel ?? undefined,
+    channel: filter.channel ?? undefined,
+    sender: filter.sender ?? undefined,
+    searchText: filter.searchText ?? undefined,
+    hasItemLinks: filter.hasItemLinks ?? undefined,
+    itemName: filter.itemName ?? undefined,
+    tellPartner: filter.tellPartner ?? undefined,
+    sortOrder: filter.sortOrder ?? undefined,
     contextCount,
   })
 }
