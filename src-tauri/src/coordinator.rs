@@ -120,6 +120,11 @@ pub struct DataIngestCoordinator {
     /// Casino arena narration tracker — resolves Kuzavek's `[NPC Chatter]`
     /// intro/result lines into completed matches for the Arena widget.
     arena_tracker: crate::arena_parser::ArenaTracker,
+    /// Rez dedup: last persisted successful rez (target, timestamp) per chat
+    /// batch. The game emits "X resuscitates Y" and "Y comes back to life!"
+    /// in different contexts; if both ever fire for the same rez (same
+    /// target, seconds apart) only the first row is kept.
+    last_rez_dedup: Option<(String, String)>,
 }
 
 impl DataIngestCoordinator {
@@ -163,6 +168,7 @@ impl DataIngestCoordinator {
             pending_cow_interaction: None,
             recent_kills: std::collections::HashMap::new(),
             arena_tracker: crate::arena_parser::ArenaTracker::new(),
+            last_rez_dedup: None,
         })
     }
 
@@ -1381,12 +1387,38 @@ impl DataIngestCoordinator {
 
                     // Check Action Emotes channel for resuscitate events
                     if let Some(rez_event) = parse_resuscitate_message(&msg) {
-                        if let Err(e) = self.persist_resuscitate_event(&rez_event) {
-                            eprintln!("Failed to persist resuscitate event: {}", e);
+                        // Dedup guard: if the game emits both phrasings for
+                        // one rez ("X resuscitates Y" + "Y comes back to
+                        // life!" within 30s of each other), persist only the
+                        // first. Same-target + same-minute timestamps are the
+                        // best available identity without a session id.
+                        let is_duplicate = matches!(
+                            (&rez_event, &self.last_rez_dedup),
+                            (
+                                crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated {
+                                    timestamp,
+                                    target_name,
+                                    ..
+                                },
+                                Some((prev_target, prev_ts)),
+                            ) if target_name == prev_target && same_minute(timestamp, prev_ts)
+                        );
+                        if is_duplicate {
+                            eprintln!("[coordinator] Skipped duplicate rez event for {}", match &rez_event {
+                                crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { target_name, .. } => target_name.clone(),
+                                _ => String::new(),
+                            });
+                        } else {
+                            if let crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } = &rez_event {
+                                self.last_rez_dedup = Some((target_name.clone(), timestamp.clone()));
+                            }
+                            if let Err(e) = self.persist_resuscitate_event(&rez_event) {
+                                eprintln!("Failed to persist resuscitate event: {}", e);
+                            }
+                            self.app_handle
+                                .emit("character-resuscitated", &rez_event)
+                                .ok();
                         }
-                        self.app_handle
-                            .emit("character-resuscitated", &rez_event)
-                            .ok();
                     }
 
                     messages.push(msg);
@@ -3260,3 +3292,9 @@ mod loadout_tests {
     }
 }
 
+
+/// True when two chat timestamps fall in the same 60-second bucket
+/// (`"YYYY-MM-DD HH:MM:SS"` strings). Used by the rez dedup guard.
+fn same_minute(a: &str, b: &str) -> bool {
+    a.get(..16) == b.get(..16) && a.len() >= 16 && b.len() >= 16
+}

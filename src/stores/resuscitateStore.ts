@@ -88,6 +88,9 @@ export const useResuscitateStore = defineStore('resuscitations', () => {
   const topRezzers = computed(() => {
     const counts = new Map<string, number>()
     for (const r of rezzedByOthers.value) {
+      // Target-only rez lines record caster as "Unknown" — not a person;
+      // keep the count in "times rezzed" totals but out of the leaderboard.
+      if (r.caster_name === 'Unknown') continue
       counts.set(r.caster_name, (counts.get(r.caster_name) ?? 0) + 1)
     }
     return [...counts.entries()]
@@ -106,8 +109,12 @@ export const useResuscitateStore = defineStore('resuscitations', () => {
       .sort((a, b) => b.count - a.count)
   })
 
-  /** Most recent successful rez where someone rezzed the active character */
-  const lastRezzedBy = computed(() => rezzedByOthers.value[0] ?? null)
+  /** Most recent successful rez where someone rezzed the active character.
+   *  Skips target-only rows (caster "Unknown") so the widget doesn't show a
+   *  placeholder name; falls through to the latest attributed rez. */
+  const lastRezzedBy = computed(
+    () => rezzedByOthers.value.find(r => r.caster_name !== 'Unknown') ?? null,
+  )
 
   return {
     resuscitations,
