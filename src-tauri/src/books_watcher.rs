@@ -122,6 +122,13 @@ fn scan_books_dir(
         return;
     }
 
+    // Process oldest-to-newest: several imports overwrite current state
+    // (gourmand clears/replaces its table; stats/binds upsert values), so
+    // on the initial multi-file backfill an older report running last
+    // would leave stale state while every file is still marked seen.
+    // `read_dir` order is unspecified — sort by mtime explicitly.
+    to_process.sort_by_key(|(_, mtime)| *mtime);
+
     // Shared stall-ops lock instance (managed in lib.rs before the watcher
     // spawns) so shop-log writes serialize with live ingest and Clear — same
     // synchronous State borrow the coordinator's ingest_shop_log uses.

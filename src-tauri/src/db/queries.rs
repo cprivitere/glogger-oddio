@@ -133,7 +133,7 @@ pub mod log_positions {
 
     /// Update the last processed position for a log file
     pub fn update_position(
-        conn: &DbConnection,
+        conn: &rusqlite::Connection,
         file_path: &str,
         file_type: &str,
         position: u64,

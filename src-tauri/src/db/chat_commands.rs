@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension, Result};
 /// Insert a batch of chat messages into the database.
 /// Messages on excluded channels are silently skipped — they must never be stored.
 pub fn insert_chat_messages(
-    conn: &DbConnection,
+    conn: &rusqlite::Connection,
     messages: &[ChatMessage],
     log_file: &str,
     excluded_channels: &[String],

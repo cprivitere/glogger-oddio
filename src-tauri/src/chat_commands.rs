@@ -78,29 +78,14 @@ pub async fn scan_chat_logs(
             })
             .collect();
 
-        // Writer held only for the short insert + position-update phase.
+        // Insert and position update under ONE writer checkout: a concurrent
+        // tail may advance the same file's offset between the two steps, and
+        // this stale scan writing its smaller new_position would regress the
+        // cursor and cause repeated replay. Single-file and tail paths
+        // already use one checkout.
         let inserted = if messages.is_empty() {
-            0
-        } else {
-            let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
-            chat_commands::insert_chat_messages(
-                &conn,
-                &messages,
-                &log_file.file_name,
-                &excluded_channels,
-            )
-            .map_err(|e| format!("Failed to insert messages: {e}"))?
-        };
-        total_messages += inserted;
-        files_processed += 1;
-
-        let metadata = serde_json::json!({
-            "file_name": log_file.file_name,
-            "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
-        })
-        .to_string();
-
-        {
+            // No rows: still record the position (empty read at EOF) under
+            // one checkout.
             let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
             log_positions::update_position(
                 &conn,
@@ -108,10 +93,49 @@ pub async fn scan_chat_logs(
                 "chat",
                 new_position,
                 player_name.as_deref(),
-                Some(&metadata),
+                Some(&{
+                    serde_json::json!({
+                        "file_name": log_file.file_name,
+                        "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
+                    })
+                    .to_string()
+                }),
             )
             .map_err(|e| format!("Failed to update log position: {e}"))?;
-        }
+            0
+        } else {
+            let mut conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+            let inserted = chat_commands::insert_chat_messages(
+                &tx,
+                &messages,
+                &log_file.file_name,
+                &excluded_channels,
+            )
+            .map_err(|e| format!("Failed to insert messages: {e}"))?;
+            log_positions::update_position(
+                &tx,
+                &file_path_str,
+                "chat",
+                new_position,
+                player_name.as_deref(),
+                Some(&{
+                    serde_json::json!({
+                        "file_name": log_file.file_name,
+                        "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
+                    })
+                    .to_string()
+                }),
+            )
+            .map_err(|e| format!("Failed to update log position: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Failed to commit insert+position: {e}"))?;
+            inserted
+        };
+        total_messages += inserted;
+        files_processed += 1;
     }
 
     // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent

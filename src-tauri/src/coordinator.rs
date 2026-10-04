@@ -123,8 +123,13 @@ pub struct DataIngestCoordinator {
     /// Rez dedup: last persisted successful rez (target, timestamp) per chat
     /// batch. The game emits "X resuscitates Y" and "Y comes back to life!"
     /// in different contexts; if both ever fire for the same rez (same
-    /// target, seconds apart) only the first row is kept.
-    last_rez_dedup: Option<(String, String)>,
+    /// target, seconds apart) only the first row is kept. A SET of
+    /// (target, minute) keys rather than a single tuple: two rezzes of
+    /// different targets can interleave within a minute
+    /// (`rez A`, `rez B`, `A back`, `B back`), and a single-tuple guard
+    /// would miss the second pair because the last target isn't B.
+    /// Pruned to a bounded window below so it never grows unbounded.
+    last_rez_dedup: std::collections::HashSet<(String, String)>,
 }
 
 impl DataIngestCoordinator {
@@ -168,7 +173,7 @@ impl DataIngestCoordinator {
             pending_cow_interaction: None,
             recent_kills: std::collections::HashMap::new(),
             arena_tracker: crate::arena_parser::ArenaTracker::new(),
-            last_rez_dedup: None,
+            last_rez_dedup: std::collections::HashSet::new(),
         })
     }
 
@@ -1402,17 +1407,36 @@ impl DataIngestCoordinator {
                         // life!" within 30s of each other), persist only the
                         // first. Same-target + same-minute timestamps are the
                         // best available identity without a session id.
-                        let is_duplicate = matches!(
-                            (&rez_event, &self.last_rez_dedup),
-                            (
-                                crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated {
-                                    timestamp,
-                                    target_name,
-                                    ..
-                                },
-                                Some((prev_target, prev_ts)),
-                            ) if target_name == prev_target && same_minute(timestamp, prev_ts)
-                        );
+                        // Keys live in a SET so interleaved rezzes of
+                        // different targets within one minute each still
+                        // dedup (a single last-target guard would miss the
+                        // second pair). Old keys (>= 2 minutes ago) are
+                        // pruned to bound memory.
+                        let dup_key = match &rez_event {
+                            crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } => {
+                                Some((target_name.clone(), timestamp.get(..16).unwrap_or(timestamp).to_string()))
+                            }
+                            _ => None,
+                        };
+                        let is_duplicate = dup_key
+                            .as_ref()
+                            .map(|key| self.last_rez_dedup.contains(key))
+                            .unwrap_or(false);
+
+                        // Prune stale keys: a (target, minute) from two
+                        // minutes ago can't dedup anything anymore — the
+                        // pair, if any, has long since arrived.
+                        if let Some((_, minute)) = &dup_key {
+                            if let Ok(minute_ts) = chrono::NaiveDateTime::parse_from_str(
+                                &format!("{}:00", minute), "%Y-%m-%d %H:%M:%S",
+                            ) {
+                                let cutoff = (minute_ts - chrono::Duration::minutes(2))
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string();
+                                self.last_rez_dedup.retain(|(_, m)| m.as_str() >= cutoff.as_str());
+                            }
+                        }
+
                         if is_duplicate {
                             eprintln!("[coordinator] Skipped duplicate rez event for {}", match &rez_event {
                                 crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { target_name, .. } => target_name.clone(),
@@ -1421,11 +1445,11 @@ impl DataIngestCoordinator {
                         } else {
                             if let Err(e) = self.persist_resuscitate_event(&rez_event) {
                                 eprintln!("Failed to persist resuscitate event: {}", e);
-                            } else if let crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } = &rez_event {
+                            } else if let Some(key) = dup_key {
                                 // Arm the dedup guard only AFTER a successful
                                 // persist: if the insert fails, the paired
                                 // line must still be able to produce a row.
-                                self.last_rez_dedup = Some((target_name.clone(), timestamp.clone()));
+                                self.last_rez_dedup.insert(key);
                             }
                             self.app_handle
                                 .emit("character-resuscitated", &rez_event)
@@ -3428,7 +3452,10 @@ mod loadout_tests {
 
 
 /// True when two chat timestamps fall in the same 60-second bucket
-/// (`"YYYY-MM-DD HH:MM:SS"` strings). Used by the rez dedup guard.
+/// (`"YYYY-MM-DD HH:MM:SS"` strings). The dedup guard now keys off
+/// `timestamp[..16]` directly; this helper is kept for the semantics
+/// tests below.
+#[cfg(test)]
 fn same_minute(a: &str, b: &str) -> bool {
     a.get(..16) == b.get(..16) && a.len() >= 16 && b.len() >= 16
 }
