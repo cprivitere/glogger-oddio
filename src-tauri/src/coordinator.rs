@@ -3298,3 +3298,40 @@ mod loadout_tests {
 fn same_minute(a: &str, b: &str) -> bool {
     a.get(..16) == b.get(..16) && a.len() >= 16 && b.len() >= 16
 }
+
+#[cfg(test)]
+mod rez_dedup_tests {
+    use super::same_minute;
+
+    #[test]
+    fn same_minute_pairs() {
+        // Pair from a single rez: both phrasings share the minute.
+        assert!(same_minute("2026-10-04 12:34:56", "2026-10-04 12:34:59"));
+        // Legitimate distinct rez later in the same hour is NOT a dup.
+        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-04 12:35:10"));
+        // Different day/hour entirely.
+        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-05 12:34:56"));
+        // Minute boundary: :59 vs next minute :00.
+        assert!(!same_minute("2026-10-04 12:34:59", "2026-10-04 12:35:00"));
+        // Malformed/short timestamps never match (guards the len check).
+        assert!(!same_minute("2026-10-04", "2026-10-04 12:34:56"));
+        assert!(!same_minute("", "2026-10-04 12:34:56"));
+    }
+
+    #[test]
+    fn dedup_window_semantics() {
+        // The coordinator guard: `target_name == prev_target &&
+        // same_minute(timestamp, prev_ts)`. Same target + same minute =>
+        // suppressed. Different target in the same minute => kept.
+        let prev = ("Bob".to_string(), "2026-10-04 12:34:56".to_string());
+        let dup_same_target = "Bob".to_string() == prev.0
+            && same_minute("2026-10-04 12:34:57", &prev.1);
+        let distinct_target_same_minute =
+            "Carol".to_string() == prev.0 && same_minute("2026-10-04 12:34:57", &prev.1);
+        let same_target_next_minute =
+            "Bob".to_string() == prev.0 && same_minute("2026-10-04 12:35:30", &prev.1);
+        assert!(dup_same_target); // paired phrasing — suppressed
+        assert!(!distinct_target_same_minute); // two real rezzes — both kept
+        assert!(!same_target_next_minute); // legit later rez — kept
+    }
+}
