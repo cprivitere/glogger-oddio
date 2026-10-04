@@ -55,6 +55,11 @@
           >&times;</button>
         </span>
       </div>
+
+      <!-- Result count -->
+      <div v-if="resultCount !== null" class="mt-2 text-xs text-text-muted">
+        {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} across all history
+      </div>
     </div>
 
     <!-- Context mode header -->
@@ -80,6 +85,8 @@
       :sort-order="contextMessageId ? undefined : sortOrder"
       :clickable="!contextMessageId"
       :highlight-id="contextMessageId ?? undefined"
+      :highlight-terms="contextMessageId ? [] : parsed.textWords"
+      :date-nav="dateNav"
       @load-more="loadMore"
       @toggle-sort="toggleSort"
       @message-click="onMessageClick"
@@ -88,11 +95,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
 import { parseSearchQuery } from '../../utils/parseSearchQuery'
+import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
 
 const rawQuery = ref('')
 const messages = ref<ChatMessage[]>([])
@@ -101,7 +109,11 @@ const hasMore = ref(true)
 const offset = ref(0)
 const sortOrder = ref<'asc' | 'desc'>('desc')
 const searchInput = ref<HTMLInputElement>()
+const resultCount = ref<number | null>(null)
 const LIMIT = 100
+
+// Date navigation
+const dateNav = useChatDateNav()
 
 // Context mode state
 const contextMessageId = ref<number | null>(null)
@@ -125,12 +137,12 @@ async function loadMessages() {
       searchText: p.text || undefined,
       sender: p.sender || undefined,
       channel: p.channel || undefined,
+      ...dateNav.filterParams(),
       limit: LIMIT,
       offset: offset.value,
       sortOrder: sortOrder.value,
     }
 
-    console.log('[ChatSearch] filter:', JSON.stringify(filter))
     const newMessages = await invoke<ChatMessage[]>('get_chat_messages', filter)
 
     if (offset.value === 0) {
@@ -141,6 +153,18 @@ async function loadMessages() {
 
     hasMore.value = newMessages.length === LIMIT
     offset.value += newMessages.length
+
+    // Count over the full filter (no limit/offset) when viewing page 0
+    if (offset.value === newMessages.length) {
+      invoke<number>('count_chat_messages', {
+        searchText: p.text || undefined,
+        sender: p.sender || undefined,
+        channel: p.channel || undefined,
+        ...dateNav.filterParams(),
+      })
+        .then(n => { resultCount.value = n })
+        .catch(e => console.error('Failed to count messages:', e))
+    }
   } catch (e) {
     console.error('Failed to search messages:', e)
   } finally {
@@ -220,8 +244,40 @@ function exitContext() {
   contextChannel.value = null
 }
 
+// Day filter changes reload from the day boundary
+watch(() => dateNav.activeDay.value, (day, prev) => {
+  if (day === prev) return
+  exitContext()
+  if (day) {
+    loadAroundDay(day)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
+})
+
+async function loadAroundDay(day: string) {
+  loading.value = true
+  try {
+    const result = await fetchMessagesAroundTime(`${day} 12:00:00`, null, 60)
+    messages.value = result
+    hasMore.value = false
+    resultCount.value = null
+  } catch (e) {
+    console.error('Failed to load messages around day:', e)
+    // Fall back to day-filtered paging
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(() => {
   loadMessages()
+  dateNav.loadDays()
   nextTick(() => searchInput.value?.focus())
 })
 </script>

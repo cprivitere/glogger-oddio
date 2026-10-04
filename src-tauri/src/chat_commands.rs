@@ -103,6 +103,14 @@ pub async fn scan_chat_logs(
         .map_err(|e| format!("Failed to update log position: {e}"))?;
     }
 
+    // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent
+    // even if any historical insert missed the sync trigger.
+    if total_messages > 0 {
+        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+        chat_commands::rebuild_chat_fts(&conn)
+            .map_err(|e| format!("Failed to rebuild chat search index: {e}"))?;
+    }
+
     Ok(ScanResult {
         files_processed,
         messages_imported: total_messages,
@@ -244,6 +252,57 @@ pub async fn get_chat_messages_around(
 
     chat_commands::get_messages_around(&conn, message_id, count)
         .map_err(|e| format!("Failed to get messages around: {e}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_chat_days(db_pool: State<'_, DbPool>) -> Result<Vec<chat_commands::ChatDayRow>, String> {
+    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+
+    chat_commands::get_chat_days(&conn).map_err(|e| format!("Failed to get chat days: {e}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_chat_messages_around_time(
+    anchor_time: String,
+    channel: Option<String>,
+    context_count: Option<i64>,
+    db_pool: State<'_, DbPool>,
+) -> Result<Vec<chat_commands::ChatMessageRow>, String> {
+    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+    let count = context_count.unwrap_or(25);
+
+    chat_commands::get_messages_around_time(&conn, &anchor_time, channel.as_deref(), count)
+        .map_err(|e| format!("Failed to get messages around time: {e}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn count_chat_messages(
+    channel: Option<String>,
+    sender: Option<String>,
+    search_text: Option<String>,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    has_item_links: Option<bool>,
+    item_name: Option<String>,
+    tell_partner: Option<String>,
+    db_pool: State<'_, DbPool>,
+) -> Result<i64, String> {
+    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+
+    let filter = chat_commands::ChatMessageFilter {
+        channel,
+        sender,
+        search_text,
+        start_time,
+        end_time,
+        has_item_links,
+        item_name,
+        tell_partner,
+        ..Default::default()
+    };
+
+    chat_commands::count_chat_messages(&conn, &filter)
+        .map_err(|e| format!("Failed to count messages: {e}"))
 }
 
 #[tauri::command]
