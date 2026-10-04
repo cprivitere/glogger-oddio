@@ -5,6 +5,10 @@ export interface ParsedSearchQuery {
    *  whole, a trailing `*` marks a prefix match. ChatHighlighted uses these
    *  (never the raw textWords) so `gorg*` and `"hello world"` highlight. */
   highlightTerms: string[]
+  /** Raw tokens exactly as they appear in the query (e.g. `gorg*`,
+   *  `"hello world"`). Filter chips display the normalized term but remove
+   *  using this, so removing a chip strips the whole original token. */
+  rawTokens: string[]
   sender?: string
   channel?: string
 }
@@ -54,14 +58,17 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   // (misplaced `*`, unbalanced quotes, operators) are still highlighted as
   // plain words so the LIKE-fallback results get marked too.
   const highlightTerms: string[] = []
+  const rawTokens: string[] = []
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
   while ((tok = tokenRe.exec(text)) !== null) {
     if (tok[1] !== undefined) {
+      rawTokens.push(`"${tok[1]}"`)
       const phrase = tok[1].trim()
       if (phrase) highlightTerms.push(phrase)
     } else {
       const word = tok[2]
+      rawTokens.push(word)
       const m = /^([^*]+)\*?$/.exec(word)
       if (m) {
         const stem = m[1].trim()
@@ -77,6 +84,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     text,
     textWords,
     highlightTerms,
+    rawTokens,
     ...(sender && { sender }),
     ...(channel && { channel }),
   }
