@@ -182,7 +182,7 @@ pub fn record_stall_prices(
         .unwrap_or_else(|| "Unknown".to_string());
     let observed_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     let mut inserted = 0usize;
     for entry in &entries {
@@ -236,7 +236,7 @@ pub fn update_stall_price_observation(
     stall_label: Option<String>,
     owner_name: Option<String>,
 ) -> Result<(), String> {
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
     let n = conn
         .execute(
             "UPDATE stall_price_observations
@@ -256,7 +256,7 @@ pub fn update_stall_price_observation(
 /// Delete one observation row.
 #[tauri::command]
 pub fn delete_stall_price_observation(db: State<'_, DbPool>, id: i64) -> Result<(), String> {
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
     conn.execute(
         "DELETE FROM stall_price_observations WHERE id = ?1",
         rusqlite::params![id],

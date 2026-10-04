@@ -338,7 +338,7 @@ fn ingest_shop_log_file(
 /// Gourmand import with the live path's emit contract
 /// (`gourmand-updated` with the imported count when n > 0).
 fn import_gourmand(db: &DbPool, content: &str, app: &AppHandle) -> Result<usize, String> {
-    let conn = db.get().map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database connection error: {e}"))?;
     let n = crate::db::gourmand_commands::import_gourmand_from_content(&conn, content)?;
     if n > 0 {
         app.emit("gourmand-updated", n).ok();
@@ -355,17 +355,32 @@ mod tests {
 
     /// Migrated in-memory DB wrapped in the app's pool type.
     fn pool() -> DbPool {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory().with_init(|conn| {
-            conn.execute_batch("PRAGMA foreign_keys=ON;")
-        });
-        let pool = r2d2::Pool::builder()
-            .max_size(2)
-            .build(manager)
+        // Shared-cache memory URI: both pools must hit the SAME in-memory DB
+        // (migrations run through `writes`; reads come through `reads`). A
+        // unique name per call keeps parallel tests from sharing one DB.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mk = || {
+            r2d2_sqlite::SqliteConnectionManager::file(format!(
+                "file:books_watcher_test_{n}?mode=memory&cache=shared"
+            ))
+            .with_init(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys=ON;")
+            })
+        };
+        let writes = r2d2::Pool::builder()
+            .max_size(1)
+            .build(mk())
             .expect("pool");
-        let conn = pool.get().expect("conn");
+        let reads = r2d2::Pool::builder()
+            .max_size(2)
+            .build(mk())
+            .expect("pool");
+        let conn = writes.get().expect("conn");
         run_migrations(&conn, None).expect("migrations");
         drop(conn);
-        pool
+        DbPool::from_pools(reads, writes)
     }
 
     // ── classify_book_file ────────────────────────────────────────
