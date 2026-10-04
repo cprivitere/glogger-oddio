@@ -24,8 +24,8 @@
       <!-- Active filter chips -->
       <div v-if="parsed.sender || parsed.channel || parsed.textWords.length > 0" class="flex gap-2 mt-2 flex-wrap">
         <span
-          v-for="word in parsed.highlightTerms.length > 0 ? parsed.highlightTerms : parsed.textWords"
-          :key="'text-' + word"
+          v-for="(word, i) in parsed.rawTokens.length > 0 ? parsed.rawTokens : parsed.textWords"
+          :key="'text-' + word + '-' + i"
           class="inline-flex items-center gap-1 px-2.5 py-1 bg-text-secondary/15 text-text-primary text-sm rounded-full"
         >
           {{ word }}
@@ -58,7 +58,7 @@
 
       <!-- Result count -->
       <div v-if="resultCount !== null" class="mt-2 text-xs text-text-muted">
-        {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} across all history
+        {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} {{ dateNav.activeDay.value ? `on ${dateNav.activeDay.value}` : 'across all history' }}
       </div>
     </div>
 
