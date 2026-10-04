@@ -47,11 +47,16 @@ pub async fn scan_chat_logs(
             },
         );
 
-        let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
-
+        // Probe the stored position with a READ connection and do the disk
+        // I/O + parsing BEFORE checking out the single writer, so a large
+        // backfill can't monopolize the write queue and block live ingest.
         let file_path_str = log_file.file_path.to_string_lossy().to_string();
-        let start_position = log_positions::get_position(&conn, &file_path_str)
-            .map_err(|e| format!("Failed to get log position: {e}"))?;
+        let start_position;
+        {
+            let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+            start_position = log_positions::get_position(&conn, &file_path_str)
+                .map_err(|e| format!("Failed to get log position: {e}"))?;
+        }
 
         let player_name = if start_position == 0 {
             chat_parser::extract_player_name(&log_file.file_path)
@@ -73,17 +78,20 @@ pub async fn scan_chat_logs(
             })
             .collect();
 
-        if !messages.is_empty() {
-            let inserted = chat_commands::insert_chat_messages(
+        // Writer held only for the short insert + position-update phase.
+        let inserted = if messages.is_empty() {
+            0
+        } else {
+            let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+            chat_commands::insert_chat_messages(
                 &conn,
                 &messages,
                 &log_file.file_name,
                 &excluded_channels,
             )
-            .map_err(|e| format!("Failed to insert messages: {e}"))?;
-            total_messages += inserted;
-        }
-
+            .map_err(|e| format!("Failed to insert messages: {e}"))?
+        };
+        total_messages += inserted;
         files_processed += 1;
 
         let metadata = serde_json::json!({
@@ -92,15 +100,18 @@ pub async fn scan_chat_logs(
         })
         .to_string();
 
-        log_positions::update_position(
-            &conn,
-            &file_path_str,
-            "chat",
-            new_position,
-            player_name.as_deref(),
-            Some(&metadata),
-        )
-        .map_err(|e| format!("Failed to update log position: {e}"))?;
+        {
+            let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+            log_positions::update_position(
+                &conn,
+                &file_path_str,
+                "chat",
+                new_position,
+                player_name.as_deref(),
+                Some(&metadata),
+            )
+            .map_err(|e| format!("Failed to update log position: {e}"))?;
+        }
     }
 
     // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent
@@ -147,11 +158,17 @@ pub async fn scan_chat_log_file(
         .ok_or("Invalid file name")?
         .to_string();
 
-    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
-
+    // Read + parse on a READ connection first; the writer is checked out
+    // only for the short insert + position-update phase so a large file
+    // backfill can't block live ingest behind disk I/O.
     let file_path_str = log_path.to_string_lossy().to_string();
-    let start_position = log_positions::get_position(&conn, &file_path_str)
-        .map_err(|e| format!("Failed to get log position: {e}"))?;
+    let (start_position, file_date) = {
+        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+        let pos = log_positions::get_position(&conn, &file_path_str)
+            .map_err(|e| format!("Failed to get log position: {e}"))?;
+        let parsed_name = chat_parser::parse_chat_log_filename(&file_name);
+        (pos, parsed_name)
+    };
 
     let player_name = if start_position == 0 {
         chat_parser::extract_player_name(&log_path)
@@ -172,6 +189,8 @@ pub async fn scan_chat_log_file(
         })
         .collect();
 
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+
     let mut messages_imported = 0;
     if !messages.is_empty() {
         messages_imported =
@@ -179,7 +198,6 @@ pub async fn scan_chat_log_file(
                 .map_err(|e| format!("Failed to insert messages: {e}"))?;
     }
 
-    let file_date = chat_parser::parse_chat_log_filename(&file_name);
     let metadata = file_date.map(|d| {
         serde_json::json!({
             "file_name": file_name,
@@ -370,11 +388,15 @@ pub async fn tail_chat_log(
         return Err(format!("Chat log file not found: {}", chat_log_file));
     }
 
-    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
-
+    // Read + parse on a READ connection first; the writer is checked out
+    // only for the short insert + position-update phase (tail runs every
+    // few seconds — it must never queue behind its own disk I/O).
     let file_path_str = log_path.to_string_lossy().to_string();
-    let start_position = log_positions::get_position(&conn, &file_path_str)
-        .map_err(|e| format!("Failed to get log position: {e}"))?;
+    let start_position = {
+        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+        log_positions::get_position(&conn, &file_path_str)
+            .map_err(|e| format!("Failed to get log position: {e}"))?
+    };
 
     let (messages, new_position) = chat_parser::read_chat_log(&log_path, start_position)
         .map_err(|e| format!("Failed to read chat log: {e}"))?;
@@ -404,6 +426,7 @@ pub async fn tail_chat_log(
         None
     };
 
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
     chat_commands::insert_chat_messages(&conn, &messages, file_name, &excluded_channels)
         .map_err(|e| format!("Failed to insert messages: {e}"))?;
 

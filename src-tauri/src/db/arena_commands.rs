@@ -296,7 +296,7 @@ pub fn backfill_from_chat_logs(
     }
 
     let mut conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     // Read files in name order so timestamps advance monotonically across the

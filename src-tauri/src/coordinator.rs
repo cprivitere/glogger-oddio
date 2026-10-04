@@ -2002,7 +2002,7 @@ impl DataIngestCoordinator {
             None => return,
         };
         let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2189,7 +2189,7 @@ impl DataIngestCoordinator {
             return;
         }
         let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2314,7 +2314,7 @@ impl DataIngestCoordinator {
         let primary = Self::extract_bind_field(content, "Primary Bind Location:");
         let secondary = Self::extract_bind_field(content, "Secondary Bind Location:");
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2368,7 +2368,7 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };

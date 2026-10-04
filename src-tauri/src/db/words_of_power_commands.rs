@@ -310,8 +310,10 @@ pub fn backfill_used_words_from_chat_logs(
     settings: &SettingsManager,
     db: &DbPool,
 ) -> Result<usize, String> {
+    // The loop deletes rows (delete_words_by_word) so this must be the
+    // dedicated write connection, not the read pool.
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let saved: Vec<String> = {
