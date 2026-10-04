@@ -269,7 +269,7 @@ pub async fn get_chat_messages_around_time(
     db_pool: State<'_, DbPool>,
 ) -> Result<Vec<chat_commands::ChatMessageRow>, String> {
     let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
-    let count = context_count.unwrap_or(25);
+    let count = context_count.unwrap_or(25).clamp(1, 250);
 
     chat_commands::get_messages_around_time(&conn, &anchor_time, channel.as_deref(), count)
         .map_err(|e| format!("Failed to get messages around time: {e}"))

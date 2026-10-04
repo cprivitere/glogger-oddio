@@ -107,7 +107,28 @@ async function loadAroundDay(day: string) {
     const channel = 'Nearby'
     const result = await fetchMessagesAroundTime(`${day} 12:00:00`, channel, 60)
     messages.value = result
-    hasMore.value = false
+    if (result.length === 0) {
+      hasMore.value = false
+      return
+    }
+    // Continue in-day paging from the newest loaded row (channel-filtered).
+    const youngest = result.reduce((a, b) => (a.timestamp > b.timestamp ? a : b))
+    const skip = await invoke<number>('count_chat_messages', {
+      channel,
+      startTime: `${day} 00:00:00`,
+      endTime: youngest.timestamp.slice(0, 19),
+    })
+    offset.value = skip - 1
+    const more = await invoke<ChatMessage[]>('get_chat_messages', {
+      channel,
+      startTime: `${day} 00:00:00`,
+      endTime: `${day} 23:59:59`,
+      limit: 1,
+      offset: offset.value + 1,
+      sortOrder: 'desc',
+    })
+    hasMore.value = more.length > 0
+    if (more.length === 0) offset.value = 0
   } catch (e) {
     console.error('Failed to load messages around day:', e)
     offset.value = 0
