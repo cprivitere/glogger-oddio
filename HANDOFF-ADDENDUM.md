@@ -33,3 +33,15 @@
 - No migration (Decision 1a): day-boundary filters scan; revisit at ~1M rows.
 - FTS `snippet()`/`highlight()` not used — full-message `<mark>` chosen instead.
 - Personal build (`npm run tauri:build:personal`) not run this session.
+
+## User-reported bug (fixed in `0c43f78`)
+
+**Symptom:** clicking the refresh icon in a chat view wiped the whole chat UI; no way to get it back.
+
+**Reconstruction (from dev-log artifact + DB):** the session log showed 8 `get_chat_messages` calls all bounded `2026-10-22 00:00:00 … 23:59:59` (a day with zero rows — the date input accepted it; messages exist only through `2026-10-04 02:39:40` UTC). With an empty result, the old empty-state branch (`No messages found`) replaced the whole list branch — and the date toolbar lived inside that list branch, so the picker/stepper/Back-to-Live vanished. Refresh/search/sort kept re-running the empty day-bounds query, so nothing ever brought the UI back.
+
+**Fixes:**
+1. Date toolbar moved OUT of the messages branch in `ChatMessageList.vue` — always rendered when `dateNav` prop present (loading/empty/loaded alike).
+2. Date input clamped to `min`/`max` of the play-day list (picker + typed-value clamp in `onDayInput`).
+3. All 8 views: refresh, search-debounce, sort-toggle, and chip-removal paths now route through `loadAroundDay(activeDay)` when a day filter is active — around-time returns context rows even on empty days, so the view never blanks.
+4. Latent bug found while fixing: `dayGroups` initialized each group's `day` to null and never assigned it, so multi-day headers never rendered. Now set on group creation (single-day windows still suppress headers).
