@@ -147,9 +147,6 @@ pub fn backfill_from_chat_logs(
     let entries = fs::read_dir(&dir).map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?;
 
     let mut inserted = 0usize;
-    // BEGIN IMMEDIATE: runs at startup alongside other backfills; a deferred
-    // tx that upgrades read→write on its first INSERT gets an instant
-    // SQLITE_BUSY that busy_timeout can't retry.
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
