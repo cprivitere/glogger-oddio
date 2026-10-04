@@ -2036,7 +2036,7 @@ impl DataIngestCoordinator {
         let Some((character, server)) = self.active_character_server() else {
             return;
         };
-        let _ = persist_book_content(
+        if let Err(e) = persist_book_content(
             &self.db_pool,
             &self.app_handle,
             &character,
@@ -2044,7 +2044,9 @@ impl DataIngestCoordinator {
             book_type,
             title,
             content,
-        );
+        ) {
+            eprintln!("[coordinator] Failed to persist book: {e}");
+        }
     }
 
     /// Parse the Gardening Almanac HTML content and persist structured events
@@ -2213,7 +2215,9 @@ impl DataIngestCoordinator {
             &server,
             book_type,
             content,
-        );
+        )
+        .map_err(|e| eprintln!("[coordinator] {e}"))
+        .ok();
     }
 
     // ── Milking timers ────────────────────────────────────────────
@@ -3152,7 +3156,9 @@ pub fn persist_book_content(
     content: &str,
 ) -> Result<(), String> {
     let dt = chrono::Utc::now().to_rfc3339();
-    let conn = db.get().map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
     conn.execute(
         "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -3161,7 +3167,7 @@ pub fn persist_book_content(
             captured_at = excluded.captured_at",
         rusqlite::params![character, server, book_type, title, content, dt],
     )
-    .ok();
+    .map_err(|e| format!("Failed to persist book: {e}"))?;
     app_handle
         .emit("game-state-updated", vec!["books"])
         .ok();
@@ -3178,38 +3184,30 @@ pub fn ingest_report_stats_content(
     server: &str,
     book_type: &str,
     content: &str,
-) {
+) -> Result<usize, String> {
     let stats = match book_type {
         "PlayerAge" => crate::report_stats::parse_player_age(content),
         "HelpScreen" => crate::report_stats::parse_behavior_report(content),
-        _ => return,
+        _ => return Ok(0),
     };
     if stats.is_empty() {
-        return;
+        return Ok(0);
     }
     let dt = chrono::Utc::now().to_rfc3339();
-    let conn = match db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[coordinator] Failed to persist report stats: {e}");
-            return;
-        }
-    };
-    match crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt) {
-        Ok(n) => {
-            startup_log!(
-                "[coordinator] Imported {} stats from {} report",
-                n,
-                book_type,
-            );
-            app_handle
-                .emit("game-state-updated", vec!["report_stats"])
-                .ok();
-        }
-        Err(e) => {
-            eprintln!("[coordinator] Failed to persist report stats: {e}");
-        }
-    }
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    let n = crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt)
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    startup_log!(
+        "[coordinator] Imported {} stats from {} report",
+        n,
+        book_type,
+    );
+    app_handle
+        .emit("game-state-updated", vec!["report_stats"])
+        .ok();
+    Ok(n)
 }
 
 /// Extract a named field value from teleportation status text.
