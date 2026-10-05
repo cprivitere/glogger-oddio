@@ -75,7 +75,9 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   //   3. star in any non-trailing position (leading / internal /
   //      repeated: `*go`, `go*rg`, `gorg**`)
   //   4. bare `*` token
-  //   5. FTS operator characters `()^:,+-` anywhere
+  //   5. FTS operator characters `()^:,+-` in BARE words (the backend's
+  //      word loop rejects them; inside a quoted phrase they are literal
+  //      content — `"foo-bar"` is a valid phrase)
   const tokens: { word: string, quoted: boolean, phrase: string }[] = []
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
@@ -101,7 +103,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
       if (w === '*') return true      // (4) bare star
       return /\*\S/.test(w) || w.includes('**') // internal/repeated/leading
     }) ||
-    /[()^:,+-]/.test(text) || // (5) FTS operator chars anywhere
+    tokens.some(t => !t.quoted && /[()^:,+-]/.test(t.word)) || // (5) operator chars in bare words only
     false
 
   const highlightTerms: string[] = []

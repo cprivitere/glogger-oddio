@@ -122,12 +122,44 @@ fn scan_books_dir(
         return;
     }
 
-    // Process oldest-to-newest: several imports overwrite current state
-    // (gourmand clears/replaces its table; stats/binds upsert values), so
-    // on the initial multi-file backfill an older report running last
-    // would leave stale state while every file is still marked seen.
-    // `read_dir` order is unspecified — sort by mtime explicitly.
-    to_process.sort_by_key(|(_, mtime)| *mtime);
+    // Process oldest-to-newest by REPORT TIMESTAMP, not mtime: several
+    // imports overwrite current state (gourmand clears/replaces its table;
+    // stats/binds upsert values), so an older report running last would
+    // leave stale state while every file is still marked seen. mtime is
+    // unreliable here — copying/restoring the Books directory rewrites
+    // mtimes, and equal mtimes leave `read_dir` order unspecified. The
+    // `SkillReport_YYMMDD_HHMMSS` filename suffix is the authoritative
+    // game timestamp (the gourmand latest-lookup already relies on
+    // filename order being chronological). Files without a parsable
+    // suffix sort after all timestamped ones (deterministic: bare name).
+    to_process.sort_by(|(path_a, _), (path_b, _)| {
+        let key = |path: &PathBuf| -> (bool, String) {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            // Take the last two underscore-delimited groups; a real
+            // timestamp is two digit-groups of 6 and 6 chars.
+            let groups: Vec<&str> = stem.split('_').collect();
+            if groups.len() >= 2 {
+                let d = groups[groups.len() - 2];
+                let t = groups[groups.len() - 1];
+                if d.len() == 6
+                    && t.len() == 6
+                    && d.chars().all(|c| c.is_ascii_digit())
+                    && t.chars().all(|c| c.is_ascii_digit())
+                {
+                    return (true, format!("{}{}", d, t));
+                }
+            }
+            (false, stem.to_string())
+        };
+        let (ts_a, key_a) = key(path_a);
+        let (ts_b, key_b) = key(path_b);
+        // Timestamped files sort by their (older-first) key; untimestamped
+        // ones sink to the end sorted by filename.
+        ts_a.cmp(&ts_b).then_with(|| key_a.cmp(&key_b))
+    });
 
     // Shared stall-ops lock instance (managed in lib.rs before the watcher
     // spawns) so shop-log writes serialize with live ingest and Clear — same

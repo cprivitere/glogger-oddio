@@ -611,8 +611,10 @@ impl DataIngestCoordinator {
                 if watcher.position_was_reset() {
                     // Truncation/rotation this cycle: the monotonic MAX guard
                     // would keep the stale larger offset — force the cursor
-                    // down, then clear the flag so the force runs once.
-                    log_positions::force_position(
+                    // down. Clear the flag ONLY after the force succeeds:
+                    // a discarded failure would leave the stale cursor in
+                    // place with no later poll retrying the reset.
+                    if log_positions::force_position(
                         &conn,
                         path.to_str().unwrap_or(""),
                         "player",
@@ -620,8 +622,14 @@ impl DataIngestCoordinator {
                         watcher.get_active_character(),
                         None,
                     )
-                    .ok();
-                    watcher.clear_position_reset();
+                    .is_ok()
+                    {
+                        watcher.clear_position_reset();
+                    } else {
+                        eprintln!(
+                            "[coordinator] Failed to persist rotation reset for Player.log; will retry next cycle"
+                        );
+                    }
                 }
             }
         }
@@ -640,7 +648,7 @@ impl DataIngestCoordinator {
             )
             .ok();
             if watcher.position_was_reset() {
-                log_positions::force_position(
+                if log_positions::force_position(
                     &conn,
                     &file_path_str,
                     "chat",
@@ -648,8 +656,15 @@ impl DataIngestCoordinator {
                     None,
                     Some(&metadata),
                 )
-                .ok();
-                watcher.clear_position_reset();
+                .is_ok()
+                {
+                    watcher.clear_position_reset();
+                } else {
+                    eprintln!(
+                        "[coordinator] Failed to persist rotation reset for {}; will retry next cycle",
+                        file_name
+                    );
+                }
             }
         }
     }
