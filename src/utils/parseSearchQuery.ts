@@ -1,10 +1,6 @@
 export interface ParsedSearchQuery {
   text: string
   textWords: string[]
-  /** Tokens mirroring the backend's FTS semantics: quoted phrases stay
-   *  whole, a trailing `*` marks a prefix match. ChatHighlighted uses these
-   *  (never the raw textWords) so `gorg*` and `"hello world"` highlight. */
-  highlightTerms: string[]
   /** Raw tokens exactly as they appear in the query (e.g. `gorg*`,
    *  `"hello world"`). Filter chips render these directly and remove
    *  using them, so removing a chip strips the whole original token. */
@@ -78,6 +74,10 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   //   5. FTS operator characters `()^:,+-` in BARE words (the backend's
   //      word loop rejects them; inside a quoted phrase they are literal
   //      content — `"foo-bar"` is a valid phrase)
+  //   6. a term (bare word — with any trailing `*` stripped, checked
+  //      BEFORE the star rules so `...*` also bails — or quoted phrase)
+  //      with NO alphanumeric character: unicode61 tokenizes it to zero
+  //      terms, making its MATCH clause silently vacuous
   const tokens: { word: string, quoted: boolean, phrase: string }[] = []
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
@@ -104,9 +104,17 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
       return /\*\S/.test(w) || w.includes('**') // internal/repeated/leading
     }) ||
     tokens.some(t => !t.quoted && /[()^:,+-]/.test(t.word)) || // (5) operator chars in bare words only
+    // (6) punctuation-only term: quoted phrase entirely non-alphanumeric,
+    // or a bare word whose `*`-stripped stem is entirely non-alphanumeric
+    // (`...*` bails exactly like the backend, which checks the word before
+    // star classification). `spam!!!`/`100%` contain alphanumerics → valid.
+    tokens.some(t =>
+      t.quoted
+        ? !!t.phrase && ![...t.phrase].some(c => /\p{L}|\p{N}/u.test(c))
+        : ![...t.word.replace(/\*+$/, '')].some(c => /\p{L}|\p{N}/u.test(c)) && t.word !== '*',
+    ) ||
     false
 
-  const highlightTerms: string[] = []
   const termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[] = []
   const rawTokens: string[] = []
 
@@ -114,7 +122,6 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     if (t.quoted) {
       rawTokens.push(t.word)
       if (t.phrase) {
-        highlightTerms.push(t.phrase)
         termKinds.push({ term: t.phrase, kind: anyInvalid ? 'literal' : 'phrase' })
       }
     } else {
@@ -123,11 +130,9 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
       const stem = m?.[1]?.trim() ?? ''
       if (stem) {
         const kind = anyInvalid ? 'literal' : (m && m[2]) ? 'prefix' : 'exact'
-        highlightTerms.push(stem)
         termKinds.push({ term: stem, kind })
       } else {
         // Bare `*` or a token made only of stars: literal
-        highlightTerms.push(t.word)
         termKinds.push({ term: t.word, kind: 'literal' })
       }
     }
@@ -136,7 +141,6 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   return {
     text,
     textWords,
-    highlightTerms,
     termKinds,
     rawTokens,
     ...(sender && { sender }),

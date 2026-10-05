@@ -149,11 +149,8 @@ pub async fn force_rebuild_cdn_tables(
     db: State<'_, DbPool>,
     cdn_state: State<'_, crate::cdn_commands::GameDataState>,
 ) -> Result<String, String> {
-    let mut conn = db
-        .get_write()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
-    // Get the current game data from memory
+    // Check the in-memory CDN data before touching the writer — a version-0
+    // bail must not queue behind (or hold) the single write connection.
     let data = cdn_state.read().await;
 
     if data.version == 0 {
@@ -162,6 +159,10 @@ pub async fn force_rebuild_cdn_tables(
                 .to_string(),
         );
     }
+
+    let mut conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
 
     // Persist to database (this clears and rebuilds CDN tables)
     crate::db::cdn_persistence::persist_cdn_data(&mut conn, &data)

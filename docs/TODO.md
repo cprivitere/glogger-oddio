@@ -28,7 +28,7 @@ These items are investigated but can't be resolved without new runtime captures 
 
 - [x] ~~Bug: rez counter not working~~ — **ROOT CAUSE FOUND 2026-10-03; FIX IMPLEMENTED**
   - The Action Emotes channel hypothesis was wrong: 22 `[Action Emotes]` lines reach the chat log today. The real gap: the game emits TWO rez phrasings — `<Caster> resuscitates <Target>` (parsed, populated the 78 historic rows) and `<Target> comes back to life!` (target-only, no caster named, UNPARSED). Sessions where the game uses the second phrasing left the counter silent.
-  - **Fixed:** `chat_resuscitate_parser.rs` now parses the second shape with `caster_name = "Unknown"` (3 new tests incl. real-log lines and a spaced-target case). "Top rezzers" stays caster-based; "times rezzed" counting is now complete.
+  - **Fixed:** `chat_resuscitate_parser.rs` now parses the second shape with `caster_name = "Unknown"` (3 new tests incl. real-log lines and a spaced-target case). "Top rezzers" stays caster-based; "times rezzed" counting is now complete for newly tailed sessions (historic backfill of the second phrasing is not retroactive — backfilled chat logs don't re-parse old lines).
 
 - [ ] Investigate detecting recipe learning without character.json import
   - **Investigation complete:** `ProcessUpdateRecipe(recipeId, completionCount)` and `ProcessLoadRecipes()` events already exist in `player_event_parser.rs`. `RecipeUpdated` events fire during gameplay when recipes are updated. Log events ARE generated — this feature is implementable without character.json dependency. Remaining work: wire coordinator handler to persist recipe state changes, update cook's helper to consume live events.

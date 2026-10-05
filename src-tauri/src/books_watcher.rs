@@ -48,22 +48,55 @@ pub fn spawn_books_watcher(
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(INITIAL_DELAY_SECS));
         let mut seen: HashMap<PathBuf, SystemTime> = HashMap::new();
+        // Consecutive-failure counter per (path, mtime); keyed by mtime so a
+        // rewrite of a failing file resets the count. Thread-local to the
+        // watcher loop, alongside `seen`.
+        let mut failures: HashMap<(PathBuf, SystemTime), u32> = HashMap::new();
 
         loop {
-            scan_books_dir(&settings, &db, &app, &mut seen);
+            scan_books_dir(&settings, &db, &app, &mut seen, &mut failures);
             std::thread::sleep(Duration::from_secs(SCAN_INTERVAL_SECS));
         }
     });
 }
 
+/// Consecutive failed attempts after which a book file is given up on (logged
+/// once, then recorded in `seen` so it stops retrying every tick). A
+/// deterministically broken file — permanently non-parseable content, a
+/// vanished encoding — would otherwise retry forever. Mid-write partial
+/// files are not dropped prematurely: a file rewritten after a failed
+/// attempt gets a fresh mtime, which resets its counter to zero, so the
+/// settle window is preserved.
+const GIVE_UP_AFTER_ATTEMPTS: u32 = 3;
+
+/// Errors that mean "not the file's fault, retrying makes sense": the DB
+/// write pool is momentarily contended, or shared game data hasn't loaded
+/// yet (hoplology's CDN gate). These never advance the give-up counter, so
+/// a file stuck behind transient contention waits indefinitely instead of
+/// being dropped after 3 × `SCAN_INTERVAL_SECS`.
+const TRANSIENT_ERROR_MARKERS: &[&str] = &[
+    "Database error:",          // DbPool::get_write r2d2 error prefix
+    "Game data not loaded yet", // coordinator::ingest_hoplology_content gate
+];
+
 /// One scan pass. First pass ingests everything on disk (backfill); later
 /// passes only touch files whose mtime changed. Removed files are dropped
 /// from the tracking map so it never grows unbounded.
+///
+/// Attribution caveat for the first-scan backfill: `<game_data>/Books/`
+/// accumulates exports across ALL alts, so the first scan ingests every file
+/// under whichever character is active at scan time. Stats reports
+/// (PlayerAge / HelpScreen) self-identify their owner and are skipped when it
+/// differs (see `stats_attribution_skip`); SkillReport files carry no owner in
+/// their content and CANNOT be attributed — their binds / hoplology / gourmand
+/// backfills land under the currently-active character. The live
+/// per-session path remains authoritative for SkillReport-derived state.
 fn scan_books_dir(
     settings: &SettingsManager,
     db: &DbPool,
     app: &AppHandle,
     seen: &mut HashMap<PathBuf, SystemTime>,
+    failures: &mut HashMap<(PathBuf, SystemTime), u32>,
 ) {
     let settings = settings.get();
     let Some(game_data_path) = opt_nonempty(settings.game_data_path.as_str()) else {
@@ -119,6 +152,7 @@ fn scan_books_dir(
         // Still prune: removed files must leave the map or it grows
         // unboundedly (and switching game_data_path strands every entry).
         seen.retain(|path, _| path.is_file() && path.starts_with(&books_dir));
+        failures.retain(|(path, _), _| path.is_file() && path.starts_with(&books_dir));
         return;
     }
 
@@ -177,24 +211,64 @@ fn scan_books_dir(
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        match std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| {
-                process_book_file(
-                    &path, &content, &character, &server, db, &ops_lock, app,
-                )
-                .ok()
-                .map(|note| (note, content))
-            }) {
-            Some((note, _)) => {
-                // Mark the file seen only after successful processing so a
-                // transient failure (pool exhaustion, missing managed state,
-                // unreadable file) retries on the next tick.
-                seen.insert(path.clone(), mtime);
-                eprintln!("[books-watcher] {file_name}: {note}");
+        // Mid-write guard: the game writes files incrementally. If mtime
+        // changed since the pre-read metadata captured above, the content
+        // read here may be truncated — skip this tick without
+        // marking seen or counting a failure, and retry next scan. Note the
+        // pre-read `mtime` is exactly what's stored in `seen` on success, so
+        // a file that stays stable through processing is recorded with its
+        // actual mtime.
+        if let Ok(current_mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+            if current_mtime != mtime {
+                // Mid-write: the content read here may be truncated —
+                // skip this tick without marking seen or counting a
+                // failure, and retry next scan.
+                continue;
             }
-            None => {
-                eprintln!("[books-watcher] {file_name}: failed this tick; will retry");
+        } else {
+            // Stat failed after the read succeeded (file deleted
+            // mid-tick) — skip, don't count a failure.
+            continue;
+        }
+
+        // Read bytes and decode lossily (log_watchers.rs precedent): book
+        // files should be UTF-8, but a bad byte must not turn this file into
+        // a permanent retry loop.
+        match std::fs::read(&path) {
+            // Deleted between the mid-write guard and the read: same class
+            // as the guard's own Err arm — skip, don't count a failure (a
+            // vanished path can never be retried into success, so counting
+            // it would only leak a failures entry).
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                record_failure(
+                    failures, seen, &path, mtime, &file_name,
+                    &format!("unreadable: {err}"),
+                );
+            }
+            Ok(bytes) => {
+                let content = String::from_utf8_lossy(&bytes);
+                match process_book_file(
+                    &path, &content, &character, &server, db, &ops_lock, app,
+                ) {
+                    Ok(note) => {
+                        // Success — including a stats-report attribution
+                        // skip for another alt: the file belongs to that
+                        // character and should never be ingested here, so
+                        // marking it seen (and re-skipping forever) is
+                        // correct. When the owning alt is active, the game
+                        // rewrites the file (new mtime) on report open and
+                        // it's ingested under the right character then.
+                        failures.remove(&(path.clone(), mtime));
+                        seen.insert(path.clone(), mtime);
+                        eprintln!("[books-watcher] {file_name}: {note}");
+                    }
+                    Err(err) => {
+                        record_failure(
+                            failures, seen, &path, mtime, &file_name, &err,
+                        );
+                    }
+                }
             }
         }
     }
@@ -204,6 +278,38 @@ fn scan_books_dir(
     // unreadable file is harmless — ingestion is idempotent and the
     // mtime tracking reprocesses it).
     seen.retain(|path, _| path.is_file() && path.starts_with(&books_dir));
+    failures.retain(|(path, _), _| path.is_file() && path.starts_with(&books_dir));
+}
+
+/// Count one failed attempt for a file — unless the error is transient
+/// (`TRANSIENT_ERROR_MARKERS`): those are logged at every retry but never
+/// advance the give-up counter, so momentary DB/CDN contention can't
+/// permanently drop a healthy file. After `GIVE_UP_AFTER_ATTEMPTS`
+/// consecutive non-transient failures, log a single giving-up line and mark
+/// the file seen at its current mtime so it stops retrying every tick.
+fn record_failure(
+    failures: &mut HashMap<(PathBuf, SystemTime), u32>,
+    seen: &mut HashMap<PathBuf, SystemTime>,
+    path: &Path,
+    mtime: SystemTime,
+    file_name: &str,
+    err: &str,
+) {
+    if TRANSIENT_ERROR_MARKERS.iter().any(|m| err.contains(m)) {
+        eprintln!("[books-watcher] {file_name}: {err} (transient; will retry)");
+        return;
+    }
+    let count = failures.entry((path.to_path_buf(), mtime)).or_default();
+    *count += 1;
+    if *count >= GIVE_UP_AFTER_ATTEMPTS {
+        eprintln!(
+            "[books-watcher] giving up on {file_name} after {count} consecutive failures: {err}"
+        );
+        seen.insert(path.to_path_buf(), mtime);
+        failures.remove(&(path.to_path_buf(), mtime));
+    } else {
+        eprintln!("[books-watcher] {file_name}: {err} (attempt {count}; will retry)");
+    }
 }
 
 /// `Some(s)` when the string is non-empty after trim, else `None`.
@@ -286,6 +392,12 @@ pub(crate) fn process_book_file(
     match kind {
         BookKind::ShopLog => ingest_shop_log_file(&title, &content, character, db, ops_lock, app),
         BookKind::SkillReport => {
+            // Attribution limitation: SkillReport content (binds, hoplology,
+            // gourmand) carries no character name, so first-scan backfills
+            // attribute to the currently-active character. With multiple
+            // alts in the same Books dir that can misattribute backfilled
+            // state; the live per-session path remains authoritative for
+            // SkillReport-derived state.
             let mut notes: Vec<String> = Vec::new();
 
             // Live path persists ALL SkillReports to game_state_books first,
@@ -319,6 +431,20 @@ pub(crate) fn process_book_file(
             Ok(notes.join(", "))
         }
         BookKind::Stats => {
+            // First-scan backfill attribution (finding #4): <game_data>/Books/
+            // accumulates PlayerAge/HelpScreen exports across ALL alts, and
+            // only PlayerAge/HelpScreen content self-identifies its owner via
+            // the leading "<Name> was created on ..." line. Skip files that
+            // belong to another character instead of misattributing their
+            // stats permanently. Returning Ok lets scan_books_dir mark the
+            // file seen; skipping forever is correct (the file belongs to
+            // someone else), and when the owning alt is active the game
+            // rewrites the file (new mtime) on report open, so it's ingested
+            // under the right character then. SkillReport files carry no
+            // owner in their content and cannot be filtered this way.
+            if let Some(note) = stats_attribution_skip(&content, character) {
+                return Ok(note);
+            }
             persist_book_content(db, app, character, server, &book_type, &title, &content)?;
             let n = ingest_report_stats_content(db, app, character, server, &book_type, &content)
                 .map_err(|e| format!("stats import failed: {e}"))?;
@@ -333,6 +459,39 @@ pub(crate) fn process_book_file(
             Ok("book upserted".to_string())
         }
     }
+}
+
+/// The character name self-identified by PlayerAge / HelpScreen content, from
+/// the leading "<Name> was created on ..." line. `None` when the line is
+/// missing or has no name before that phrase.
+fn stats_owner(content: &str) -> Option<String> {
+    let first_line = content.lines().next()?;
+    // A UTF-8 BOM prefix would glue itself to the name ('\u{feff}Zaxxas'),
+    // making every comparison miss and the file permanently skipped.
+    let first_line = first_line.strip_prefix('\u{feff}').unwrap_or(first_line);
+    let pos = first_line.find("was created on")?;
+    let name = first_line[..pos].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// `Some(skip note)` when PlayerAge / HelpScreen content self-identifies a
+/// different character than the one the watcher would attribute it to (see
+/// the `BookKind::Stats` branch for why skipping-and-marking-seen is
+/// correct). `None` keeps ingestion on the normal path.
+fn stats_attribution_skip(content: &str, character: &str) -> Option<String> {
+    let owner = stats_owner(content)?;
+    // eq_ignore_ascii_case only folds ASCII; game character names can
+    // contain non-ASCII letters whose case differs between the game's
+    // export and our settings string. Full Unicode case folding keeps the
+    // comparison an exact-name check rather than a byte check.
+    if owner.to_lowercase() == character.to_lowercase() {
+        return None;
+    }
+    Some(format!("skipped: belongs to {owner}; not {character}"))
 }
 
 /// Ingest a PlayerShopLog file into `stall_events` (mirrors the live
@@ -431,21 +590,39 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let mk = || {
+        // Mirrors db::init_pool: query_only on the READ pool only, so a test
+        // writing through pool.get() fails fast instead of silently racing
+        // the writer.
+        let mk = |query_only: bool| {
             r2d2_sqlite::SqliteConnectionManager::file(format!(
                 "file:books_watcher_test_{n}?mode=memory&cache=shared"
             ))
-            .with_init(|conn| {
-                conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .with_init(move |conn| {
+                if query_only {
+                    conn.execute_batch(
+                        "PRAGMA journal_mode=WAL;
+                             PRAGMA busy_timeout=5000;
+                             PRAGMA synchronous=NORMAL;
+                             PRAGMA foreign_keys=ON;
+                             PRAGMA query_only=ON;",
+                    )
+                } else {
+                    conn.execute_batch(
+                        "PRAGMA journal_mode=WAL;
+                             PRAGMA busy_timeout=5000;
+                             PRAGMA synchronous=NORMAL;
+                             PRAGMA foreign_keys=ON;",
+                    )
+                }
             })
         };
         let writes = r2d2::Pool::builder()
             .max_size(1)
-            .build(mk())
+            .build(mk(false))
             .expect("pool");
         let reads = r2d2::Pool::builder()
             .max_size(2)
-            .build(mk())
+            .build(mk(true))
             .expect("pool");
         let conn = writes.get().expect("conn");
         run_migrations(&conn, None).expect("migrations");
@@ -503,7 +680,7 @@ mod tests {
         // emits through it. Split: verify the SQL contract by calling the
         // same statement shape the helper runs. The emit path is exercised
         // by the live-path regression proof.
-        let conn = pool.get().unwrap();
+        let conn = pool.get_write().unwrap();
         for _ in 0..2 {
             let dt = chrono::Utc::now().to_rfc3339();
             conn.execute(
@@ -588,12 +765,117 @@ mod tests {
         assert!(count > 0);
     }
 
+    #[test]
+    fn stats_attribution_skips_other_characters_stats() {
+        // PlayerAge content owned by another alt: the helper must return the
+        // skip note, and process_book_file must return Ok WITHOUT
+        // persisting anything under the active character. AppHandle isn't
+        // constructible here, so verify the skip decision directly; the
+        // Stats branch returns Ok(note) before any persist call.
+        let content = "AnotherAlt was created on <b>Sat Jan 31 09:47:43 EST 2026</b>.\nYou have died <b>1,841</b> times.\n";
+        assert_eq!(
+            stats_attribution_skip(content, "TestChar"),
+            Some("skipped: belongs to AnotherAlt; not TestChar".to_string())
+        );
+        // Same owner (case-insensitive) → no skip; missing created-on line →
+        // no skip (nothing to attribute against).
+        assert_eq!(stats_attribution_skip(content, "anotheralt"), None);
+        assert_eq!(
+            stats_attribution_skip("TwinkleofToes was created on ...", "TwinkleofToes"),
+            None
+        );
+        assert_eq!(stats_attribution_skip("no attribution line here", "TestChar"), None);
+        // Case-insensitivity on the comparison only: the note preserves the
+        // content's own casing.
+        assert_eq!(
+            stats_attribution_skip(content, "testchar").as_deref(),
+            Some("skipped: belongs to AnotherAlt; not testchar")
+        );
+        // Non-ASCII case differences fold too (eq_ignore_ascii_case missed
+        // these; the game's export casing can differ from the settings
+        // string's).
+        assert_eq!(
+            stats_attribution_skip("Éclair was created on ...", "éclair"),
+            None
+        );
+        // A UTF-8 BOM before the name must not glue itself to it (would
+        // make every same-character file look foreign and get skipped
+        // forever).
+        assert_eq!(
+            stats_attribution_skip(
+                "\u{feff}AnotherAlt was created on <b>Sat Jan 31 09:47:43 EST 2026</b>.\n",
+                "AnotherAlt"
+            ),
+            None
+        );
+    }
+
+    // ── record_failure / retry semantics ─────────────────────────
+
+    fn failure_map() -> HashMap<(PathBuf, SystemTime), u32> {
+        HashMap::new()
+    }
+
+    fn seen_map() -> HashMap<PathBuf, SystemTime> {
+        HashMap::new()
+    }
+
+    fn mtime() -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+
+    #[test]
+    fn transient_errors_never_advance_give_up() {
+        let mut failures = failure_map();
+        let mut seen = seen_map();
+        let path = Path::new("C:/books/SkillReport_261001_212859.txt");
+        let m = mtime();
+        for i in 0..10 {
+            record_failure(&mut failures, &mut seen, path, m, "file.txt", "Database error: pool timed out");
+            assert!(seen.is_empty(), "transient failure {i} must not mark seen");
+        }
+        assert!(failures.is_empty(), "transient failures must not enter the map");
+        // Hoplology CDN gate marker too.
+        record_failure(&mut failures, &mut seen, path, m, "file.txt", "Game data not loaded yet; retrying later");
+        assert!(seen.is_empty() && failures.is_empty());
+    }
+
+    #[test]
+    fn deterministic_failures_give_up_and_mark_seen() {
+        let mut failures = failure_map();
+        let mut seen = seen_map();
+        let path = Path::new("C:/books/SkillReport_261001_212859.txt");
+        let m = mtime();
+        for count in 1..GIVE_UP_AFTER_ATTEMPTS {
+            record_failure(&mut failures, &mut seen, path, m, "file.txt", "no parseable shop-log entries");
+            assert!(seen.is_empty(), "not yet at threshold");
+            assert_eq!(failures.get(&(path.to_path_buf(), m)), Some(&count));
+        }
+        record_failure(&mut failures, &mut seen, path, m, "file.txt", "no parseable shop-log entries");
+        assert_eq!(seen.get(path), Some(&m), "threshold reached → marked seen");
+        assert!(!failures.contains_key(&(path.to_path_buf(), m)), "counter cleared");
+    }
+
+    #[test]
+    fn rewritten_file_mtime_resets_counter() {
+        // A rewrite after failed attempts gets a new mtime → fresh count.
+        let mut failures = failure_map();
+        let mut seen = seen_map();
+        let path = Path::new("C:/books/SkillReport_261001_212859.txt");
+        let m1 = SystemTime::UNIX_EPOCH;
+        let m2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        record_failure(&mut failures, &mut seen, path, m1, "file.txt", "no parseable shop-log entries");
+        record_failure(&mut failures, &mut seen, path, m2, "file.txt", "no parseable shop-log entries");
+        record_failure(&mut failures, &mut seen, path, m2, "file.txt", "no parseable shop-log entries");
+        assert!(seen.is_empty(), "2 failures at m2 + 1 at m1 never reaches 3");
+    }
+
     // ── gourmand ──────────────────────────────────────────────────
 
     #[test]
     fn gourmand_real_file_fixture_idempotent() {
         let pool = pool();
-        let conn = pool.get().unwrap();
+        let conn = pool.get_write().unwrap();
         let content =
             "Foods Consumed:\n\n  \"Meaty\" Tomato Soup: 7\n  8-Year Steamed Cake (HAS DAIRY): 1\n";
         let n1 = crate::db::gourmand_commands::import_gourmand_from_content(&conn, content).unwrap();

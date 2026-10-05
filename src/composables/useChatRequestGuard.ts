@@ -1,5 +1,3 @@
-import { ref } from 'vue'
-
 /**
  * Shared request-generation guard for chat view loaders.
  *
@@ -13,13 +11,10 @@ import { ref } from 'vue'
  */
 export function useChatRequestGuard() {
   let generation = 0
-  /** Counter snapshot for templates/tests to observe (reactive). */
-  const lastStarted = ref(0)
 
   /** Start a request: bumps the token, returns its generation number. */
   function begin(): number {
     generation += 1
-    lastStarted.value = generation
     return generation
   }
 
@@ -28,5 +23,5 @@ export function useChatRequestGuard() {
     return gen === generation
   }
 
-  return { begin, isCurrent, lastStarted }
+  return { begin, isCurrent }
 }

@@ -282,9 +282,16 @@ fn build_chat_where(
                     ));
                 }
                 None => {
-                    // FTS syntax error / unsupported operators: fall back to LIKE per word
+                    // FTS syntax error / unsupported operators: fall back to
+                    // LIKE per word. Each token is matched as a raw
+                    // substring — quotes included, so a phrase the FTS
+                    // parser rejected as zero-token (`"!!!"`) still finds
+                    // rows containing `spam!!!` exactly as typed.
                     for word in text.split_whitespace() {
-                        let clean: String = word.chars().filter(|c| *c != '%' && *c != '_').collect();
+                        let clean: String = word
+                            .chars()
+                            .filter(|c| *c != '%' && *c != '_' && *c != '"')
+                            .collect();
                         if !clean.is_empty() {
                             conditions.push(format!("cm.message LIKE ?{}", param_idx));
                             params.push(Box::new(format!("%{}%", clean)));
@@ -420,6 +427,14 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
             }
             let phrase = phrase.trim();
             if !phrase.is_empty() {
+                // unicode61 tokenizes punctuation-only content to ZERO terms,
+                // so MATCH '"!!!"' is silently vacuous in an FTS5 ANDed chain
+                // (matches nothing, even in rows containing `spam!!!`). Treat
+                // such a phrase as malformed and let the caller fall back to
+                // LIKE substring matching, which does find `spam!!!`.
+                if !phrase.chars().any(|c| c.is_alphanumeric()) {
+                    return None;
+                }
                 parts.push(format!("\"{}\"", phrase.replace('"', "")));
             }
             if !closed {
@@ -469,6 +484,12 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
                     return None; // bare `*` is an FTS syntax error
                 }
                 continue;
+            }
+            // Same zero-token hazard as the phrase branch: a word like `...`
+            // (checked BEFORE the star classification, so `...*` also bails)
+            // tokenizes to nothing and its MATCH clause is silently vacuous.
+            if !word.chars().any(|c| c.is_alphanumeric()) {
+                return None;
             }
             if saw_star && star_ended_word {
                 parts.push(format!("\"{}\"*", word));
@@ -939,6 +960,26 @@ mod tests {
     }
 
     #[test]
+    fn test_build_fts_match_expr_rejects_punctuation_only_terms() {
+        // unicode61 tokenizes punctuation-only content to ZERO terms, so
+        // MATCH '"!!!"' would be silently vacuous in an FTS5 ANDed chain
+        // (matches nothing even in rows containing `spam!!!`). Any term with
+        // no alphanumeric character marks the WHOLE query malformed → None
+        // ⇒ LIKE fallback, which does find `spam!!!`.
+        assert!(build_fts_match_expr("!!!").is_none());
+        assert!(build_fts_match_expr("...").is_none());
+        assert!(build_fts_match_expr("...*").is_none()); // punctuation stem + prefix star
+        assert!(build_fts_match_expr("\"???\"").is_none());
+        // Whole-query bail: a valid word next to a punctuation-only one.
+        assert!(build_fts_match_expr("hello !!!").is_none());
+        // Terms CONTAINING alphanumerics stay valid despite punctuation.
+        let expr = build_fts_match_expr("\"spam!!!\"").unwrap();
+        assert_eq!(expr, r#""spam!!!""#);
+        let expr = build_fts_match_expr("100%").unwrap();
+        assert_eq!(expr, r#""100%""#);
+    }
+
+    #[test]
     fn test_build_fts_match_expr_rejects_fts_syntax() {
         assert!(build_fts_match_expr("NEAR(a b, 5)").is_none());
         assert!(build_fts_match_expr("message:hello").is_none());
@@ -1074,6 +1115,26 @@ mod tests {
 
         // Parens are FTS syntax → LIKE fallback over the raw text
         let messages = get_chat_messages(&conn, &filter_with(Some("(one)"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_fts_punct_only_phrase_like_fallback_finds_raw_text() {
+        // unicode61 tokenizes punctuation-only content to ZERO terms, so
+        // MATCH '"!!!"' is silently vacuous in an ANDed chain. The whole
+        // query is rejected → LIKE fallback. The fallback strips quotes so
+        // the raw substring `!!!` is what matches the row's `spam!!!`.
+        let conn = setup();
+        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "great spam!!! truly");
+        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "nothing here");
+
+        let messages = get_chat_messages(&conn, &filter_with(Some("\"!!!\""))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+
+        // Bare punctuation word takes the same path.
+        let messages = get_chat_messages(&conn, &filter_with(Some("!!!"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
     }

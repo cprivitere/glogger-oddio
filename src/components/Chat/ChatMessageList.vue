@@ -322,4 +322,14 @@ watch(() => props.messages.length, async () => {
     highlightEl.value?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
 })
+
+// Day jumps load a new message window, but the scroll container keeps its
+// old position. Reset to the top of the new window — correct for BOTH sort
+// orders (desc = newest of the day, asc = oldest of the day). `jumpToDay(null)`
+// ("Back to Live") also changes activeDay, so it gets the same reset.
+watch(() => props.dateNav?.activeDay.value, async () => {
+  if (!props.dateNav || !messagesContainer.value) return
+  await nextTick()
+  messagesContainer.value.scrollTop = 0
+})
 </script>

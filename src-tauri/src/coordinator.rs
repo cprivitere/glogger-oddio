@@ -120,16 +120,17 @@ pub struct DataIngestCoordinator {
     /// Casino arena narration tracker — resolves Kuzavek's `[NPC Chatter]`
     /// intro/result lines into completed matches for the Arena widget.
     arena_tracker: crate::arena_parser::ArenaTracker,
-    /// Rez dedup: last persisted successful rez (target, timestamp) per chat
-    /// batch. The game emits "X resuscitates Y" and "Y comes back to life!"
-    /// in different contexts; if both ever fire for the same rez (same
-    /// target, seconds apart) only the first row is kept. A SET of
-    /// (target, minute) keys rather than a single tuple: two rezzes of
-    /// different targets can interleave within a minute
-    /// (`rez A`, `rez B`, `A back`, `B back`), and a single-tuple guard
-    /// would miss the second pair because the last target isn't B.
-    /// Pruned to a bounded window below so it never grows unbounded.
-    last_rez_dedup: std::collections::HashSet<(String, String)>,
+    /// Rez dedup: last persisted successful-rez timestamp per target. The
+    /// game emits "X resuscitates Y" and "Y comes back to life!" in
+    /// different contexts; if both ever fire for the same rez (same
+    /// target, seconds apart) only the first row is kept. Keyed PER
+    /// TARGET (not a single last-tuple): interleaved rezzes of different
+    /// targets within the window each still dedup (`rez A`, `rez B`,
+    /// `A back`, `B back`). Timestamps are compared with a rolling
+    /// 30-second window (`rez_within_dedup_window`), not minute buckets —
+    /// a pair straddling a minute boundary is still one rez. Pruned to a
+    /// bounded window below so it never grows unbounded.
+    last_rez_dedup: std::collections::HashMap<String, String>,
 }
 
 impl DataIngestCoordinator {
@@ -173,7 +174,7 @@ impl DataIngestCoordinator {
             pending_cow_interaction: None,
             recent_kills: std::collections::HashMap::new(),
             arena_tracker: crate::arena_parser::ArenaTracker::new(),
-            last_rez_dedup: std::collections::HashSet::new(),
+            last_rez_dedup: std::collections::HashMap::new(),
         })
     }
 
@@ -271,6 +272,28 @@ impl DataIngestCoordinator {
                 if meta.len() < position {
                     startup_log!("Player.log was rotated (size {} < saved position {}), starting from beginning",
                         meta.len(), position);
+                    // Persist the reset NOW: update_position's monotonic MAX
+                    // guard would keep the stale larger cursor forever, so
+                    // every subsequent launch would re-detect the rotation,
+                    // re-parse Player.log from 0, and re-insert non-idempotent
+                    // catch-up rows (corpse_extracts, item_transactions)
+                    // until the new file outgrows the stale offset. The
+                    // watcher built below is fresh (position_reset = false),
+                    // so no later save cycle can force this cursor down —
+                    // this is the only site that can persist the reset.
+                    let wconn = self
+                        .db_pool
+                        .get_write()
+                        .map_err(|e| format!("Database error: {}", e))?;
+                    log_positions::force_position(
+                        &wconn,
+                        player_log_path.to_str().unwrap_or(""),
+                        "player",
+                        0,
+                        saved_character.as_deref(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to force-save rotated position: {}", e))?;
                     position = 0;
                 }
             }
@@ -1480,37 +1503,37 @@ impl DataIngestCoordinator {
                     if let Some(rez_event) = parse_resuscitate_message(&msg) {
                         // Dedup guard: if the game emits both phrasings for
                         // one rez ("X resuscitates Y" + "Y comes back to
-                        // life!" within 30s of each other), persist only the
-                        // first. Same-target + same-minute timestamps are the
-                        // best available identity without a session id.
-                        // Keys live in a SET so interleaved rezzes of
-                        // different targets within one minute each still
-                        // dedup (a single last-target guard would miss the
-                        // second pair). Old keys (>= 2 minutes ago) are
-                        // pruned to bound memory.
+                        // life!" within ~30s of each other), persist only the
+                        // first. Identity = target + a rolling 30-second
+                        // window since the last persisted rez of that target
+                        // — NOT minute buckets, which double-count pairs
+                        // straddling a minute boundary. Keyed per target so
+                        // interleaved rezzes of different targets each
+                        // dedup independently. Old targets are pruned to
+                        // bound memory.
                         let dup_key = match &rez_event {
                             crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } => {
-                                Some((target_name.clone(), timestamp.get(..16).unwrap_or(timestamp).to_string()))
+                                Some((target_name.clone(), timestamp.clone()))
                             }
                             _ => None,
                         };
                         let is_duplicate = dup_key
                             .as_ref()
-                            .map(|key| self.last_rez_dedup.contains(key))
+                            .map(|(target, ts)| {
+                                self.last_rez_dedup
+                                    .get(target)
+                                    .map(|prev| rez_within_dedup_window(prev, ts))
+                                    .unwrap_or(false)
+                            })
                             .unwrap_or(false);
 
-                        // Prune stale keys: a (target, minute) from two
-                        // minutes ago can't dedup anything anymore — the
-                        // pair, if any, has long since arrived.
-                        if let Some((_, minute)) = &dup_key {
-                            if let Ok(minute_ts) = chrono::NaiveDateTime::parse_from_str(
-                                &format!("{}:00", minute), "%Y-%m-%d %H:%M:%S",
-                            ) {
-                                let cutoff = (minute_ts - chrono::Duration::minutes(2))
-                                    .format("%Y-%m-%d %H:%M:%S")
-                                    .to_string();
-                                self.last_rez_dedup.retain(|(_, m)| m.as_str() >= cutoff.as_str());
-                            }
+                        // Prune stale entries: keep a target only while the
+                        // current event still falls inside its dedup window
+                        // — once the window passes, the paired line (if any)
+                        // has long since arrived and the entry is dead.
+                        if let Some((_, ts)) = &dup_key {
+                            self.last_rez_dedup
+                                .retain(|_, prev| rez_within_dedup_window(prev, ts));
                         }
 
                         if is_duplicate {
@@ -1521,11 +1544,11 @@ impl DataIngestCoordinator {
                         } else {
                             if let Err(e) = self.persist_resuscitate_event(&rez_event) {
                                 eprintln!("Failed to persist resuscitate event: {}", e);
-                            } else if let Some(key) = dup_key {
+                            } else if let Some((target, ts)) = dup_key {
                                 // Arm the dedup guard only AFTER a successful
                                 // persist: if the insert fails, the paired
                                 // line must still be able to produce a row.
-                                self.last_rez_dedup.insert(key);
+                                self.last_rez_dedup.insert(target, ts);
                             }
                             self.app_handle
                                 .emit("character-resuscitated", &rez_event)
@@ -3384,18 +3407,44 @@ pub fn ingest_hoplology_content(
     server: &str,
     content: &str,
 ) -> Result<usize, String> {
+    // CDN data MUST be loaded before backfilling: the dedup key is the
+    // (CDN-resolved) base item name, so a report ingested before
+    // `init_game_data` swaps the real data in would store raw crafted
+    // names ("Hailin' Thorian Kilt of Deathspark") under a different
+    // UNIQUE key than the same item's base name ("Thorian Kilt") —
+    // permanently polluting the to-study list with rows the widget can
+    // never reconcile. The Books watcher treats Err as retry-later (and
+    // this error as transient — it never trips the give-up counter), so
+    // the window self-heals once the CDN load lands, however long that
+    // takes. (The live path's per-open dispatch has the same latency but
+    // re-fires on every book open; the watcher is one-shot per mtime,
+    // making a silent fallback permanent there — hence the hard gate
+    // rather than best-effort.)
+    // The read guard is held for the WHOLE function: base-name resolution
+    // happens per line below, and dropping the guard after the emptiness
+    // check would reopen a window where a concurrent refresh (holding the
+    // write lock) makes the later `try_read().ok()` fail and silently
+    // fall back to raw crafted names — the exact pollution this gate
+    // exists to prevent.
+    let game_data = game_data
+        .try_read()
+        .map_err(|_| "Game data not loaded yet; retrying later".to_string())?;
+    if game_data.items.is_empty() {
+        return Err("Game data not loaded yet; retrying later".to_string());
+    }
+
     // Inserts MUST run on the writer connection: the read pool is
     // PRAGMA query_only, so `get()` here silently dropped every study
     // row. Failures propagate so the Books watcher can retry the file.
+    // Taken AFTER the game-data gate: a DB error is transient (never
+    // trips the watcher's give-up counter) the same as a not-loaded-yet
+    // gate error.
     let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     // Use current wall-clock time as the "first seen" timestamp for
     // report-backfilled items (the player.log timestamp is just HH:MM:SS
     // which isn't a valid datetime).
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-    // Try to acquire CDN data for base-name resolution
-    let game_data = game_data.try_read().ok();
 
     let mut inserted = 0usize;
     // Normalized content (real newlines) — one entry per line
@@ -3408,8 +3457,7 @@ pub fn ingest_hoplology_content(
         }
         // Resolve to base equipment name if CDN data is available
         let base_name = game_data
-            .as_ref()
-            .and_then(|gd| gd.find_equipment_base_name(trimmed))
+            .find_equipment_base_name(trimmed)
             .unwrap_or_else(|| trimmed.to_string());
 
         match crate::db::hoplology_commands::insert_hoplology_study_from_report(
@@ -3527,48 +3575,64 @@ mod loadout_tests {
 }
 
 
-/// True when two chat timestamps fall in the same 60-second bucket
-/// (`"YYYY-MM-DD HH:MM:SS"` strings). The dedup guard now keys off
-/// `timestamp[..16]` directly; this helper is kept for the semantics
-/// tests below.
-#[cfg(test)]
-fn same_minute(a: &str, b: &str) -> bool {
-    a.get(..16) == b.get(..16) && a.len() >= 16 && b.len() >= 16
+/// True when `later` falls within the rez-dedup window of `earlier`
+/// (`"YYYY-MM-DD HH:MM:SS"` UTC strings, zero-padded so lexicographic
+/// order equals chronological order). The game emits both rez phrasings
+/// for one event seconds apart — but never instantly, so the window
+/// covers the pair while staying far below any plausible re-rez cooldown.
+/// Malformed timestamps never match (fail-open: the event is persisted).
+pub(crate) fn rez_within_dedup_window(earlier: &str, later: &str) -> bool {
+    const WINDOW: chrono::Duration = chrono::Duration::seconds(30);
+    match (
+        chrono::NaiveDateTime::parse_from_str(earlier, "%Y-%m-%d %H:%M:%S"),
+        chrono::NaiveDateTime::parse_from_str(later, "%Y-%m-%d %H:%M:%S"),
+    ) {
+        (Ok(prev), Ok(cur)) => {
+            // A cursor moving backward (clock skew, out-of-order replay)
+            // can't be a dup of itself — only forward progress within the
+            // window suppresses.
+            (cur - prev).ge(&chrono::Duration::zero()) && (cur - prev) <= WINDOW
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod rez_dedup_tests {
-    use super::same_minute;
+    use super::rez_within_dedup_window as within;
 
     #[test]
-    fn same_minute_pairs() {
-        // Pair from a single rez: both phrasings share the minute.
-        assert!(same_minute("2026-10-04 12:34:56", "2026-10-04 12:34:59"));
-        // Legitimate distinct rez later in the same hour is NOT a dup.
-        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-04 12:35:10"));
-        // Different day/hour entirely.
-        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-05 12:34:56"));
-        // Minute boundary: :59 vs next minute :00.
-        assert!(!same_minute("2026-10-04 12:34:59", "2026-10-04 12:35:00"));
-        // Malformed/short timestamps never match (guards the len check).
-        assert!(!same_minute("2026-10-04", "2026-10-04 12:34:56"));
-        assert!(!same_minute("", "2026-10-04 12:34:56"));
+    fn paired_phrasing_window() {
+        // Pair from a single rez: seconds apart → suppressed.
+        assert!(within("2026-10-04 12:34:56", "2026-10-04 12:34:59"));
+        // Exactly at the window edge (30s) is still within it.
+        assert!(within("2026-10-04 12:34:56", "2026-10-04 12:35:26"));
     }
 
     #[test]
-    fn dedup_window_semantics() {
-        // The coordinator guard: `target_name == prev_target &&
-        // same_minute(timestamp, prev_ts)`. Same target + same minute =>
-        // suppressed. Different target in the same minute => kept.
-        let prev = ("Bob".to_string(), "2026-10-04 12:34:56".to_string());
-        let dup_same_target = "Bob".to_string() == prev.0
-            && same_minute("2026-10-04 12:34:57", &prev.1);
-        let distinct_target_same_minute =
-            "Carol".to_string() == prev.0 && same_minute("2026-10-04 12:34:57", &prev.1);
-        let same_target_next_minute =
-            "Bob".to_string() == prev.0 && same_minute("2026-10-04 12:35:30", &prev.1);
-        assert!(dup_same_target); // paired phrasing — suppressed
-        assert!(!distinct_target_same_minute); // two real rezzes — both kept
-        assert!(!same_target_next_minute); // legit later rez — kept
+    fn boundary_straddle_is_one_rez() {
+        // Regression: minute buckets suppressed these; the rolling window
+        // must keep treating a :59→:01 straddle as one rez.
+        assert!(within("2026-10-04 12:34:59", "2026-10-04 12:35:01"));
+        assert!(within("2026-10-04 23:59:59", "2026-10-05 00:00:10"));
+    }
+
+    #[test]
+    fn legitimate_re_rez_is_kept() {
+        // A real second rez of the same target is outside the window.
+        assert!(!within("2026-10-04 12:34:56", "2026-10-04 12:35:27"));
+        assert!(!within("2026-10-04 12:34:56", "2026-10-04 12:35:31"));
+    }
+
+    #[test]
+    fn distinct_events_and_malformed() {
+        // Different day/hour entirely.
+        assert!(!within("2026-10-04 12:34:56", "2026-10-05 12:34:56"));
+        // Backward timestamps can't dedup (out-of-order replay, clock skew).
+        assert!(!within("2026-10-04 12:35:00", "2026-10-04 12:34:59"));
+        // Malformed/short timestamps never match (fail-open).
+        assert!(!within("2026-10-04", "2026-10-04 12:34:56"));
+        assert!(!within("", "2026-10-04 12:34:56"));
+        assert!(!within("garbage", "2026-10-04 12:34:56"));
     }
 }

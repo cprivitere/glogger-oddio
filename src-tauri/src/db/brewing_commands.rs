@@ -191,9 +191,21 @@ pub async fn scan_snapshot_for_brewing_discoveries(
     db: State<'_, DbPool>,
     game_data: State<'_, GameDataState>,
 ) -> Result<BrewingScanResult, String> {
-    let data = game_data.read().await;
+    // Phase 1: read the snapshot row on a read connection.
+    let (character, raw_json, timestamp) = {
+        let conn = db.get().map_err(|e| format!("DB error: {e}"))?;
+        read_snapshot_row(&conn, snapshot_id)?
+    };
+
+    // Phase 2: parse + resolve — the game-data guard is held only for this.
+    let items = {
+        let data = game_data.read().await;
+        snapshot_brewing_items(&character, &raw_json, &data)?
+    };
+
+    // Phase 3: writer only around the upserts.
     let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
-    scan_snapshot_internal(snapshot_id, &conn, &data)
+    record_brewing_items(&conn, &character, &timestamp, &items)
 }
 
 // ── Query discoveries ───────────────────────────────────────────────────────
@@ -272,34 +284,56 @@ pub async fn scan_all_snapshots_for_brewing(
     db: State<'_, DbPool>,
     game_data: State<'_, GameDataState>,
 ) -> Result<BrewingScanResult, String> {
-    let data = game_data.read().await;
-    let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
+    // Phase 1: read every snapshot row on a read connection, oldest first.
+    let snapshots: Vec<(String, String, String)> = {
+        let conn = db.get().map_err(|e| format!("DB error: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT character_name, raw_json, snapshot_timestamp
+                 FROM character_item_snapshots
+                 WHERE character_name = ?1
+                 ORDER BY snapshot_timestamp ASC",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+        let rows = stmt
+            .query_map(params![character], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        drop(stmt);
+        rows
+    };
 
-    // Get all snapshot IDs for this character
-    let mut stmt = conn
-        .prepare(
-            "SELECT id FROM character_item_snapshots WHERE character_name = ?1 ORDER BY snapshot_timestamp ASC",
-        )
-        .map_err(|e| format!("Query error: {e}"))?;
+    // Phase 2: parse each snapshot — no connection held. The game-data read
+    // guard is taken once for the whole parse loop (sync, no awaits inside).
+    let parsed: Vec<(String, String, Vec<BrewingItem>)> = {
+        let data = game_data.read().await;
+        let mut out = Vec::with_capacity(snapshots.len());
+        for (character_name, raw_json, timestamp) in snapshots {
+            let items = snapshot_brewing_items(&character_name, &raw_json, &data)?;
+            out.push((character_name, timestamp, items));
+        }
+        out
+    };
 
-    let snapshot_ids: Vec<i64> = stmt
-        .query_map(params![character], |row| row.get(0))
-        .map_err(|e| format!("Query error: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    drop(stmt);
+    // Phase 3: one writer checkout, one transaction over all backfills.
+    let mut conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     let mut total_new = 0u32;
     let mut total_updated = 0u32;
     let mut total_items = 0u32;
-
-    for snapshot_id in snapshot_ids {
-        let result = scan_snapshot_internal(snapshot_id, &conn, &data)?;
+    for (character_name, timestamp, items) in &parsed {
+        let result = record_brewing_items(&*tx, character_name, timestamp, items)?;
         total_new += result.new_discoveries;
         total_updated += result.updated_discoveries;
         total_items += result.total_brewing_items;
     }
+    tx.commit().map_err(|e| format!("Commit error: {e}"))?;
 
     Ok(BrewingScanResult {
         new_discoveries: total_new,
@@ -308,31 +342,51 @@ pub async fn scan_all_snapshots_for_brewing(
     })
 }
 
-/// Internal scan logic shared between single-snapshot and bulk-scan commands.
-fn scan_snapshot_internal(
-    snapshot_id: i64,
-    conn: &rusqlite::Connection,
-    data: &crate::game_data::GameData,
-) -> Result<BrewingScanResult, String> {
-    // 1. Get snapshot metadata + raw JSON
-    let (character, raw_json, timestamp): (String, String, String) = conn
-        .query_row(
-            "SELECT character_name, raw_json, snapshot_timestamp FROM character_item_snapshots WHERE id = ?1",
-            params![snapshot_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|e| format!("Snapshot not found: {e}"))?;
+/// One brewing-relevant item parsed from a snapshot, ready to upsert.
+/// `power: None` means the item still counts toward `total_brewing_items`
+/// but had no resolvable TSys power, so no row is written (matches the
+/// original combined scan's skip-after-count behavior).
+struct BrewingItem {
+    recipe_id: u32,
+    ing_ids_json: String,
+    power: Option<String>,
+    power_tier: i64,
+    effect_label: Option<String>,
+    race_restriction: Option<String>,
+    item_name: String,
+}
 
-    // 2. Parse raw JSON
+/// Fetch a snapshot's (character_name, raw_json, snapshot_timestamp) row.
+/// Read-side helper — takes any connection, use `db.get()` for scans.
+fn read_snapshot_row(
+    conn: &rusqlite::Connection,
+    snapshot_id: i64,
+) -> Result<(String, String, String), String> {
+    conn.query_row(
+        "SELECT character_name, raw_json, snapshot_timestamp FROM character_item_snapshots WHERE id = ?1",
+        params![snapshot_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|e| format!("Snapshot not found: {e}"))
+}
+
+/// Pure parse + resolve: turn a snapshot's raw JSON into the brewing items it
+/// contains. No connection — this runs before the writer is checked out so
+/// JSON parsing and game-data lookups never hold the sole write connection.
+fn snapshot_brewing_items(
+    character: &str,
+    raw_json: &str,
+    data: &crate::game_data::GameData,
+) -> Result<Vec<BrewingItem>, String> {
     let report: Value =
-        serde_json::from_str(&raw_json).map_err(|e| format!("Failed to parse JSON: {e}"))?;
+        serde_json::from_str(raw_json).map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
     let items = match report.get("Items").and_then(|v| v.as_array()) {
         Some(arr) => arr,
-        None => return Ok(BrewingScanResult { new_discoveries: 0, updated_discoveries: 0, total_brewing_items: 0 }),
+        None => return Ok(Vec::new()),
     };
 
-    // 3. Build result_item_id → recipe mapping
+    // Build result_item_id → recipe mapping
     let mut result_to_recipe: std::collections::HashMap<u32, &crate::game_data::brewing::BrewingRecipe> =
         std::collections::HashMap::new();
     for recipe in &data.brewing_recipes {
@@ -341,22 +395,7 @@ fn scan_snapshot_internal(
         }
     }
 
-    // 4. Scan and insert
-    let mut new_discoveries = 0u32;
-    let mut updated_discoveries = 0u32;
-    let mut total_brewing_items = 0u32;
-
-    let mut insert_stmt = conn
-        .prepare(
-            "INSERT INTO brewing_discoveries (
-                character, recipe_id, ingredient_ids, power, power_tier,
-                effect_label, race_restriction, item_name, first_seen_at, last_seen_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-             ON CONFLICT(character, recipe_id, ingredient_ids) DO UPDATE SET
-                last_seen_at = ?9",
-        )
-        .map_err(|e| format!("Failed to prepare insert: {e}"))?;
-
+    let mut out = Vec::new();
     for item in items {
         let ingredient_ids = match item.get("IngredientItemTypeIds").and_then(|v| v.as_array()) {
             Some(arr) => arr,
@@ -373,7 +412,7 @@ fn scan_snapshot_internal(
 
         // Only count items crafted by this character — skip other players' brews
         let crafter = item.get("Crafter").and_then(|v| v.as_str()).unwrap_or("");
-        if !crafter.eq_ignore_ascii_case(&character) {
+        if !crafter.eq_ignore_ascii_case(character) {
             continue;
         }
 
@@ -382,8 +421,6 @@ fn scan_snapshot_internal(
             None => continue,
         };
 
-        total_brewing_items += 1;
-
         let mut ing_ids: Vec<u32> = ingredient_ids
             .iter()
             .filter_map(|v| v.as_u64().map(|n| n as u32))
@@ -391,10 +428,7 @@ fn scan_snapshot_internal(
         ing_ids.sort();
         let ing_ids_json = serde_json::to_string(&ing_ids).unwrap_or_default();
 
-        let power = match tsys_powers[0].get("Power").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => continue,
-        };
+        let power = tsys_powers[0].get("Power").and_then(|v| v.as_str()).map(String::from);
         let power_tier = tsys_powers[0]
             .get("Tier")
             .and_then(|v| v.as_i64())
@@ -407,19 +441,61 @@ fn scan_snapshot_internal(
             .map(|i| i.name.as_str())
             .unwrap_or("");
 
-        let effect_label = extract_effect_label(item_name, base_name);
-        let race_restriction = detect_race_restriction(power);
+        let race_restriction = power.as_deref().and_then(detect_race_restriction);
+
+        out.push(BrewingItem {
+            recipe_id: recipe.recipe_id,
+            ing_ids_json,
+            power,
+            power_tier,
+            effect_label: extract_effect_label(item_name, base_name),
+            race_restriction,
+            item_name: item_name.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Write phase: upsert parsed brewing items under this character/timestamp.
+/// Works on any connection (writer or transaction). Items with no resolved
+/// power still count toward `total_brewing_items` but write no row.
+fn record_brewing_items(
+    conn: &rusqlite::Connection,
+    character: &str,
+    timestamp: &str,
+    items: &[BrewingItem],
+) -> Result<BrewingScanResult, String> {
+    let mut new_discoveries = 0u32;
+    let mut updated_discoveries = 0u32;
+    let total_brewing_items = items.len() as u32;
+
+    let mut insert_stmt = conn
+        .prepare(
+            "INSERT INTO brewing_discoveries (
+                character, recipe_id, ingredient_ids, power, power_tier,
+                effect_label, race_restriction, item_name, first_seen_at, last_seen_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(character, recipe_id, ingredient_ids) DO UPDATE SET
+                last_seen_at = ?9",
+        )
+        .map_err(|e| format!("Failed to prepare insert: {e}"))?;
+
+    for item in items {
+        let power = match &item.power {
+            Some(p) => p,
+            None => continue,
+        };
 
         let changes = insert_stmt
             .execute(params![
                 character,
-                recipe.recipe_id,
-                ing_ids_json,
+                item.recipe_id,
+                item.ing_ids_json,
                 power,
-                power_tier,
-                effect_label,
-                race_restriction,
-                item_name,
+                item.power_tier,
+                item.effect_label,
+                item.race_restriction,
+                item.item_name,
                 timestamp,
             ])
             .map_err(|e| format!("Failed to insert discovery: {e}"))?;
@@ -466,7 +542,6 @@ pub async fn import_brewing_discoveries_csv(
     game_data: State<'_, GameDataState>,
 ) -> Result<BrewingScanResult, String> {
     let data = game_data.read().await;
-    let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
 
     let csv_content =
         std::fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
@@ -559,6 +634,7 @@ pub async fn import_brewing_discoveries_csv(
         }
     }
 
+    let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
     let mut insert_stmt = conn
         .prepare(
             "INSERT INTO brewing_discoveries (
