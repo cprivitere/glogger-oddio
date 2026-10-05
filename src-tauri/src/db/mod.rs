@@ -28,7 +28,6 @@ pub mod poem_commands;
 #[allow(dead_code)]
 pub mod price_helper_commands;
 pub mod queries;
-pub mod stall_commands;
 pub mod stall_tracker_commands;
 // Reads survey_types (CDN-populated reference table) — useful raw material
 // for the future Analytics rebuild. No active consumer right now since the
@@ -105,13 +104,9 @@ pub fn init_pool(db_path: PathBuf, tz_offset_seconds: Option<i32>) -> Result<DbP
         .min_idle(Some(1))
         .build(manager)?;
 
-<<<<<<< HEAD
-    // Reads: concurrent in WAL mode, never block the writer.
-=======
     // Reads: concurrent in WAL mode, never block the writer. query_only
     // fails fast (instead of silently racing the writer) if a future write
     // path ever grabs a read connection by mistake.
->>>>>>> feat/books-watcher
     let reads = r2d2::Pool::builder()
         .max_size(12)
         .build(SqliteConnectionManager::file(&db_path).with_init(|conn| {
@@ -119,12 +114,8 @@ pub fn init_pool(db_path: PathBuf, tz_offset_seconds: Option<i32>) -> Result<DbP
                 "PRAGMA journal_mode=WAL;
                      PRAGMA busy_timeout=5000;
                      PRAGMA synchronous=NORMAL;
-<<<<<<< HEAD
-                     PRAGMA foreign_keys=ON;",
-=======
                      PRAGMA foreign_keys=ON;
                      PRAGMA query_only=ON;",
->>>>>>> feat/books-watcher
             )
         }))?;
 

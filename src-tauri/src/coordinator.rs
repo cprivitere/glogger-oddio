@@ -12,7 +12,7 @@ use crate::stall_year_resolver::base_year_for_live;
 use crate::game_state::GameStateManager;
 use crate::log_watchers::{ChatLogWatcher, LogEvent, LogFileWatcher, PlayerLogWatcher};
 use crate::parsers::chat_local_to_utc;
-use crate::player_event_parser::{ActivitySource, ItemProvenance, PlayerEvent};
+use crate::player_event_parser::PlayerEvent;
 use crate::settings::SettingsManager;
 use crate::survey::aggregator::{SurveyAggregatorEvent, SurveySessionAggregator};
 use crate::watch_rules::evaluate_rules;
@@ -621,13 +621,9 @@ impl DataIngestCoordinator {
 
     /// Persist current watcher byte offsets to the database.
     /// Called every poll cycle so a crash only loses ~1 polling interval of progress.
-<<<<<<< HEAD
-    fn save_watcher_positions(&self) {
-=======
     /// `&mut self` because a detected truncation/rotation must also force the
     /// stored cursor down (and clear the watcher's reset flag).
     fn save_watcher_positions_mut(&mut self) {
->>>>>>> feat/books-watcher
         let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
@@ -1031,48 +1027,6 @@ impl DataIngestCoordinator {
                                     }
                                 }
                             }
-                        }
-                        // Stall price capture: purchases from other players'
-                        // stalls arrive as ItemAdded attributed to
-                        // VendorBrowsing with the stall's npc id. Price is
-                        // never logged (wallet spends invisible) — record a
-                        // sentinel row the user fills in later.
-                        PlayerEvent::ItemAdded {
-                            is_new: true,
-                            item_name,
-                            initial_quantity,
-                            timestamp,
-                            provenance: ItemProvenance::Attributed {
-                                source:
-                                    ActivitySource::VendorBrowsing {
-                                        npc_entity_id: npc_id,
-                                        ..
-                                    },
-                                ..
-                            },
-                            ..
-                        } => {
-                            self.record_purchase_observation(
-                                *npc_id, item_name, *initial_quantity, timestamp,
-                            );
-                        }
-                        // Stall price capture: another player's stall UI
-                        // opened — tell the frontend so the capture panel can
-                        // appear. No DB write for browsing alone.
-                        PlayerEvent::VendorScreenOpened {
-                            timestamp,
-                            npc_entity_id,
-                            ..
-                        } => {
-                            self.app_handle
-                                .emit(
-                                    "stall-browse-started",
-                                    serde_json::json!({
-                                        "npc_entity_id": npc_entity_id,
-                                        "timestamp": timestamp,
-                                    }),
-                                )
-                                .ok();
                         }
                         _ => {}
                     }
@@ -2184,11 +2138,7 @@ impl DataIngestCoordinator {
         let Some((character, server)) = self.active_character_server() else {
             return;
         };
-<<<<<<< HEAD
-        let _ = persist_book_content(
-=======
         if let Err(e) = persist_book_content(
->>>>>>> feat/books-watcher
             &self.db_pool,
             &self.app_handle,
             &character,
@@ -2196,13 +2146,9 @@ impl DataIngestCoordinator {
             book_type,
             title,
             content,
-<<<<<<< HEAD
-        );
-=======
         ) {
             eprintln!("[coordinator] Failed to persist book: {e}");
         }
->>>>>>> feat/books-watcher
     }
 
     /// Parse the Gardening Almanac HTML content and persist structured events
@@ -2371,13 +2317,9 @@ impl DataIngestCoordinator {
             &server,
             book_type,
             content,
-<<<<<<< HEAD
-        );
-=======
         )
         .map_err(|e| eprintln!("[coordinator] {e}"))
         .ok();
->>>>>>> feat/books-watcher
     }
 
     // ── Milking timers ────────────────────────────────────────────
@@ -2484,23 +2426,15 @@ impl DataIngestCoordinator {
         // sees real line breaks on both paths (historically the live path
         // silently matched no fields).
         let content = normalize_book_content(content);
-<<<<<<< HEAD
-        ingest_teleport_binds_content(
-=======
         if let Err(e) = ingest_teleport_binds_content(
->>>>>>> feat/books-watcher
             &self.db_pool,
             &self.app_handle,
             &character,
             &server,
             &content,
-<<<<<<< HEAD
-        );
-=======
         ) {
             eprintln!("[coordinator] Teleportation binds failed: {e}");
         }
->>>>>>> feat/books-watcher
     }
 
     /// Parse a hoplology "Equipment Studied:" skill report and backfill studied items.
@@ -2516,27 +2450,17 @@ impl DataIngestCoordinator {
         // real line breaks on both paths (historically the live path split
         // on literal `\n` only).
         let content = normalize_book_content(content);
-<<<<<<< HEAD
-        let inserted = ingest_hoplology_content(
-=======
         match ingest_hoplology_content(
->>>>>>> feat/books-watcher
             &self.db_pool,
             &self.game_data,
             &self.app_handle,
             &character,
             &server,
             &content,
-<<<<<<< HEAD
-        );
-        if inserted == 0 {
-            startup_log!("[coordinator] Hoplology report: no new items");
-=======
         ) {
             Ok(0) => startup_log!("[coordinator] Hoplology report: no new items"),
             Ok(_) => {} // logged inside
             Err(e) => eprintln!("[coordinator] Hoplology report failed: {e}"),
->>>>>>> feat/books-watcher
         }
     }
 
@@ -2625,75 +2549,6 @@ impl DataIngestCoordinator {
             }
         }
     }
-
-    /// Record an auto-detected purchase from another player's stall in
-    /// `stall_price_observations`. Price is never logged (wallet spends are
-    /// invisible to Player.log), so the row carries the `price_unit = 0`
-    /// sentinel for the user to fill in from the Market tab. `INSERT OR
-    /// IGNORE` keeps re-runs and replays from duplicating rows.
-    fn record_purchase_observation(
-        &self,
-        npc_entity_id: u32,
-        item_name: &str,
-        quantity: u32,
-        timestamp: &str,
-    ) {
-        let Some((character, server)) = self.active_character_server() else {
-            return;
-        };
-
-        // Resolve display name + CDN id + internal name in one read borrow.
-        let (display_name, item_type_id, internal_name): (String, Option<i64>, Option<String>) =
-            self.game_data
-                .try_read()
-                .ok()
-                .and_then(|gd| {
-                    gd.resolve_item(item_name).map(|info| {
-                        (
-                            info.name.clone(),
-                            Some(info.id as i64),
-                            info.internal_name.clone(),
-                        )
-                    })
-                })
-                .unwrap_or_else(|| (item_name.to_string(), None, None));
-
-        // Player.log timestamps are UTC HH:MM:SS; attach today's UTC date
-        // (base_date_override handles replay/reparse).
-        let observed_at = crate::parsers::to_utc_datetime_with_base(timestamp, None);
-
-        let Ok(conn) = self.db_pool.get_write() else {
-            return;
-        };
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO stall_price_observations
-                (character_name, server_name, item_name, internal_name, item_type_id,
-                 quantity, price_unit, stall_npc_entity_id, stall_label, owner_name,
-                 source, observed_at, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, 'Unidentified Stall', NULL,
-                     'purchase', ?8, NULL)",
-            rusqlite::params![
-                character,
-                server,
-                display_name,
-                internal_name,
-                item_type_id,
-                quantity as i64,
-                npc_entity_id as i64,
-                observed_at,
-            ],
-        );
-        match result {
-            Ok(1) => {
-                self.app_handle.emit("stall-prices-updated", 1).ok();
-            }
-            Ok(_) => {} // duplicate — OR IGNORE swallowed it
-            Err(e) => {
-                eprintln!("[coordinator] Failed to record stall purchase observation: {e}")
-            }
-        }
-    }
-
 
     /// Parse a PlayerShopLog book body and persist its entries to the
     /// `stall_events` table, stamped with the active character as owner.
@@ -3406,13 +3261,9 @@ pub fn persist_book_content(
     content: &str,
 ) -> Result<(), String> {
     let dt = chrono::Utc::now().to_rfc3339();
-<<<<<<< HEAD
-    let conn = db.get_write().map_err(|e| format!("Database connection error: {e}"))?;
-=======
     let conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
->>>>>>> feat/books-watcher
     conn.execute(
         "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -3421,11 +3272,7 @@ pub fn persist_book_content(
             captured_at = excluded.captured_at",
         rusqlite::params![character, server, book_type, title, content, dt],
     )
-<<<<<<< HEAD
-    .ok();
-=======
     .map_err(|e| format!("Failed to persist book: {e}"))?;
->>>>>>> feat/books-watcher
     app_handle
         .emit("game-state-updated", vec!["books"])
         .ok();
@@ -3442,40 +3289,6 @@ pub fn ingest_report_stats_content(
     server: &str,
     book_type: &str,
     content: &str,
-<<<<<<< HEAD
-) {
-    let stats = match book_type {
-        "PlayerAge" => crate::report_stats::parse_player_age(content),
-        "HelpScreen" => crate::report_stats::parse_behavior_report(content),
-        _ => return,
-    };
-    if stats.is_empty() {
-        return;
-    }
-    let dt = chrono::Utc::now().to_rfc3339();
-    let conn = match db.get_write() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[coordinator] Failed to persist report stats: {e}");
-            return;
-        }
-    };
-    match crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt) {
-        Ok(n) => {
-            startup_log!(
-                "[coordinator] Imported {} stats from {} report",
-                n,
-                book_type,
-            );
-            app_handle
-                .emit("game-state-updated", vec!["report_stats"])
-                .ok();
-        }
-        Err(e) => {
-            eprintln!("[coordinator] Failed to persist report stats: {e}");
-        }
-    }
-=======
 ) -> Result<usize, String> {
     let stats = match book_type {
         "PlayerAge" => crate::report_stats::parse_player_age(content),
@@ -3500,7 +3313,6 @@ pub fn ingest_report_stats_content(
         .emit("game-state-updated", vec!["report_stats"])
         .ok();
     Ok(n)
->>>>>>> feat/books-watcher
 }
 
 /// Extract a named field value from teleportation status text.
@@ -3528,16 +3340,6 @@ pub fn ingest_teleport_binds_content(
     character: &str,
     server: &str,
     content: &str,
-<<<<<<< HEAD
-) {
-    let primary = extract_bind_field(content, "Primary Bind Location:");
-    let secondary = extract_bind_field(content, "Secondary Bind Location:");
-
-    let conn = match db.get_write() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-=======
 ) -> Result<(), String> {
     let primary = extract_bind_field(content, "Primary Bind Location:");
     let secondary = extract_bind_field(content, "Secondary Bind Location:");
@@ -3546,7 +3348,6 @@ pub fn ingest_teleport_binds_content(
     // PRAGMA query_only, so `get()` here silently dropped every bind
     // update (execute failure swallowed by `.ok()`).
     let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
->>>>>>> feat/books-watcher
 
     let dt = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -3559,11 +3360,7 @@ pub fn ingest_teleport_binds_content(
             last_updated = excluded.last_updated",
         rusqlite::params![character, server, primary, secondary, dt],
     )
-<<<<<<< HEAD
-    .ok();
-=======
     .map_err(|e| format!("Failed to upsert teleportation binds: {e}"))?;
->>>>>>> feat/books-watcher
 
     startup_log!(
         "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
@@ -3573,10 +3370,7 @@ pub fn ingest_teleport_binds_content(
     app_handle
         .emit("game-state-updated", vec!["teleportation"])
         .ok();
-<<<<<<< HEAD
-=======
     Ok(())
->>>>>>> feat/books-watcher
 }
 
 /// Parse a hoplology "Equipment Studied:" skill report and backfill studied
@@ -3589,19 +3383,11 @@ pub fn ingest_hoplology_content(
     character: &str,
     server: &str,
     content: &str,
-<<<<<<< HEAD
-) -> usize {
-    let conn = match db.get_write() {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-=======
 ) -> Result<usize, String> {
     // Inserts MUST run on the writer connection: the read pool is
     // PRAGMA query_only, so `get()` here silently dropped every study
     // row. Failures propagate so the Books watcher can retry the file.
     let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
->>>>>>> feat/books-watcher
 
     // Use current wall-clock time as the "first seen" timestamp for
     // report-backfilled items (the player.log timestamp is just HH:MM:SS
@@ -3632,16 +3418,12 @@ pub fn ingest_hoplology_content(
             Ok(Some(_)) => inserted += 1,
             Ok(None) => {} // already known
             Err(e) => {
-<<<<<<< HEAD
-                eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
-=======
                 // Propagate the first failure: already-inserted rows are
                 // idempotent, so returning Err makes the Books watcher treat
                 // the file as unseen and retry it — instead of marking the
                 // mtime seen over a partial import.
                 eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
                 return Err(format!("hoplology insert failed for '{}': {e}", trimmed));
->>>>>>> feat/books-watcher
             }
         }
     }
@@ -3655,11 +3437,7 @@ pub fn ingest_hoplology_content(
             .emit("game-state-updated", vec!["hoplology"])
             .ok();
     }
-<<<<<<< HEAD
-    inserted
-=======
     Ok(inserted)
->>>>>>> feat/books-watcher
 }
 
 /// Normalize an equipped combat-skill pair into a stable, order-independent key

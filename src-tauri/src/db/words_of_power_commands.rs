@@ -344,14 +344,9 @@ pub fn backfill_used_words_from_chat_logs(
     // one transaction per file keeps each write-lock hold short — a
     // whole-scan transaction starves the concurrent startup backfills'
     // busy_timeout (5s). Deletes are idempotent, so per-file is safe.
-<<<<<<< HEAD
-    let mut conn = conn;
-
-=======
     // The WRITER CONNECTION is scoped per file as well: checkout only when a
     // file is about to be processed, drop it right after the commit, so
     // live-ingest writers can interleave between files.
->>>>>>> feat/books-watcher
     let mut deleted = 0usize;
     for entry in std::fs::read_dir(&dir)
         .map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?
@@ -372,21 +367,6 @@ pub fn backfill_used_words_from_chat_logs(
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
-<<<<<<< HEAD
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Some(msg) = parse_chat_line(&line) else {
-                continue;
-            };
-            if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
-                parse_status_message(&msg)
-            {
-                deleted += delete_words_by_word(&tx, &word)
-                    .map_err(|e| format!("Delete error: {e}"))?;
-=======
         // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
         // file is read and parsed — collect the used words, then acquire the
         // writer only around the delete transaction. Deletes are idempotent,
@@ -403,16 +383,12 @@ pub fn backfill_used_words_from_chat_logs(
                 {
                     out.push(word);
                 }
->>>>>>> feat/books-watcher
             }
             out
         };
         if used.is_empty() {
             continue;
         }
-<<<<<<< HEAD
-        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-=======
 
         let mut conn = db
             .get_write()
@@ -426,7 +402,6 @@ pub fn backfill_used_words_from_chat_logs(
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
         drop(conn); // release the writer before the next file
->>>>>>> feat/books-watcher
     }
 
     Ok(deleted)

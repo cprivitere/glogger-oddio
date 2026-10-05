@@ -10,12 +10,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-<<<<<<< HEAD
-const props = defineProps<{
-  message: string
-  /** Search terms to highlight (plain words only) */
-  terms: string[]
-=======
 /** One highlight term + the backend FTS match kind it carries.
  *  - `exact`: matches whole tokens only (word boundary)
  *  - `phrase`: contiguous substring (FTS5 phrases are token sequences;
@@ -31,7 +25,6 @@ const props = defineProps<{
   message: string
   /** Search terms to highlight with their FTS match kinds */
   terms: HighlightTerm[]
->>>>>>> feat/books-watcher
 }>()
 
 interface HighlightPart {
@@ -39,17 +32,6 @@ interface HighlightPart {
   matched: boolean
 }
 
-<<<<<<< HEAD
-const parts = computed((): HighlightPart[] => {
-  const words = props.terms
-    .filter(t => t.length > 0)
-    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  if (words.length === 0) {
-    return [{ text: props.message, matched: false }]
-  }
-
-  const regex = new RegExp(`(${words.join('|')})`, 'gi')
-=======
 /** FTS5 token characters under the default unicode61 tokenizer: letter and
  *  number runs. `_` is a SEPARATOR in unicode61 (not part of tokens), so
  *  FTS matches `foo` inside `foo_bar` — the boundary class must match. */
@@ -82,7 +64,6 @@ const parts = computed((): HighlightPart[] => {
   }
 
   const regex = new RegExp(`(${patterns.join('|')})`, 'giu')
->>>>>>> feat/books-watcher
   const result: HighlightPart[] = []
   let lastIndex = 0
   for (const m of props.message.matchAll(regex)) {

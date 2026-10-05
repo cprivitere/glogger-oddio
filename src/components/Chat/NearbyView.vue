@@ -24,15 +24,10 @@ import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
 import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
-<<<<<<< HEAD
-
-const dateNav = useChatDateNav()
-=======
 import { useChatRequestGuard } from '../../composables/useChatRequestGuard'
 
 const dateNav = useChatDateNav()
 const reqGuard = useChatRequestGuard()
->>>>>>> feat/books-watcher
 
 const messages = ref<ChatMessage[]>([])
 const loading = ref(false)
@@ -112,10 +107,7 @@ watch(() => dateNav.activeDay.value, (day) => {
 
 async function loadAroundDay(day: string) {
   loading.value = true
-<<<<<<< HEAD
-=======
   const generation = reqGuard.begin()
->>>>>>> feat/books-watcher
   try {
     // Day window in the current sort order, full channel filter applied —
     // same filter semantics as loadMessages(). The window is bounded to the
@@ -126,10 +118,7 @@ async function loadAroundDay(day: string) {
       { channel: 'Nearby', sortOrder: sortOrder.value },
       LIMIT,
     )
-<<<<<<< HEAD
-=======
     if (!reqGuard.isCurrent(generation)) return
->>>>>>> feat/books-watcher
     messages.value = result
     offset.value = result.length
     if (result.length === 0) {
@@ -143,11 +132,7 @@ async function loadAroundDay(day: string) {
     hasMore.value = true
     loadMessages()
   } finally {
-<<<<<<< HEAD
-    loading.value = false
-=======
     if (reqGuard.isCurrent(generation)) loading.value = false
->>>>>>> feat/books-watcher
   }
 }
 

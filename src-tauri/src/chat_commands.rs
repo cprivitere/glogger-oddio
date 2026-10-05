@@ -146,14 +146,6 @@ pub async fn scan_chat_logs(
             .map_err(|e| format!("Failed to rebuild chat search index: {e}"))?;
     }
 
-    // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent
-    // even if any historical insert missed the sync trigger.
-    if total_messages > 0 {
-        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
-        chat_commands::rebuild_chat_fts(&conn)
-            .map_err(|e| format!("Failed to rebuild chat search index: {e}"))?;
-    }
-
     Ok(ScanResult {
         files_processed,
         messages_imported: total_messages,

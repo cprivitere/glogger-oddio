@@ -160,27 +160,6 @@ pub fn backfill_from_chat_logs(
         // concurrently and a whole-scan transaction holds the write lock
         // long enough for the others' busy_timeout (5s) to expire.
         // Inserts are idempotent (unique index), so per-file is safe.
-<<<<<<< HEAD
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Some(msg) = parse_chat_line(&line) else {
-                continue;
-            };
-            if let Some(ChatStatusEvent::RouletteResult { timestamp, number }) =
-                parse_status_message(&msg)
-            {
-                let n = tx
-                    .execute(
-                        "INSERT OR IGNORE INTO roulette_results (spun_at, number)
-                         VALUES (?1, ?2)",
-                        rusqlite::params![timestamp, number],
-                    )
-                    .map_err(|e| format!("Insert error: {e}"))?;
-                inserted += n;
-=======
         // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
         // file is read and parsed — collect the results, then acquire the
         // writer only around the insert transaction.
@@ -196,16 +175,12 @@ pub fn backfill_from_chat_logs(
                 {
                     out.push((timestamp, number));
                 }
->>>>>>> feat/books-watcher
             }
             out
         };
         if spins.is_empty() {
             continue;
         }
-<<<<<<< HEAD
-        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
-=======
 
         let mut conn = db
             .get_write()
@@ -225,7 +200,6 @@ pub fn backfill_from_chat_logs(
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
         drop(conn); // release the writer before the next file
->>>>>>> feat/books-watcher
     }
 
     Ok(inserted)

@@ -5,8 +5,6 @@ export interface ParsedSearchQuery {
    *  whole, a trailing `*` marks a prefix match. ChatHighlighted uses these
    *  (never the raw textWords) so `gorg*` and `"hello world"` highlight. */
   highlightTerms: string[]
-<<<<<<< HEAD
-=======
   /** Raw tokens exactly as they appear in the query (e.g. `gorg*`,
    *  `"hello world"`). Filter chips render these directly and remove
    *  using them, so removing a chip strips the whole original token. */
@@ -20,7 +18,6 @@ export interface ParsedSearchQuery {
    *  - `prefix`: the term must start a token (FTS5 `term*`)
    *  - `literal`: malformed token — substring, mirrors the LIKE fallback */
   termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[]
->>>>>>> feat/books-watcher
   sender?: string
   channel?: string
 }
@@ -64,14 +61,6 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   const textWords = text ? text.split(/\s+/).filter(Boolean) : []
 
   // Derive highlight tokens with the same phrase/prefix rules as the
-<<<<<<< HEAD
-  // backend's build_fts_match_expr: `"exact phrase"` stays whole (minus
-  // quotes), a bare word ending in exactly one `*` matches as a prefix,
-  // everything else is a literal word. Tokens the backend would reject
-  // (misplaced `*`, unbalanced quotes, operators) are still highlighted as
-  // plain words so the LIKE-fallback results get marked too.
-  const highlightTerms: string[] = []
-=======
   // backend's build_fts_match_expr, INCLUDING its query-scope bail: the
   // backend returns None for the WHOLE query when any token is malformed,
   // and get_chat_messages then falls back to substring LIKE for every
@@ -90,24 +79,10 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   //      word loop rejects them; inside a quoted phrase they are literal
   //      content — `"foo-bar"` is a valid phrase)
   const tokens: { word: string, quoted: boolean, phrase: string }[] = []
->>>>>>> feat/books-watcher
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
   while ((tok = tokenRe.exec(text)) !== null) {
     if (tok[1] !== undefined) {
-<<<<<<< HEAD
-      const phrase = tok[1].trim()
-      if (phrase) highlightTerms.push(phrase)
-    } else {
-      const word = tok[2]
-      const m = /^([^*]+)\*?$/.exec(word)
-      if (m) {
-        const stem = m[1].trim()
-        if (stem) highlightTerms.push(stem)
-      } else {
-        // Star(s) in unsupported positions: highlight the literal token
-        highlightTerms.push(word)
-=======
       tokens.push({ word: `"${tok[1]}"`, quoted: true, phrase: tok[1].trim() })
     } else {
       tokens.push({ word: tok[2], quoted: false, phrase: '' })
@@ -154,7 +129,6 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
         // Bare `*` or a token made only of stars: literal
         highlightTerms.push(t.word)
         termKinds.push({ term: t.word, kind: 'literal' })
->>>>>>> feat/books-watcher
       }
     }
   }
@@ -163,11 +137,8 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     text,
     textWords,
     highlightTerms,
-<<<<<<< HEAD
-=======
     termKinds,
     rawTokens,
->>>>>>> feat/books-watcher
     ...(sender && { sender }),
     ...(channel && { channel }),
   }
