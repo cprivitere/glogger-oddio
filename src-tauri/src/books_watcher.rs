@@ -122,6 +122,50 @@ fn scan_books_dir(
         return;
     }
 
+<<<<<<< HEAD
+=======
+    // Process oldest-to-newest by REPORT TIMESTAMP, not mtime: several
+    // imports overwrite current state (gourmand clears/replaces its table;
+    // stats/binds upsert values), so an older report running last would
+    // leave stale state while every file is still marked seen. mtime is
+    // unreliable here — copying/restoring the Books directory rewrites
+    // mtimes, and equal mtimes leave `read_dir` order unspecified. The
+    // `SkillReport_YYMMDD_HHMMSS` filename suffix is the authoritative
+    // game timestamp (the gourmand latest-lookup already relies on
+    // filename order being chronological). Files without a parsable
+    // suffix sort BEFORE all timestamped ones (false < true in Rust) —
+    // that's the safe end: timestamped reports always overwrite whatever
+    // untimestamped files persisted, never the reverse.
+    to_process.sort_by(|(path_a, _), (path_b, _)| {
+        let key = |path: &PathBuf| -> (bool, String) {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            // Take the last two underscore-delimited groups; a real
+            // timestamp is two digit-groups of 6 and 6 chars.
+            let groups: Vec<&str> = stem.split('_').collect();
+            if groups.len() >= 2 {
+                let d = groups[groups.len() - 2];
+                let t = groups[groups.len() - 1];
+                if d.len() == 6
+                    && t.len() == 6
+                    && d.chars().all(|c| c.is_ascii_digit())
+                    && t.chars().all(|c| c.is_ascii_digit())
+                {
+                    return (true, format!("{}{}", d, t));
+                }
+            }
+            (false, stem.to_string())
+        };
+        let (ts_a, key_a) = key(path_a);
+        let (ts_b, key_b) = key(path_b);
+        // Timestamped files sort by their (older-first) key after the
+        // untimestamped group.
+        ts_a.cmp(&ts_b).then_with(|| key_a.cmp(&key_b))
+    });
+
+>>>>>>> feat/books-watcher
     // Shared stall-ops lock instance (managed in lib.rs before the watcher
     // spawns) so shop-log writes serialize with live ingest and Clear — same
     // synchronous State borrow the coordinator's ingest_shop_log uses.
@@ -264,22 +308,42 @@ pub(crate) fn process_book_file(
                     .try_state::<GameDataState>()
                     .map(|s| s.inner().clone())
                     .ok_or_else(|| "GameDataState not managed yet".to_string())?;
+<<<<<<< HEAD
                 let inserted =
                     ingest_hoplology_content(db, &game_data, app, character, server, &content);
+=======
+                let inserted = ingest_hoplology_content(db, &game_data, app, character, server, &content)
+                    .map_err(|e| format!("hoplology ingest failed: {e}"))?;
+>>>>>>> feat/books-watcher
                 if inserted > 0 {
                     notes.push(format!("hoplology +{inserted}"));
                 }
             }
             if content.contains("Primary Bind Location:") {
+<<<<<<< HEAD
                 ingest_teleport_binds_content(db, app, character, server, &content);
+=======
+                ingest_teleport_binds_content(db, app, character, server, &content)
+                    .map_err(|e| format!("teleportation binds failed: {e}"))?;
+>>>>>>> feat/books-watcher
                 notes.push("binds updated".to_string());
             }
             Ok(notes.join(", "))
         }
         BookKind::Stats => {
             persist_book_content(db, app, character, server, &book_type, &title, &content)?;
+<<<<<<< HEAD
             ingest_report_stats_content(db, app, character, server, &book_type, &content);
             Ok("book + stats ingested".to_string())
+=======
+            let n = ingest_report_stats_content(db, app, character, server, &book_type, &content)
+                .map_err(|e| format!("stats import failed: {e}"))?;
+            if n > 0 {
+                Ok(format!("book + stats ingested (+{n})"))
+            } else {
+                Ok("book + stats ingested".to_string())
+            }
+>>>>>>> feat/books-watcher
         }
         BookKind::BookOnly => {
             persist_book_content(db, app, character, server, &book_type, &title, &content)?;
@@ -359,7 +423,13 @@ fn ingest_shop_log_file(
 /// Gourmand import with the live path's emit contract
 /// (`gourmand-updated` with the imported count when n > 0).
 fn import_gourmand(db: &DbPool, content: &str, app: &AppHandle) -> Result<usize, String> {
+<<<<<<< HEAD
     let conn = db.get_write().map_err(|e| format!("Database connection error: {e}"))?;
+=======
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+>>>>>>> feat/books-watcher
     let n = crate::db::gourmand_commands::import_gourmand_from_content(&conn, content)?;
     if n > 0 {
         app.emit("gourmand-updated", n).ok();

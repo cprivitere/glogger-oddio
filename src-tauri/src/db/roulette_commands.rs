@@ -140,10 +140,6 @@ pub fn backfill_from_chat_logs(
         return Ok(0);
     }
 
-    let mut conn = db
-        .get()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
     let entries = fs::read_dir(&dir).map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?;
 
     let mut inserted = 0usize;
@@ -164,6 +160,7 @@ pub fn backfill_from_chat_logs(
         // concurrently and a whole-scan transaction holds the write lock
         // long enough for the others' busy_timeout (5s) to expire.
         // Inserts are idempotent (unique index), so per-file is safe.
+<<<<<<< HEAD
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -183,9 +180,52 @@ pub fn backfill_from_chat_logs(
                     )
                     .map_err(|e| format!("Insert error: {e}"))?;
                 inserted += n;
+=======
+        // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
+        // file is read and parsed — collect the results, then acquire the
+        // writer only around the insert transaction.
+        let spins: Vec<(String, u32)> = {
+            let reader = BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                let Some(msg) = parse_chat_line(&line) else {
+                    continue;
+                };
+                if let Some(ChatStatusEvent::RouletteResult { timestamp, number }) =
+                    parse_status_message(&msg)
+                {
+                    out.push((timestamp, number));
+                }
+>>>>>>> feat/books-watcher
             }
+            out
+        };
+        if spins.is_empty() {
+            continue;
+        }
+<<<<<<< HEAD
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+=======
+
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        for (timestamp, number) in &spins {
+            let n = tx
+                .execute(
+                    "INSERT OR IGNORE INTO roulette_results (spun_at, number)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![timestamp, number],
+                )
+                .map_err(|e| format!("Insert error: {e}"))?;
+            inserted += n;
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        drop(conn); // release the writer before the next file
+>>>>>>> feat/books-watcher
     }
 
     Ok(inserted)

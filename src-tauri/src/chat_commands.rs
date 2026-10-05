@@ -47,11 +47,16 @@ pub async fn scan_chat_logs(
             },
         );
 
-        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
-
+        // Probe the stored position with a READ connection and do the disk
+        // I/O + parsing BEFORE checking out the single writer, so a large
+        // backfill can't monopolize the write queue and block live ingest.
         let file_path_str = log_file.file_path.to_string_lossy().to_string();
-        let start_position = log_positions::get_position(&conn, &file_path_str)
-            .map_err(|e| format!("Failed to get log position: {e}"))?;
+        let start_position;
+        {
+            let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+            start_position = log_positions::get_position(&conn, &file_path_str)
+                .map_err(|e| format!("Failed to get log position: {e}"))?;
+        }
 
         let player_name = if start_position == 0 {
             chat_parser::extract_player_name(&log_file.file_path)
@@ -73,34 +78,72 @@ pub async fn scan_chat_logs(
             })
             .collect();
 
-        if !messages.is_empty() {
-            let inserted = chat_commands::insert_chat_messages(
+        // Insert and position update under ONE writer checkout: a concurrent
+        // tail may advance the same file's offset between the two steps, and
+        // this stale scan writing its smaller new_position would regress the
+        // cursor and cause repeated replay. Single-file and tail paths
+        // already use one checkout.
+        let inserted = if messages.is_empty() {
+            // No rows: still record the position (empty read at EOF) under
+            // one checkout.
+            let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+            log_positions::update_position(
                 &conn,
+                &file_path_str,
+                "chat",
+                new_position,
+                player_name.as_deref(),
+                Some(&{
+                    serde_json::json!({
+                        "file_name": log_file.file_name,
+                        "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
+                    })
+                    .to_string()
+                }),
+            )
+            .map_err(|e| format!("Failed to update log position: {e}"))?;
+            0
+        } else {
+            let mut conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+            let inserted = chat_commands::insert_chat_messages(
+                &tx,
                 &messages,
                 &log_file.file_name,
                 &excluded_channels,
             )
             .map_err(|e| format!("Failed to insert messages: {e}"))?;
-            total_messages += inserted;
-        }
-
+            log_positions::update_position(
+                &tx,
+                &file_path_str,
+                "chat",
+                new_position,
+                player_name.as_deref(),
+                Some(&{
+                    serde_json::json!({
+                        "file_name": log_file.file_name,
+                        "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
+                    })
+                    .to_string()
+                }),
+            )
+            .map_err(|e| format!("Failed to update log position: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Failed to commit insert+position: {e}"))?;
+            inserted
+        };
+        total_messages += inserted;
         files_processed += 1;
+    }
 
-        let metadata = serde_json::json!({
-            "file_name": log_file.file_name,
-            "file_date": log_file.file_date.format("%Y-%m-%d").to_string()
-        })
-        .to_string();
-
-        log_positions::update_position(
-            &conn,
-            &file_path_str,
-            "chat",
-            new_position,
-            player_name.as_deref(),
-            Some(&metadata),
-        )
-        .map_err(|e| format!("Failed to update log position: {e}"))?;
+    // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent
+    // even if any historical insert missed the sync trigger.
+    if total_messages > 0 {
+        let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+        chat_commands::rebuild_chat_fts(&conn)
+            .map_err(|e| format!("Failed to rebuild chat search index: {e}"))?;
     }
 
     // Bulk backfill done: rebuild the FTS index so it's guaranteed consistent
@@ -147,11 +190,17 @@ pub async fn scan_chat_log_file(
         .ok_or("Invalid file name")?
         .to_string();
 
-    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
-
+    // Read + parse on a READ connection first; the writer is checked out
+    // only for the short insert + position-update phase so a large file
+    // backfill can't block live ingest behind disk I/O.
     let file_path_str = log_path.to_string_lossy().to_string();
-    let start_position = log_positions::get_position(&conn, &file_path_str)
-        .map_err(|e| format!("Failed to get log position: {e}"))?;
+    let (start_position, file_date) = {
+        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+        let pos = log_positions::get_position(&conn, &file_path_str)
+            .map_err(|e| format!("Failed to get log position: {e}"))?;
+        let parsed_name = chat_parser::parse_chat_log_filename(&file_name);
+        (pos, parsed_name)
+    };
 
     let player_name = if start_position == 0 {
         chat_parser::extract_player_name(&log_path)
@@ -172,6 +221,8 @@ pub async fn scan_chat_log_file(
         })
         .collect();
 
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+
     let mut messages_imported = 0;
     if !messages.is_empty() {
         messages_imported =
@@ -179,7 +230,6 @@ pub async fn scan_chat_log_file(
                 .map_err(|e| format!("Failed to insert messages: {e}"))?;
     }
 
-    let file_date = chat_parser::parse_chat_log_filename(&file_name);
     let metadata = file_date.map(|d| {
         serde_json::json!({
             "file_name": file_name,
@@ -370,11 +420,15 @@ pub async fn tail_chat_log(
         return Err(format!("Chat log file not found: {}", chat_log_file));
     }
 
-    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
-
+    // Read + parse on a READ connection first; the writer is checked out
+    // only for the short insert + position-update phase (tail runs every
+    // few seconds — it must never queue behind its own disk I/O).
     let file_path_str = log_path.to_string_lossy().to_string();
-    let start_position = log_positions::get_position(&conn, &file_path_str)
-        .map_err(|e| format!("Failed to get log position: {e}"))?;
+    let start_position = {
+        let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+        log_positions::get_position(&conn, &file_path_str)
+            .map_err(|e| format!("Failed to get log position: {e}"))?
+    };
 
     let (messages, new_position) = chat_parser::read_chat_log(&log_path, start_position)
         .map_err(|e| format!("Failed to read chat log: {e}"))?;
@@ -404,6 +458,7 @@ pub async fn tail_chat_log(
         None
     };
 
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
     chat_commands::insert_chat_messages(&conn, &messages, file_name, &excluded_channels)
         .map_err(|e| format!("Failed to insert messages: {e}"))?;
 
@@ -479,7 +534,7 @@ pub async fn get_tell_conversations(
 
 #[tauri::command]
 pub async fn purge_chat_messages(days: u32, db_pool: State<'_, DbPool>) -> Result<usize, String> {
-    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
     let cutoff_str = cutoff_date.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -504,7 +559,7 @@ pub async fn purge_chat_messages(days: u32, db_pool: State<'_, DbPool>) -> Resul
 
 #[tauri::command]
 pub async fn delete_all_chat_messages(db_pool: State<'_, DbPool>) -> Result<usize, String> {
-    let conn = db_pool.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     // Delete item links first (in case foreign_keys pragma wasn't active for older data)
     conn.execute("DELETE FROM chat_item_links", [])

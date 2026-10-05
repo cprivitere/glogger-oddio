@@ -105,6 +105,14 @@ pub trait LogFileWatcher {
     /// Get the current file position
     fn get_position(&self) -> u64;
 
+    /// True if the last `poll` detected a truncation/rotation and reset the
+    /// in-memory position — the caller must persist the reset (force) so the
+    /// stored cursor doesn't keep the stale larger offset.
+    fn position_was_reset(&self) -> bool;
+
+    /// Caller acknowledged the reset (persisted force_position) — clear flag.
+    fn clear_position_reset(&mut self);
+
     /// Check if the watcher is currently active
     fn is_active(&self) -> bool;
 }
@@ -113,6 +121,9 @@ pub trait LogFileWatcher {
 pub struct PlayerLogWatcher {
     file_path: PathBuf,
     current_position: u64,
+    /// Set when poll detects truncation/rotation; cleared by the caller
+    /// after persisting the forced reset.
+    position_reset: bool,
     active: bool,
     active_character: Option<String>,
     current_chat_log: Option<PathBuf>,
@@ -129,6 +140,7 @@ impl PlayerLogWatcher {
         let mut watcher = Self {
             file_path,
             current_position: 0,
+            position_reset: false,
             active: false,
             active_character: None,
             current_chat_log: None,
@@ -147,6 +159,7 @@ impl PlayerLogWatcher {
         let mut watcher = Self {
             file_path,
             current_position: position,
+            position_reset: false,
             active: false,
             active_character: None,
             current_chat_log: None,
@@ -331,6 +344,7 @@ impl LogFileWatcher for PlayerLogWatcher {
                 file_size, self.current_position
             );
             self.current_position = 0;
+            self.position_reset = true;
             self.player_event_parser = PlayerEventParser::new();
         }
 
@@ -389,6 +403,15 @@ impl LogFileWatcher for PlayerLogWatcher {
         self.current_position
     }
 
+    fn position_was_reset(&self) -> bool {
+        self.position_reset
+    }
+
+    /// Caller acknowledged the reset (persisted force_position) — clear flag.
+    fn clear_position_reset(&mut self) {
+        self.position_reset = false;
+    }
+
     fn is_active(&self) -> bool {
         self.active
     }
@@ -406,6 +429,9 @@ impl LogFileWatcher for PlayerLogWatcher {
 pub struct ChatLogWatcher {
     file_path: PathBuf,
     current_position: u64,
+    /// Set when poll detects truncation/rotation; cleared by the caller
+    /// after persisting the forced reset.
+    position_reset: bool,
     active: bool,
     player_name: Option<String>,
     current_session_start: Option<NaiveDateTime>,
@@ -420,6 +446,7 @@ impl ChatLogWatcher {
         Self {
             file_path,
             current_position: 0,
+            position_reset: false,
             active: false,
             player_name: None,
             current_session_start: None,
@@ -433,6 +460,7 @@ impl ChatLogWatcher {
         Self {
             file_path,
             current_position: position,
+            position_reset: false,
             active: false,
             player_name: None,
             current_session_start: None,
@@ -551,6 +579,7 @@ impl LogFileWatcher for ChatLogWatcher {
         // Handle file shrink (game recreated file)
         if self.current_position > file_size {
             self.current_position = 0;
+            self.position_reset = true;
         }
 
         if self.current_position >= file_size {
@@ -626,6 +655,15 @@ impl LogFileWatcher for ChatLogWatcher {
 
     fn get_position(&self) -> u64 {
         self.current_position
+    }
+
+    fn position_was_reset(&self) -> bool {
+        self.position_reset
+    }
+
+    /// Caller acknowledged the reset (persisted force_position) — clear flag.
+    fn clear_position_reset(&mut self) {
+        self.position_reset = false;
     }
 
     fn is_active(&self) -> bool {

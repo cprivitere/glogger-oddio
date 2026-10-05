@@ -24,8 +24,13 @@
       <!-- Active filter chips -->
       <div v-if="parsed.sender || parsed.channel || parsed.textWords.length > 0" class="flex gap-2 mt-2 flex-wrap">
         <span
+<<<<<<< HEAD
           v-for="word in parsed.highlightTerms.length > 0 ? parsed.highlightTerms : parsed.textWords"
           :key="'text-' + word"
+=======
+          v-for="(word, i) in parsed.rawTokens.length > 0 ? parsed.rawTokens : parsed.textWords"
+          :key="'text-' + word + '-' + i"
+>>>>>>> feat/books-watcher
           class="inline-flex items-center gap-1 px-2.5 py-1 bg-text-secondary/15 text-text-primary text-sm rounded-full"
         >
           {{ word }}
@@ -58,7 +63,11 @@
 
       <!-- Result count -->
       <div v-if="resultCount !== null" class="mt-2 text-xs text-text-muted">
+<<<<<<< HEAD
         {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} across all history
+=======
+        {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} {{ dateNav.activeDay.value ? `on ${dateNav.activeDay.value}` : 'across all history' }}
+>>>>>>> feat/books-watcher
       </div>
     </div>
 
@@ -85,7 +94,11 @@
       :sort-order="contextMessageId ? undefined : sortOrder"
       :clickable="!contextMessageId"
       :highlight-id="contextMessageId ?? undefined"
+<<<<<<< HEAD
       :highlight-terms="contextMessageId ? [] : parsed.highlightTerms"
+=======
+      :highlight-terms="contextMessageId ? [] : parsed.termKinds"
+>>>>>>> feat/books-watcher
       :date-nav="dateNav"
       @load-more="loadMore"
       @toggle-sort="toggleSort"
@@ -122,8 +135,17 @@ const contextLoading = ref(false)
 const contextChannel = ref<string | null>(null)
 
 let searchTimeout: number | null = null
+<<<<<<< HEAD
 // Generation token: a slow count for an older query must never overwrite
 // resultCount for a newer one.
+=======
+// Query generation: bumped ONLY when the filter/query changes (page-0
+// load). Ordinary pagination (loadMore) must NOT bump it — if it did, a
+// page-2 start racing the page-0 count would discard the only count
+// response and later pages never request another one, leaving the label
+// empty. Query/ page generations are tracked separately.
+let queryGeneration = 0
+>>>>>>> feat/books-watcher
 let searchGeneration = 0
 
 const parsed = computed(() => parseSearchQuery(rawQuery.value))
@@ -134,6 +156,19 @@ const displayMessages = computed(() =>
 
 async function loadMessages() {
   loading.value = true
+<<<<<<< HEAD
+=======
+  // Page-0 loads are new queries: bump the query generation and drop the
+  // previous count immediately so the label can't show a stale number.
+  // Page-N loads keep the query generation — the in-flight count from the
+  // page-0 load must still be able to land.
+  const isPage0 = offset.value === 0
+  if (isPage0) {
+    queryGeneration++
+    resultCount.value = null
+  }
+  const countGeneration = queryGeneration
+>>>>>>> feat/books-watcher
   const generation = ++searchGeneration
   try {
     const p = parsed.value
@@ -170,7 +205,11 @@ async function loadMessages() {
         ...dateNav.filterParams(),
       })
         .then(n => {
+<<<<<<< HEAD
           if (generation === searchGeneration) resultCount.value = n
+=======
+          if (countGeneration === queryGeneration) resultCount.value = n
+>>>>>>> feat/books-watcher
         })
         .catch(e => console.error('Failed to count messages:', e))
     }
@@ -224,9 +263,19 @@ function toggleSort() {
 }
 
 function removeTextWord(word: string) {
-  // Remove the first occurrence of this word (not inside an operator)
+  // Remove the token exactly as it appears in the query. `\b` boundaries
+  // fail on tokens starting/ending with non-word chars (quotes, `*`), so
+  // match the escaped token between whitespace boundaries instead.
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+<<<<<<< HEAD
   rawQuery.value = rawQuery.value.replace(new RegExp(`\\b${escaped}\\b`, 'i'), '').trim().replace(/\s+/g, ' ')
+=======
+  rawQuery.value = rawQuery.value
+    .replace(new RegExp(`(?:^|(?<=\\s))${escaped}(?:(?=\\s)|$)`, 'i'), '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/""/g, '')
+>>>>>>> feat/books-watcher
   if (dateNav.activeDay.value) {
     loadAroundDay(dateNav.activeDay.value)
   } else {
@@ -290,6 +339,14 @@ watch(() => dateNav.activeDay.value, (day, prev) => {
 
 async function loadAroundDay(day: string) {
   loading.value = true
+<<<<<<< HEAD
+=======
+  // A day change is a new query: bump the query generation so any in-flight
+  // count from the previous query can't land, then use this generation for
+  // the day's own count request.
+  queryGeneration++
+  const countGeneration = queryGeneration
+>>>>>>> feat/books-watcher
   const generation = ++searchGeneration
   try {
     // Day window in the current sort order with the complete parsed search
@@ -325,7 +382,11 @@ async function loadAroundDay(day: string) {
       endTime: `${day} 23:59:59`,
     })
       .then(n => {
+<<<<<<< HEAD
         if (generation === searchGeneration) resultCount.value = n
+=======
+        if (countGeneration === queryGeneration) resultCount.value = n
+>>>>>>> feat/books-watcher
       })
       .catch(e => console.error('Failed to count messages:', e))
   } catch (e) {

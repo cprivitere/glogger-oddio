@@ -5,6 +5,22 @@ export interface ParsedSearchQuery {
    *  whole, a trailing `*` marks a prefix match. ChatHighlighted uses these
    *  (never the raw textWords) so `gorg*` and `"hello world"` highlight. */
   highlightTerms: string[]
+<<<<<<< HEAD
+=======
+  /** Raw tokens exactly as they appear in the query (e.g. `gorg*`,
+   *  `"hello world"`). Filter chips render these directly and remove
+   *  using them, so removing a chip strips the whole original token. */
+  rawTokens: string[]
+  /** Highlight terms carrying their backend FTS match kind so the
+   *  highlighter can mirror FTS5 token semantics:
+   *  - `exact`: the term must match a whole token (word boundary)
+   *  - `phrase`: the phrase must appear as-is (substring; FTS5 phrases
+   *    are contiguous token sequences — substring is the closest DOM
+   *    approximation)
+   *  - `prefix`: the term must start a token (FTS5 `term*`)
+   *  - `literal`: malformed token — substring, mirrors the LIKE fallback */
+  termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[]
+>>>>>>> feat/books-watcher
   sender?: string
   channel?: string
 }
@@ -48,16 +64,38 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   const textWords = text ? text.split(/\s+/).filter(Boolean) : []
 
   // Derive highlight tokens with the same phrase/prefix rules as the
+<<<<<<< HEAD
   // backend's build_fts_match_expr: `"exact phrase"` stays whole (minus
   // quotes), a bare word ending in exactly one `*` matches as a prefix,
   // everything else is a literal word. Tokens the backend would reject
   // (misplaced `*`, unbalanced quotes, operators) are still highlighted as
   // plain words so the LIKE-fallback results get marked too.
   const highlightTerms: string[] = []
+=======
+  // backend's build_fts_match_expr, INCLUDING its query-scope bail: the
+  // backend returns None for the WHOLE query when any token is malformed,
+  // and get_chat_messages then falls back to substring LIKE for every
+  // word. In that state all words must highlight as `literal` — marking a
+  // valid-looking word `exact`/`prefix` would leave it unhighlighted
+  // even though the backend matched it as a substring (e.g. `hello
+  // go*rg` LIKE-matches "hello" too).
+  //
+  // Backend bail rules (build_fts_match_expr):
+  //   1. unterminated quote            (odd number of `"`)
+  //   2. quote in the middle of a word (open + close inside one token)
+  //   3. star in any non-trailing position (leading / internal /
+  //      repeated: `*go`, `go*rg`, `gorg**`)
+  //   4. bare `*` token
+  //   5. FTS operator characters `()^:,+-` in BARE words (the backend's
+  //      word loop rejects them; inside a quoted phrase they are literal
+  //      content — `"foo-bar"` is a valid phrase)
+  const tokens: { word: string, quoted: boolean, phrase: string }[] = []
+>>>>>>> feat/books-watcher
   const tokenRe = /"([^"]*)"|(\S+)/g
   let tok: RegExpExecArray | null
   while ((tok = tokenRe.exec(text)) !== null) {
     if (tok[1] !== undefined) {
+<<<<<<< HEAD
       const phrase = tok[1].trim()
       if (phrase) highlightTerms.push(phrase)
     } else {
@@ -69,6 +107,54 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
       } else {
         // Star(s) in unsupported positions: highlight the literal token
         highlightTerms.push(word)
+=======
+      tokens.push({ word: `"${tok[1]}"`, quoted: true, phrase: tok[1].trim() })
+    } else {
+      tokens.push({ word: tok[2], quoted: false, phrase: '' })
+    }
+  }
+
+  const quoteCount = (text.match(/"/g) ?? []).length
+  const anyInvalid =
+    quoteCount % 2 === 1 ||           // (1) unterminated quote
+    tokens.some(t => {
+      if (t.quoted) return false
+      const w = t.word
+      // (2) quote mid-word: a word token containing a `"` (balanced, or
+      // the parser above would have made it a phrase token)
+      if (w.includes('"')) return true
+      // (3)(4) star position checks
+      if (!w.includes('*')) return false
+      if (w === '*') return true      // (4) bare star
+      return /\*\S/.test(w) || w.includes('**') // internal/repeated/leading
+    }) ||
+    tokens.some(t => !t.quoted && /[()^:,+-]/.test(t.word)) || // (5) operator chars in bare words only
+    false
+
+  const highlightTerms: string[] = []
+  const termKinds: { term: string, kind: 'exact' | 'phrase' | 'prefix' | 'literal' }[] = []
+  const rawTokens: string[] = []
+
+  for (const t of tokens) {
+    if (t.quoted) {
+      rawTokens.push(t.word)
+      if (t.phrase) {
+        highlightTerms.push(t.phrase)
+        termKinds.push({ term: t.phrase, kind: anyInvalid ? 'literal' : 'phrase' })
+      }
+    } else {
+      rawTokens.push(t.word)
+      const m = /^([^*]+)(\*)?$/.exec(t.word)
+      const stem = m?.[1]?.trim() ?? ''
+      if (stem) {
+        const kind = anyInvalid ? 'literal' : (m && m[2]) ? 'prefix' : 'exact'
+        highlightTerms.push(stem)
+        termKinds.push({ term: stem, kind })
+      } else {
+        // Bare `*` or a token made only of stars: literal
+        highlightTerms.push(t.word)
+        termKinds.push({ term: t.word, kind: 'literal' })
+>>>>>>> feat/books-watcher
       }
     }
   }
@@ -77,6 +163,11 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
     text,
     textWords,
     highlightTerms,
+<<<<<<< HEAD
+=======
+    termKinds,
+    rawTokens,
+>>>>>>> feat/books-watcher
     ...(sender && { sender }),
     ...(channel && { channel }),
   }

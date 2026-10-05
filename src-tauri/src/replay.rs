@@ -1002,7 +1002,7 @@ mod ingest_tests {
         // server-independent natural key (character, entity_id, killed_at).
         let (pool, db_path) = temp_pool();
         {
-            let conn = pool.get().unwrap();
+            let conn = pool.get_write().unwrap();
             // Simulate a live-recorded kill: corpse 500 "Goblin" at 15:42:00 under
             // the real server "Arisetsu", with one looted HealthPotion (inst 111).
             conn.execute(

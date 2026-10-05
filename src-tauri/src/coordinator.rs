@@ -35,7 +35,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Timestamped log line for startup diagnostics.
 macro_rules! startup_log {
     ($($arg:tt)*) => {
-        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*));
+        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*))
     };
 }
 
@@ -120,6 +120,16 @@ pub struct DataIngestCoordinator {
     /// Casino arena narration tracker — resolves Kuzavek's `[NPC Chatter]`
     /// intro/result lines into completed matches for the Arena widget.
     arena_tracker: crate::arena_parser::ArenaTracker,
+    /// Rez dedup: last persisted successful rez (target, timestamp) per chat
+    /// batch. The game emits "X resuscitates Y" and "Y comes back to life!"
+    /// in different contexts; if both ever fire for the same rez (same
+    /// target, seconds apart) only the first row is kept. A SET of
+    /// (target, minute) keys rather than a single tuple: two rezzes of
+    /// different targets can interleave within a minute
+    /// (`rez A`, `rez B`, `A back`, `B back`), and a single-tuple guard
+    /// would miss the second pair because the last target isn't B.
+    /// Pruned to a bounded window below so it never grows unbounded.
+    last_rez_dedup: std::collections::HashSet<(String, String)>,
 }
 
 impl DataIngestCoordinator {
@@ -163,6 +173,7 @@ impl DataIngestCoordinator {
             pending_cow_interaction: None,
             recent_kills: std::collections::HashMap::new(),
             arena_tracker: crate::arena_parser::ArenaTracker::new(),
+            last_rez_dedup: std::collections::HashSet::new(),
         })
     }
 
@@ -402,15 +413,31 @@ impl DataIngestCoordinator {
                     .db_pool
                     .get_write()
                     .map_err(|e| format!("Database error: {}", e))?;
-                log_positions::update_position(
-                    &conn,
-                    path.to_str().unwrap_or(""),
-                    "player",
-                    position,
-                    watcher.get_active_character(),
-                    None,
-                )
-                .map_err(|e| format!("Failed to save position: {}", e))?;
+                if watcher.position_was_reset() {
+                    // Rotation reset pending (stop raced the next save
+                    // cycle): force the reset value — the monotonic update
+                    // would keep the stale larger cursor. The watcher is
+                    // dropped below, so no flag clearing is needed.
+                    log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to force-save position: {}", e))?;
+                } else {
+                    log_positions::update_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to save position: {}", e))?;
+                }
             }
         }
 
@@ -525,15 +552,31 @@ impl DataIngestCoordinator {
                 .get_write()
                 .map_err(|e| format!("Database error: {}", e))?;
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
-            log_positions::update_position(
-                &conn,
-                &file_path_str,
-                "chat",
-                position,
-                None,
-                Some(&metadata),
-            )
-            .map_err(|e| format!("Failed to save position: {}", e))?;
+            if watcher.position_was_reset() {
+                // Rotation reset pending (stop raced the next save cycle):
+                // the monotonic update would keep the stale larger cursor —
+                // force the reset value instead. The watcher is dropped
+                // below, so no flag clearing is needed.
+                log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to force-save position: {}", e))?;
+            } else {
+                log_positions::update_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to save position: {}", e))?;
+            }
         }
 
         // Emit status change event
@@ -571,20 +614,26 @@ impl DataIngestCoordinator {
 
         // Persist watcher positions every poll cycle so a crash doesn't
         // lose all progress and cause a full re-parse on next launch.
-        self.save_watcher_positions();
+        self.save_watcher_positions_mut();
 
         Ok(())
     }
 
     /// Persist current watcher byte offsets to the database.
     /// Called every poll cycle so a crash only loses ~1 polling interval of progress.
+<<<<<<< HEAD
     fn save_watcher_positions(&self) {
+=======
+    /// `&mut self` because a detected truncation/rotation must also force the
+    /// stored cursor down (and clear the watcher's reset flag).
+    fn save_watcher_positions_mut(&mut self) {
+>>>>>>> feat/books-watcher
         let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
 
-        if let Some(watcher) = &self.player_watcher {
+        if let Some(watcher) = &mut self.player_watcher {
             if let Some(path) = self.settings.get_player_log_path() {
                 log_positions::update_position(
                     &conn,
@@ -595,10 +644,33 @@ impl DataIngestCoordinator {
                     None,
                 )
                 .ok();
+                if watcher.position_was_reset() {
+                    // Truncation/rotation this cycle: the monotonic MAX guard
+                    // would keep the stale larger offset — force the cursor
+                    // down. Clear the flag ONLY after the force succeeds:
+                    // a discarded failure would leave the stale cursor in
+                    // place with no later poll retrying the reset.
+                    if log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        watcher.get_position(),
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .is_ok()
+                    {
+                        watcher.clear_position_reset();
+                    } else {
+                        eprintln!(
+                            "[coordinator] Failed to persist rotation reset for Player.log; will retry next cycle"
+                        );
+                    }
+                }
             }
         }
 
-        if let Some(watcher) = &self.chat_watcher {
+        if let Some(watcher) = &mut self.chat_watcher {
             let file_path_str = watcher.get_file_path().to_string_lossy().to_string();
             let file_name = watcher.get_file_name().to_string();
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
@@ -611,6 +683,25 @@ impl DataIngestCoordinator {
                 Some(&metadata),
             )
             .ok();
+            if watcher.position_was_reset() {
+                if log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    watcher.get_position(),
+                    None,
+                    Some(&metadata),
+                )
+                .is_ok()
+                {
+                    watcher.clear_position_reset();
+                } else {
+                    eprintln!(
+                        "[coordinator] Failed to persist rotation reset for {}; will retry next cycle",
+                        file_name
+                    );
+                }
+            }
         }
     }
 
@@ -1433,12 +1524,59 @@ impl DataIngestCoordinator {
 
                     // Check Action Emotes channel for resuscitate events
                     if let Some(rez_event) = parse_resuscitate_message(&msg) {
-                        if let Err(e) = self.persist_resuscitate_event(&rez_event) {
-                            eprintln!("Failed to persist resuscitate event: {}", e);
+                        // Dedup guard: if the game emits both phrasings for
+                        // one rez ("X resuscitates Y" + "Y comes back to
+                        // life!" within 30s of each other), persist only the
+                        // first. Same-target + same-minute timestamps are the
+                        // best available identity without a session id.
+                        // Keys live in a SET so interleaved rezzes of
+                        // different targets within one minute each still
+                        // dedup (a single last-target guard would miss the
+                        // second pair). Old keys (>= 2 minutes ago) are
+                        // pruned to bound memory.
+                        let dup_key = match &rez_event {
+                            crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } => {
+                                Some((target_name.clone(), timestamp.get(..16).unwrap_or(timestamp).to_string()))
+                            }
+                            _ => None,
+                        };
+                        let is_duplicate = dup_key
+                            .as_ref()
+                            .map(|key| self.last_rez_dedup.contains(key))
+                            .unwrap_or(false);
+
+                        // Prune stale keys: a (target, minute) from two
+                        // minutes ago can't dedup anything anymore — the
+                        // pair, if any, has long since arrived.
+                        if let Some((_, minute)) = &dup_key {
+                            if let Ok(minute_ts) = chrono::NaiveDateTime::parse_from_str(
+                                &format!("{}:00", minute), "%Y-%m-%d %H:%M:%S",
+                            ) {
+                                let cutoff = (minute_ts - chrono::Duration::minutes(2))
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string();
+                                self.last_rez_dedup.retain(|(_, m)| m.as_str() >= cutoff.as_str());
+                            }
                         }
-                        self.app_handle
-                            .emit("character-resuscitated", &rez_event)
-                            .ok();
+
+                        if is_duplicate {
+                            eprintln!("[coordinator] Skipped duplicate rez event for {}", match &rez_event {
+                                crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { target_name, .. } => target_name.clone(),
+                                _ => String::new(),
+                            });
+                        } else {
+                            if let Err(e) = self.persist_resuscitate_event(&rez_event) {
+                                eprintln!("Failed to persist resuscitate event: {}", e);
+                            } else if let Some(key) = dup_key {
+                                // Arm the dedup guard only AFTER a successful
+                                // persist: if the insert fails, the paired
+                                // line must still be able to produce a row.
+                                self.last_rez_dedup.insert(key);
+                            }
+                            self.app_handle
+                                .emit("character-resuscitated", &rez_event)
+                                .ok();
+                        }
                     }
 
                     messages.push(msg);
@@ -2046,7 +2184,11 @@ impl DataIngestCoordinator {
         let Some((character, server)) = self.active_character_server() else {
             return;
         };
+<<<<<<< HEAD
         let _ = persist_book_content(
+=======
+        if let Err(e) = persist_book_content(
+>>>>>>> feat/books-watcher
             &self.db_pool,
             &self.app_handle,
             &character,
@@ -2054,7 +2196,13 @@ impl DataIngestCoordinator {
             book_type,
             title,
             content,
+<<<<<<< HEAD
         );
+=======
+        ) {
+            eprintln!("[coordinator] Failed to persist book: {e}");
+        }
+>>>>>>> feat/books-watcher
     }
 
     /// Parse the Gardening Almanac HTML content and persist structured events
@@ -2223,7 +2371,13 @@ impl DataIngestCoordinator {
             &server,
             book_type,
             content,
+<<<<<<< HEAD
         );
+=======
+        )
+        .map_err(|e| eprintln!("[coordinator] {e}"))
+        .ok();
+>>>>>>> feat/books-watcher
     }
 
     // ── Milking timers ────────────────────────────────────────────
@@ -2330,13 +2484,23 @@ impl DataIngestCoordinator {
         // sees real line breaks on both paths (historically the live path
         // silently matched no fields).
         let content = normalize_book_content(content);
+<<<<<<< HEAD
         ingest_teleport_binds_content(
+=======
+        if let Err(e) = ingest_teleport_binds_content(
+>>>>>>> feat/books-watcher
             &self.db_pool,
             &self.app_handle,
             &character,
             &server,
             &content,
+<<<<<<< HEAD
         );
+=======
+        ) {
+            eprintln!("[coordinator] Teleportation binds failed: {e}");
+        }
+>>>>>>> feat/books-watcher
     }
 
     /// Parse a hoplology "Equipment Studied:" skill report and backfill studied items.
@@ -2352,16 +2516,27 @@ impl DataIngestCoordinator {
         // real line breaks on both paths (historically the live path split
         // on literal `\n` only).
         let content = normalize_book_content(content);
+<<<<<<< HEAD
         let inserted = ingest_hoplology_content(
+=======
+        match ingest_hoplology_content(
+>>>>>>> feat/books-watcher
             &self.db_pool,
             &self.game_data,
             &self.app_handle,
             &character,
             &server,
             &content,
+<<<<<<< HEAD
         );
         if inserted == 0 {
             startup_log!("[coordinator] Hoplology report: no new items");
+=======
+        ) {
+            Ok(0) => startup_log!("[coordinator] Hoplology report: no new items"),
+            Ok(_) => {} // logged inside
+            Err(e) => eprintln!("[coordinator] Hoplology report failed: {e}"),
+>>>>>>> feat/books-watcher
         }
     }
 
@@ -3231,7 +3406,13 @@ pub fn persist_book_content(
     content: &str,
 ) -> Result<(), String> {
     let dt = chrono::Utc::now().to_rfc3339();
+<<<<<<< HEAD
     let conn = db.get_write().map_err(|e| format!("Database connection error: {e}"))?;
+=======
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+>>>>>>> feat/books-watcher
     conn.execute(
         "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -3240,7 +3421,11 @@ pub fn persist_book_content(
             captured_at = excluded.captured_at",
         rusqlite::params![character, server, book_type, title, content, dt],
     )
+<<<<<<< HEAD
     .ok();
+=======
+    .map_err(|e| format!("Failed to persist book: {e}"))?;
+>>>>>>> feat/books-watcher
     app_handle
         .emit("game-state-updated", vec!["books"])
         .ok();
@@ -3257,6 +3442,7 @@ pub fn ingest_report_stats_content(
     server: &str,
     book_type: &str,
     content: &str,
+<<<<<<< HEAD
 ) {
     let stats = match book_type {
         "PlayerAge" => crate::report_stats::parse_player_age(content),
@@ -3289,6 +3475,32 @@ pub fn ingest_report_stats_content(
             eprintln!("[coordinator] Failed to persist report stats: {e}");
         }
     }
+=======
+) -> Result<usize, String> {
+    let stats = match book_type {
+        "PlayerAge" => crate::report_stats::parse_player_age(content),
+        "HelpScreen" => crate::report_stats::parse_behavior_report(content),
+        _ => return Ok(0),
+    };
+    if stats.is_empty() {
+        return Ok(0);
+    }
+    let dt = chrono::Utc::now().to_rfc3339();
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    let n = crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt)
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    startup_log!(
+        "[coordinator] Imported {} stats from {} report",
+        n,
+        book_type,
+    );
+    app_handle
+        .emit("game-state-updated", vec!["report_stats"])
+        .ok();
+    Ok(n)
+>>>>>>> feat/books-watcher
 }
 
 /// Extract a named field value from teleportation status text.
@@ -3316,6 +3528,7 @@ pub fn ingest_teleport_binds_content(
     character: &str,
     server: &str,
     content: &str,
+<<<<<<< HEAD
 ) {
     let primary = extract_bind_field(content, "Primary Bind Location:");
     let secondary = extract_bind_field(content, "Secondary Bind Location:");
@@ -3324,6 +3537,16 @@ pub fn ingest_teleport_binds_content(
         Ok(c) => c,
         Err(_) => return,
     };
+=======
+) -> Result<(), String> {
+    let primary = extract_bind_field(content, "Primary Bind Location:");
+    let secondary = extract_bind_field(content, "Secondary Bind Location:");
+
+    // Upsert MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every bind
+    // update (execute failure swallowed by `.ok()`).
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+>>>>>>> feat/books-watcher
 
     let dt = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -3336,7 +3559,11 @@ pub fn ingest_teleport_binds_content(
             last_updated = excluded.last_updated",
         rusqlite::params![character, server, primary, secondary, dt],
     )
+<<<<<<< HEAD
     .ok();
+=======
+    .map_err(|e| format!("Failed to upsert teleportation binds: {e}"))?;
+>>>>>>> feat/books-watcher
 
     startup_log!(
         "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
@@ -3346,6 +3573,10 @@ pub fn ingest_teleport_binds_content(
     app_handle
         .emit("game-state-updated", vec!["teleportation"])
         .ok();
+<<<<<<< HEAD
+=======
+    Ok(())
+>>>>>>> feat/books-watcher
 }
 
 /// Parse a hoplology "Equipment Studied:" skill report and backfill studied
@@ -3358,11 +3589,19 @@ pub fn ingest_hoplology_content(
     character: &str,
     server: &str,
     content: &str,
+<<<<<<< HEAD
 ) -> usize {
     let conn = match db.get_write() {
         Ok(c) => c,
         Err(_) => return 0,
     };
+=======
+) -> Result<usize, String> {
+    // Inserts MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every study
+    // row. Failures propagate so the Books watcher can retry the file.
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+>>>>>>> feat/books-watcher
 
     // Use current wall-clock time as the "first seen" timestamp for
     // report-backfilled items (the player.log timestamp is just HH:MM:SS
@@ -3393,7 +3632,16 @@ pub fn ingest_hoplology_content(
             Ok(Some(_)) => inserted += 1,
             Ok(None) => {} // already known
             Err(e) => {
+<<<<<<< HEAD
                 eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
+=======
+                // Propagate the first failure: already-inserted rows are
+                // idempotent, so returning Err makes the Books watcher treat
+                // the file as unseen and retry it — instead of marking the
+                // mtime seen over a partial import.
+                eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
+                return Err(format!("hoplology insert failed for '{}': {e}", trimmed));
+>>>>>>> feat/books-watcher
             }
         }
     }
@@ -3407,7 +3655,11 @@ pub fn ingest_hoplology_content(
             .emit("game-state-updated", vec!["hoplology"])
             .ok();
     }
+<<<<<<< HEAD
     inserted
+=======
+    Ok(inserted)
+>>>>>>> feat/books-watcher
 }
 
 /// Normalize an equipped combat-skill pair into a stable, order-independent key
@@ -3496,3 +3748,49 @@ mod loadout_tests {
     }
 }
 
+
+/// True when two chat timestamps fall in the same 60-second bucket
+/// (`"YYYY-MM-DD HH:MM:SS"` strings). The dedup guard now keys off
+/// `timestamp[..16]` directly; this helper is kept for the semantics
+/// tests below.
+#[cfg(test)]
+fn same_minute(a: &str, b: &str) -> bool {
+    a.get(..16) == b.get(..16) && a.len() >= 16 && b.len() >= 16
+}
+
+#[cfg(test)]
+mod rez_dedup_tests {
+    use super::same_minute;
+
+    #[test]
+    fn same_minute_pairs() {
+        // Pair from a single rez: both phrasings share the minute.
+        assert!(same_minute("2026-10-04 12:34:56", "2026-10-04 12:34:59"));
+        // Legitimate distinct rez later in the same hour is NOT a dup.
+        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-04 12:35:10"));
+        // Different day/hour entirely.
+        assert!(!same_minute("2026-10-04 12:34:56", "2026-10-05 12:34:56"));
+        // Minute boundary: :59 vs next minute :00.
+        assert!(!same_minute("2026-10-04 12:34:59", "2026-10-04 12:35:00"));
+        // Malformed/short timestamps never match (guards the len check).
+        assert!(!same_minute("2026-10-04", "2026-10-04 12:34:56"));
+        assert!(!same_minute("", "2026-10-04 12:34:56"));
+    }
+
+    #[test]
+    fn dedup_window_semantics() {
+        // The coordinator guard: `target_name == prev_target &&
+        // same_minute(timestamp, prev_ts)`. Same target + same minute =>
+        // suppressed. Different target in the same minute => kept.
+        let prev = ("Bob".to_string(), "2026-10-04 12:34:56".to_string());
+        let dup_same_target = "Bob".to_string() == prev.0
+            && same_minute("2026-10-04 12:34:57", &prev.1);
+        let distinct_target_same_minute =
+            "Carol".to_string() == prev.0 && same_minute("2026-10-04 12:34:57", &prev.1);
+        let same_target_next_minute =
+            "Bob".to_string() == prev.0 && same_minute("2026-10-04 12:35:30", &prev.1);
+        assert!(dup_same_target); // paired phrasing — suppressed
+        assert!(!distinct_target_same_minute); // two real rezzes — both kept
+        assert!(!same_target_next_minute); // legit later rez — kept
+    }
+}

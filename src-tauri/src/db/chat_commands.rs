@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension, Result};
 /// Insert a batch of chat messages into the database.
 /// Messages on excluded channels are silently skipped — they must never be stored.
 pub fn insert_chat_messages(
-    conn: &DbConnection,
+    conn: &rusqlite::Connection,
     messages: &[ChatMessage],
     log_file: &str,
     excluded_channels: &[String],
@@ -141,8 +141,13 @@ pub fn get_chat_messages(
     let order_dir = if filter.sort_order == "asc" { "ASC" } else { "DESC" };
     let query = format!(
         "SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player \
+<<<<<<< HEAD
          FROM chat_messages cm {} ORDER BY cm.timestamp {} LIMIT {} OFFSET {}",
         where_clause, order_dir, filter.limit, filter.offset
+=======
+         FROM chat_messages cm {} ORDER BY cm.timestamp {}, cm.id {} LIMIT {} OFFSET {}",
+        where_clause, order_dir, order_dir, filter.limit, filter.offset
+>>>>>>> feat/books-watcher
     );
 
     eprintln!("[DEBUG] Chat query: {}", query);
@@ -516,16 +521,26 @@ pub struct ChatDayRow {
     pub count: i64,
 }
 
+<<<<<<< HEAD
 /// Get messages centered on a time anchor: up to `context_count` messages at
 /// or after `anchor_time` and up to `context_count` before it, in the same
 /// channel when one is given, returned chronologically. No offset math —
 /// uses the timestamp index for O(log n) boundary seeks.
+=======
+/// Get a day's messages in the requested sort order. Every caller passes a
+/// `YYYY-MM-DD` day anchor (day jump / prev-day navigation); the window is
+/// exactly that day's rows — never leaks adjacent days, and the ordering
+/// matches the sort toggle so continuation pagination composes cleanly.
+/// Caller filters (channel, sender, search, item filters) always apply.
+/// No offset math — uses the timestamp index for O(log n) boundary seeks.
+>>>>>>> feat/books-watcher
 pub fn get_messages_around_time(
     conn: &DbConnection,
     anchor_time: &str,
     filter: &ChatMessageFilter,
     context_count: i64,
 ) -> Result<Vec<ChatMessageRow>> {
+<<<<<<< HEAD
     // Accept a bare `YYYY-MM-DD` day (day-jump case) or a full timestamp.
     let day = if anchor_time.len() == 10 {
         anchor_time.to_string()
@@ -540,12 +555,20 @@ pub fn get_messages_around_time(
     // at-or-before the anchor, asc: at-or-after). Bounds and caller filters
     // build in ONE filter so parameter indexes stay contiguous.
     let day_only = anchor_time.len() == 10;
+=======
+    // The anchor is a bare `YYYY-MM-DD` day (day-jump case).
+    let day = anchor_time.get(..10).unwrap_or(anchor_time).to_string();
+
+    // Bounds and caller filters build in ONE filter so parameter indexes
+    // stay contiguous.
+>>>>>>> feat/books-watcher
     let desc = filter.sort_order != "asc";
     let mut combined = filter.clone();
     combined.start_time = Some(format!("{} 00:00:00", day));
     combined.end_time = Some(format!("{} 23:59:59", day));
     combined.limit = context_count;
     combined.offset = 0;
+<<<<<<< HEAD
     let (mut conditions, mut params) = build_chat_where(&combined);
 
     if !day_only {
@@ -557,6 +580,9 @@ pub fn get_messages_around_time(
         conditions.push(anchor_cond);
         params.push(Box::new(anchor_time.to_string()));
     }
+=======
+    let (conditions, params) = build_chat_where(&combined);
+>>>>>>> feat/books-watcher
 
     let order = if desc {
         "ORDER BY cm.timestamp DESC, cm.id DESC"

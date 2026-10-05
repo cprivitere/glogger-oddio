@@ -295,10 +295,6 @@ pub fn backfill_from_chat_logs(
         return Ok(0);
     }
 
-    let mut conn = db
-        .get()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
     // Read files in name order so timestamps advance monotonically across the
     // backfill (Chat-YY-MM-DD.log sorts chronologically).
     let mut paths: Vec<_> = fs::read_dir(&dir)
@@ -322,6 +318,7 @@ pub fn backfill_from_chat_logs(
         // files, so a per-file tracker avoids stale pairings across a midnight
         // gap.
         let mut tracker = ArenaTracker::new();
+<<<<<<< HEAD
         // One IMMEDIATE transaction per file: startup backfills run
         // concurrently and a whole-scan transaction holds the write lock
         // long enough for the others' busy_timeout (5s) to expire.
@@ -351,9 +348,61 @@ pub fn backfill_from_chat_logs(
                         rusqlite::params![m.fought_at, m.fighter_a, m.fighter_b, m.winner],
                     )
                     .map_err(|e| format!("Insert error: {e}"))?;
+=======
+
+        // PARSE FIRST, WRITER SECOND: the app's single pooled writer must not
+        // sit held while megabytes of log text are read and parsed. Collect
+        // the matches for this file, then acquire the writer only around the
+        // insert transaction. One IMMEDIATE transaction per file: startup
+        // backfills run concurrently and a whole-scan transaction holds the
+        // write lock long enough for the others' busy_timeout (5s) to expire;
+        // inserts are idempotent (unique index), so per-file is safe.
+        let matches: Vec<(String, String, String, String)> = {
+            let reader = BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                let Some(msg) = parse_chat_line(&line) else {
+                    continue;
+                };
+                let ts = msg.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+                if let Some(m) = tracker.observe(
+                    msg.channel.as_deref(),
+                    msg.sender.as_deref(),
+                    &msg.message,
+                    &ts,
+                ) {
+                    out.push((m.fought_at, m.fighter_a, m.fighter_b, m.winner));
+                }
+>>>>>>> feat/books-watcher
             }
+            out
+        };
+        if matches.is_empty() {
+            continue;
+        }
+<<<<<<< HEAD
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+=======
+
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        for (fought_at, fighter_a, fighter_b, winner) in &matches {
+            inserted += tx
+                .execute(
+                    "INSERT OR IGNORE INTO arena_matches
+                        (fought_at, fighter_a, fighter_b, winner)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![fought_at, fighter_a, fighter_b, winner],
+                )
+                .map_err(|e| format!("Insert error: {e}"))?;
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        drop(conn); // release the writer before the next file
+>>>>>>> feat/books-watcher
     }
 
     Ok(inserted)
@@ -402,10 +451,16 @@ pub fn backfill_bets_from_player_logs(
     // holds the write lock across both Player logs while live ingest waits.
     // The bet tracker still spans files in order — only the transaction
     // boundary is per file. Idempotent (unique index), so per-file is safe.
+<<<<<<< HEAD
     let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
+=======
+    // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
+    // files are read and parsed — collect resolved bets per file, then
+    // acquire the writer only around the insert transaction.
+>>>>>>> feat/books-watcher
     let mut tracker = ArenaBetTracker::new();
     let mut inserted = 0usize;
 
@@ -419,6 +474,7 @@ pub fn backfill_bets_from_player_logs(
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
+<<<<<<< HEAD
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -441,9 +497,52 @@ pub fn backfill_bets_from_player_logs(
                     bet.payout,
                     bet.won,
                 )?;
+=======
+        let bets: Vec<_> = {
+            let mut out = Vec::new();
+            for line in text.lines() {
+                // Cheap pre-filter — bet lines are a tiny fraction of Player.log.
+                if !line.contains("You are betting ")
+                    && !line.contains("Success! You have placed your bet for ")
+                    && !line.contains("You received ")
+                {
+                    continue;
+                }
+                if let Some(bet) = tracker.observe_line(line, base_date) {
+                    out.push(bet);
+                }
+>>>>>>> feat/books-watcher
             }
+            out
+        };
+        if bets.is_empty() {
+            continue;
+        }
+<<<<<<< HEAD
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+=======
+
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        for bet in &bets {
+            // `&tx` derefs to `&Connection` for the shared recorder.
+            inserted += record_arena_bet(
+                &tx,
+                &bet.placed_at,
+                &bet.pick,
+                &bet.opponent,
+                bet.wager,
+                bet.payout,
+                bet.won,
+            )?;
         }
         tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        drop(conn); // release the writer before the next file
+>>>>>>> feat/books-watcher
     }
 
     Ok(inserted)
