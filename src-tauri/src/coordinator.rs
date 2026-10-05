@@ -413,15 +413,31 @@ impl DataIngestCoordinator {
                     .db_pool
                     .get_write()
                     .map_err(|e| format!("Database error: {}", e))?;
-                log_positions::update_position(
-                    &conn,
-                    path.to_str().unwrap_or(""),
-                    "player",
-                    position,
-                    watcher.get_active_character(),
-                    None,
-                )
-                .map_err(|e| format!("Failed to save position: {}", e))?;
+                if watcher.position_was_reset() {
+                    // Rotation reset pending (stop raced the next save
+                    // cycle): force the reset value — the monotonic update
+                    // would keep the stale larger cursor. The watcher is
+                    // dropped below, so no flag clearing is needed.
+                    log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to force-save position: {}", e))?;
+                } else {
+                    log_positions::update_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to save position: {}", e))?;
+                }
             }
         }
 
@@ -536,15 +552,31 @@ impl DataIngestCoordinator {
                 .get_write()
                 .map_err(|e| format!("Database error: {}", e))?;
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
-            log_positions::update_position(
-                &conn,
-                &file_path_str,
-                "chat",
-                position,
-                None,
-                Some(&metadata),
-            )
-            .map_err(|e| format!("Failed to save position: {}", e))?;
+            if watcher.position_was_reset() {
+                // Rotation reset pending (stop raced the next save cycle):
+                // the monotonic update would keep the stale larger cursor —
+                // force the reset value instead. The watcher is dropped
+                // below, so no flag clearing is needed.
+                log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to force-save position: {}", e))?;
+            } else {
+                log_positions::update_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to save position: {}", e))?;
+            }
         }
 
         // Emit status change event

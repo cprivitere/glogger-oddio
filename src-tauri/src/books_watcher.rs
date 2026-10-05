@@ -131,7 +131,9 @@ fn scan_books_dir(
     // `SkillReport_YYMMDD_HHMMSS` filename suffix is the authoritative
     // game timestamp (the gourmand latest-lookup already relies on
     // filename order being chronological). Files without a parsable
-    // suffix sort after all timestamped ones (deterministic: bare name).
+    // suffix sort BEFORE all timestamped ones (false < true in Rust) —
+    // that's the safe end: timestamped reports always overwrite whatever
+    // untimestamped files persisted, never the reverse.
     to_process.sort_by(|(path_a, _), (path_b, _)| {
         let key = |path: &PathBuf| -> (bool, String) {
             let stem = path
@@ -156,8 +158,8 @@ fn scan_books_dir(
         };
         let (ts_a, key_a) = key(path_a);
         let (ts_b, key_b) = key(path_b);
-        // Timestamped files sort by their (older-first) key; untimestamped
-        // ones sink to the end sorted by filename.
+        // Timestamped files sort by their (older-first) key after the
+        // untimestamped group.
         ts_a.cmp(&ts_b).then_with(|| key_a.cmp(&key_b))
     });
 
