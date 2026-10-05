@@ -6,6 +6,15 @@ Small tasks and notes that don't belong in a dedicated plan.
 
 ---
 
+## Deferred tuning (needs real-world data)
+
+- [ ] Three items parked for day-to-day tuning — see `docs/plans/deferred-tuning.md`:
+      rez-dedup 30s window calibration, brewing bulk-scan memory batching,
+      ChatMessageList day-jump scroll race. Each has concrete capture/measurement
+      steps and fix options in that file.
+
+---
+
 ## Investigations (Completed Research, No Code Changes Needed)
 
 These are investigated items kept for reference — the research is done but the underlying limitation or blocker remains.
