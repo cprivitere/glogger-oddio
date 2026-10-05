@@ -83,7 +83,11 @@ sed -i "s/\"title\": \"glogger v$CURRENT EXPERIMENTAL\"/\"title\": \"glogger v$N
 # 3c. Update tauri.personal.conf.json — personal window title
 # The personal conf is written as compact JSON ("title":"…", no space after
 # the colon) — match both spacings so the file is never silently skipped.
-sed -i "s/\"title\":\\?\"glogger v$CURRENT PERSONAL\"/\"title\":\\?\"glogger v$NEW_VERSION PERSONAL\"/" "$TAURI_PERSONAL_CONF"
+# NOTE: the replacement must NOT keep the "\?" (that's GNU sed BRE syntax
+# meaning "optional" — valid only on the PATTERN side). The replacement
+# side uses the spaced form; a compact file gets normalized to spaced,
+# which is valid JSON either way.
+sed -i "s/\"title\":\\?\"glogger v$CURRENT PERSONAL\"/\"title\": \"glogger v$NEW_VERSION PERSONAL\"/" "$TAURI_PERSONAL_CONF"
 
 # 4. Update package.json
 sed -i "s/\"version\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"version\": \"$NEW_VERSION\"/" "$PACKAGE_JSON"
