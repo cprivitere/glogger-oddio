@@ -1,4 +1,5 @@
 mod arena_parser;
+mod books_watcher;
 mod cdn;
 mod cdn_commands;
 mod cdn_diff;
@@ -140,9 +141,10 @@ use db::brewing_commands::{
     scan_snapshot_for_brewing_discoveries,
 };
 use chat_commands::{
-    delete_all_chat_messages, get_chat_channel_stats, get_chat_channels, get_chat_messages,
-    get_chat_messages_around, get_chat_stats, get_tell_conversations, get_watch_rule_messages,
-    purge_chat_messages, scan_chat_log_file, scan_chat_logs, tail_chat_log,
+    delete_all_chat_messages, count_chat_messages, get_chat_channel_stats, get_chat_channels,
+    get_chat_days, get_chat_messages, get_chat_messages_around, get_chat_messages_around_time,
+    get_chat_stats, get_tell_conversations, get_watch_rule_messages, purge_chat_messages,
+    scan_chat_log_file, scan_chat_logs, tail_chat_log,
 };
 use commands::parse_log;
 use debug_capture::replay_capture_file;
@@ -504,12 +506,34 @@ pub fn run() {
             // into the kill/loot database when the game rotates it.
             replay::spawn_player_prev_watcher(settings_manager.clone(), db_pool.clone());
 
-            // Step 5d: One-shot backfill of Combat Wisdom awards from the
-            // historical ChatLogs so the Combat Wisdom widget's per-monster
-            // cooldowns are populated immediately. Idempotent (unique index).
+            // Step 5c+1: Books-dir backfill watcher — ingests the game's
+            // <game_data>/Books/*.txt book exports (written both live and while
+            // glogger was closed), mirroring the live ProcessBook ingest via
+            // coordinator's shared ingestion helpers. Per-file mtime tracking,
+            // 30s cadence.
+            books_watcher::spawn_books_watcher(
+                settings_manager.clone(),
+                db_pool.clone(),
+                app_handle.clone(),
+            );
+
+            // Step 5d: One-shot backfills from the historical ChatLogs — Combat
+            // Wisdom awards, casino roulette outcomes, arena fights, and spoken
+            // words of power. All idempotent (unique indexes / delete-by-word).
+            //
+            // These run SEQUENTIALLY in one spawned task, in cheap-first order.
+            // Each uses per-file BEGIN IMMEDIATE transactions; running them
+            // concurrently starves the losers — four backfills doing
+            // back-to-back per-file transactions leave ~microsecond gaps, and
+            // SQLite's busy handler can't land in one, so the other BEGINs hit
+            // their 5s busy_timeout (observed in startup logs). Serializing
+            // them removes the contention entirely; the scans also share file
+            // cache. Catch-up/chat polling still interleaves fine (its bursts
+            // are short and its writers wait, not starve).
             {
                 let sm = settings_manager.clone();
                 let dbp = db_pool.clone();
+                let ah = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     match db::combat_wisdom_commands::backfill_from_chat_logs(&sm, &dbp) {
                         Ok(n) => {
@@ -517,32 +541,12 @@ pub fn run() {
                         }
                         Err(e) => eprintln!("Combat Wisdom backfill failed: {e}"),
                     }
-                });
-            }
-
-            // Step 5d-ii: One-shot backfill of casino roulette outcomes from the
-            // historical ChatLogs so the Roulette widget's pie chart is populated
-            // immediately. Idempotent (unique index).
-            {
-                let sm = settings_manager.clone();
-                let dbp = db_pool.clone();
-                tauri::async_runtime::spawn(async move {
                     match db::roulette_commands::backfill_from_chat_logs(&sm, &dbp) {
                         Ok(n) => {
                             startup_log!("Roulette backfill: {} new spin(s)", n);
                         }
                         Err(e) => eprintln!("Roulette backfill failed: {e}"),
                     }
-                });
-            }
-
-            // Step 5d-ii-b: One-shot backfill of casino arena fight outcomes from
-            // the historical ChatLogs so the Arena widget's rankings + matchup
-            // matrix are populated immediately. Idempotent (unique index).
-            {
-                let sm = settings_manager.clone();
-                let dbp = db_pool.clone();
-                tauri::async_runtime::spawn(async move {
                     match db::arena_commands::backfill_from_chat_logs(&sm, &dbp) {
                         Ok(n) => {
                             startup_log!("Arena backfill: {} new match(es)", n);
@@ -556,18 +560,6 @@ pub fn run() {
                         }
                         Err(e) => eprintln!("Arena bet backfill failed: {e}"),
                     }
-                });
-            }
-
-            // Step 5d-iii: One-shot removal of words of power that were spoken
-            // while glogger wasn't running — scans only chat logs dated after
-            // the earliest saved discovery, so it's a no-op when the widget is
-            // empty. Live uses are handled by the coordinator's chat-status path.
-            {
-                let sm = settings_manager.clone();
-                let dbp = db_pool.clone();
-                let ah = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
                     match db::words_of_power_commands::backfill_used_words_from_chat_logs(&sm, &dbp)
                     {
                         Ok(0) => {}
@@ -587,7 +579,7 @@ pub fn run() {
             {
                 let s = settings_manager.get();
                 if s.auto_purge_enabled {
-                    match db_pool.get() {
+                    match db_pool.get_write() {
                         Ok(conn) => {
                             match db::admin_commands::check_auto_purge(&conn, Some(s.auto_purge_days)) {
                                 Ok(r) if r.bytes_reclaimed > 0 => {
@@ -642,7 +634,7 @@ pub fn run() {
 
                         // Persist CDN data to database only if version changed
                         if let Some(pool) = app_handle.try_state::<db::DbPool>() {
-                            if let Ok(mut conn) = pool.get() {
+                            if let Ok(mut conn) = pool.get_write() {
                                 let db_version = db::queries::cdn_data::get_cdn_version(&conn).ok().flatten();
                                 if db_version == Some(data.version) {
                                     startup_log!("CDN v{} already persisted to database, skipping", data.version);
@@ -828,7 +820,10 @@ pub fn run() {
             scan_chat_logs,
             scan_chat_log_file,
             get_chat_messages,
+            count_chat_messages,
             get_chat_messages_around,
+            get_chat_messages_around_time,
+            get_chat_days,
             get_chat_channels,
             get_chat_channel_stats,
             get_chat_stats,

@@ -110,7 +110,7 @@ pub fn add_word_of_power(
     server_name: String,
     input: AddWordInput,
 ) -> Result<WordOfPower, String> {
-    let conn = db.get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     conn.execute(
@@ -142,7 +142,7 @@ pub fn add_word_of_power(
 
 #[tauri::command]
 pub fn delete_word_of_power(db: State<'_, DbPool>, id: i64) -> Result<(), String> {
-    let conn = db.get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM words_of_power WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -173,7 +173,7 @@ pub fn import_words_of_power_csv(
     let col_time = find_header_opt(&headers, &["Time", "time"]);
     let col_desc = find_header_opt(&headers, &["Description", "description"]);
 
-    let conn = db.get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let mut imported = 0usize;
@@ -310,11 +310,10 @@ pub fn backfill_used_words_from_chat_logs(
     settings: &SettingsManager,
     db: &DbPool,
 ) -> Result<usize, String> {
-    let conn = db
-        .get()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
+    // The initial saved-words query is read-only: use the read pool so the
+    // app's single writer stays free until a delete actually happens.
     let saved: Vec<String> = {
+        let conn = db.get().map_err(|e| format!("Database connection error: {e}"))?;
         let mut stmt = conn
             .prepare("SELECT discovered_at FROM words_of_power")
             .map_err(|e| format!("Query prepare error: {e}"))?;
@@ -341,11 +340,18 @@ pub fn backfill_used_words_from_chat_logs(
         .min()
         .map(|d| d - chrono::Duration::days(1));
 
-    let entries =
-        std::fs::read_dir(&dir).map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?;
-
+    // BEGIN IMMEDIATE (not DEFERRED) so busy_timeout applies to acquisition;
+    // one transaction per file keeps each write-lock hold short — a
+    // whole-scan transaction starves the concurrent startup backfills'
+    // busy_timeout (5s). Deletes are idempotent, so per-file is safe.
+    // The WRITER CONNECTION is scoped per file as well: checkout only when a
+    // file is about to be processed, drop it right after the commit, so
+    // live-ingest writers can interleave between files.
     let mut deleted = 0usize;
-    for entry in entries.flatten() {
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| format!("Failed to read ChatLogs dir: {e}"))?
+        .flatten()
+    {
         let path = entry.path();
         let Some(file_date) = path
             .file_name()
@@ -361,18 +367,41 @@ pub fn backfill_used_words_from_chat_logs(
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            let Some(msg) = parse_chat_line(&line) else {
-                continue;
-            };
-            if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
-                parse_status_message(&msg)
-            {
-                deleted += delete_words_by_word(&conn, &word)
-                    .map_err(|e| format!("Delete error: {e}"))?;
+        // PARSE FIRST, WRITER SECOND: the writer must not sit held while the
+        // file is read and parsed — collect the used words, then acquire the
+        // writer only around the delete transaction. Deletes are idempotent,
+        // so collecting first then deleting loses nothing.
+        let used: Vec<String> = {
+            let reader = std::io::BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                let Some(msg) = parse_chat_line(&line) else {
+                    continue;
+                };
+                if let Some(ChatStatusEvent::WordOfPowerUsed { word, .. }) =
+                    parse_status_message(&msg)
+                {
+                    out.push(word);
+                }
             }
+            out
+        };
+        if used.is_empty() {
+            continue;
         }
+
+        let mut conn = db
+            .get_write()
+            .map_err(|e| format!("Database connection error: {e}"))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        for word in &used {
+            deleted += delete_words_by_word(&tx, word)
+                .map_err(|e| format!("Delete error: {e}"))?;
+        }
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        drop(conn); // release the writer before the next file
     }
 
     Ok(deleted)

@@ -149,11 +149,8 @@ pub async fn force_rebuild_cdn_tables(
     db: State<'_, DbPool>,
     cdn_state: State<'_, crate::cdn_commands::GameDataState>,
 ) -> Result<String, String> {
-    let mut conn = db
-        .get()
-        .map_err(|e| format!("Database connection error: {e}"))?;
-
-    // Get the current game data from memory
+    // Check the in-memory CDN data before touching the writer — a version-0
+    // bail must not queue behind (or hold) the single write connection.
     let data = cdn_state.read().await;
 
     if data.version == 0 {
@@ -162,6 +159,10 @@ pub async fn force_rebuild_cdn_tables(
                 .to_string(),
         );
     }
+
+    let mut conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
 
     // Persist to database (this clears and rebuilds CDN tables)
     crate::db::cdn_persistence::persist_cdn_data(&mut conn, &data)
@@ -264,7 +265,7 @@ pub fn purge_player_data(
     options: PurgeOptions,
 ) -> Result<PurgeResult, String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let cutoff = if options.purge_all {
@@ -302,7 +303,7 @@ pub struct CompactResult {
 #[tauri::command]
 pub fn compact_database(db: State<'_, DbPool>) -> Result<CompactResult, String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let bytes_before = db_size_bytes(&conn);

@@ -70,7 +70,7 @@ pub fn insert_stall_events(
         .map_err(|e| format!("StallOpsLock poisoned: {e}"))?;
 
     let mut conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let tx = conn
@@ -505,7 +505,7 @@ pub fn toggle_stall_event_ignored(
         .ok_or_else(|| "toggle_stall_event_ignored requires an owner".to_string())?
         .to_string();
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
     conn.execute(
         "UPDATE stall_events SET ignored = ?1 WHERE id = ?2 AND owner = ?3",
@@ -770,7 +770,7 @@ pub fn clear_stall_events(
         .map_err(|e| format!("StallOpsLock poisoned: {e}"))?;
 
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
     let deleted = conn
         .execute(
@@ -805,9 +805,10 @@ pub struct ExportResult {
 }
 
 /// Scan a filename for a 4-digit year between 2000 and 2099. Falls back to
-/// the current local year if no match. Used by Import to seed the year
-/// resolver when the book content itself doesn't carry an explicit year.
-fn year_from_filename(path: &Path) -> i32 {
+/// the current local year if no match. Used by Import and the Books-directory
+/// watcher to seed the year resolver when the book content itself doesn't
+/// carry an explicit year.
+pub(crate) fn year_from_filename(path: &Path) -> i32 {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())

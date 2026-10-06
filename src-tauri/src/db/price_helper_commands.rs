@@ -76,7 +76,7 @@ pub fn create_price_helper_quote(
     input: CreateQuoteInput,
 ) -> Result<i64, String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let default_fee = r#"{"per_craft_fee":0,"material_pct":0,"material_pct_basis":"total","flat_fee":0}"#;
@@ -196,7 +196,7 @@ pub fn update_price_helper_quote(
     input: UpdateQuoteInput,
 ) -> Result<(), String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     conn.execute(
@@ -212,7 +212,7 @@ pub fn update_price_helper_quote(
 #[tauri::command]
 pub fn delete_price_helper_quote(db: State<'_, DbPool>, quote_id: i64) -> Result<(), String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     conn.execute("DELETE FROM price_helper_quotes WHERE id = ?1", [quote_id])
@@ -227,7 +227,7 @@ pub fn add_price_helper_entry(
     input: AddQuoteEntryInput,
 ) -> Result<i64, String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let next_order: i32 = conn
@@ -260,7 +260,7 @@ pub fn update_price_helper_entry(
     input: UpdateQuoteEntryInput,
 ) -> Result<(), String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     conn.execute(
@@ -282,7 +282,7 @@ pub fn update_price_helper_entry(
 #[tauri::command]
 pub fn remove_price_helper_entry(db: State<'_, DbPool>, entry_id: i64) -> Result<(), String> {
     let conn = db
-        .get()
+        .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     conn.execute(

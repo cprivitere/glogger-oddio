@@ -6,6 +6,15 @@ Small tasks and notes that don't belong in a dedicated plan.
 
 ---
 
+## Deferred tuning (needs real-world data)
+
+- [ ] Three items parked for day-to-day tuning — see `docs/plans/deferred-tuning.md`:
+      rez-dedup 30s window calibration, brewing bulk-scan memory batching,
+      ChatMessageList day-jump scroll race. Each has concrete capture/measurement
+      steps and fix options in that file.
+
+---
+
 ## Investigations (Completed Research, No Code Changes Needed)
 
 These are investigated items kept for reference — the research is done but the underlying limitation or blocker remains.
@@ -22,21 +31,19 @@ These are investigated items kept for reference — the research is done but the
 
 These items are investigated but can't be resolved without new runtime captures or log samples.
 
-- [ ] Bug: instant-snack foods missing from gourmand report
-  - They used to show up and now they're gone. Static analysis of the code path (CDN parsing, DB query, store filtering, UI display) shows everything is wired correctly. Most likely cause: `parse_food_desc()` in `cdn_persistence.rs` silently skips items where parsing fails — items with unparseable `FoodDesc` are logged but never inserted into the `foods` table. Could also be a whitespace/encoding issue in CDN data (e.g. non-breaking space causing the split to miss). Needs runtime debugging — query the `foods` table directly to see if instant-snack rows exist at all.
-    - the gourmand completeness bars in the left panel show "0/0" for instant-snacks, so seems like we aren't loading them at all. i bet a couple debug lines can root cause this pretty quickly. seems like it all probably works still _if_ we solve why we aren't finding any in the CDN.
-  - **Blocked on:** Runtime debugging session — need to query the `foods` table and check CDN parse output.
+- [x] ~~Bug: instant-snack foods missing from gourmand report~~ — **RESOLVED 2026-10-03 (live test session)**
+  - CDN parse is NOT the problem: the `foods` table contains 57 Instant Snack rows (606 foods total), and all 422 eaten entries join cleanly (36 eaten instant snacks). The "0/0" bars were a **stale-import state**: dev DB last imported a report on 2026-06-28 while a newer `SkillReport` sat unimported — the Books-dir watcher (four-PR plan PR1) fixes this class of staleness. Verify a report import happened before debugging completeness math.
+  - Note: `Flesh Lump` report lines carry race variants (`Flesh Lump (Elf)` etc.) — the tag stripper only removes `(HAS MEAT)`-class tags, so variant names match the CDN exactly. No fix needed (an earlier "variant matching gap" suspicion was a bug in the test script, not the app).
 
-- [ ] Bug: rez counter not working
-  - **Serde hypothesis disproven** — exhaustive static analysis confirms the full pipeline is correctly wired. Parser tests pass (9/9). Debug logging added to coordinator and frontend store.
-  - **Most likely actual cause:** Player's in-game chat configuration doesn't include `[Action Emotes]` channel in any chat tab, so those messages never appear in Chat.log.
-  - **Blocked on:** Runtime capture with Action Emotes enabled to confirm.
+- [x] ~~Bug: rez counter not working~~ — **ROOT CAUSE FOUND 2026-10-03; FIX IMPLEMENTED**
+  - The Action Emotes channel hypothesis was wrong: 22 `[Action Emotes]` lines reach the chat log today. The real gap: the game emits TWO rez phrasings — `<Caster> resuscitates <Target>` (parsed, populated the 78 historic rows) and `<Target> comes back to life!` (target-only, no caster named, UNPARSED). Sessions where the game uses the second phrasing left the counter silent.
+  - **Fixed:** `chat_resuscitate_parser.rs` now parses the second shape with `caster_name = "Unknown"` (3 new tests incl. real-log lines and a spaced-target case). "Top rezzers" stays caster-based; "times rezzed" counting is now complete for newly tailed sessions (historic backfill of the second phrasing is not retroactive — backfilled chat logs don't re-parse old lines).
 
 - [ ] Investigate detecting recipe learning without character.json import
   - **Investigation complete:** `ProcessUpdateRecipe(recipeId, completionCount)` and `ProcessLoadRecipes()` events already exist in `player_event_parser.rs`. `RecipeUpdated` events fire during gameplay when recipes are updated. Log events ARE generated — this feature is implementable without character.json dependency. Remaining work: wire coordinator handler to persist recipe state changes, update cook's helper to consume live events.
   - [ ] RELATED Bug: cook's helper not updating after buying new recipes
   - **Root cause identified:** Cook's helper loads recipes from CDN `items` data via `get_all_foods()`, but new recipes are only detected via character.json re-import or Books SkillReport file re-import. No live event integration exists. Fix: hook into `RecipeUpdated` parser events (which already fire — see recipe detection item above) to refresh the foods table incrementally.
-    - STILL UNKNOWN: does this fire when a recipe is first learned, even if completion count is zero? need to capture a log for this.
+    - STILL UNKNOWN: does this fire when a recipe is first learned, even if completion count is zero? need to capture a log for this. *(Live capture attempted 2026-10-03 but no unknown eligible recipe was available in-game — still open.)*
   - **Blocked on:** Log capture of a recipe being learned for the first time.
   - **Effort: Low-Medium (depends on recipe detection wiring) | Impact: Medium**
 

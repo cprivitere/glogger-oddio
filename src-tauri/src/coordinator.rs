@@ -35,7 +35,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Timestamped log line for startup diagnostics.
 macro_rules! startup_log {
     ($($arg:tt)*) => {
-        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*));
+        eprintln!("[{}] {}", Local::now().format("%H:%M:%S%.3f"), format!($($arg)*))
     };
 }
 
@@ -120,6 +120,17 @@ pub struct DataIngestCoordinator {
     /// Casino arena narration tracker — resolves Kuzavek's `[NPC Chatter]`
     /// intro/result lines into completed matches for the Arena widget.
     arena_tracker: crate::arena_parser::ArenaTracker,
+    /// Rez dedup: last persisted successful-rez timestamp per target. The
+    /// game emits "X resuscitates Y" and "Y comes back to life!" in
+    /// different contexts; if both ever fire for the same rez (same
+    /// target, seconds apart) only the first row is kept. Keyed PER
+    /// TARGET (not a single last-tuple): interleaved rezzes of different
+    /// targets within the window each still dedup (`rez A`, `rez B`,
+    /// `A back`, `B back`). Timestamps are compared with a rolling
+    /// 30-second window (`rez_within_dedup_window`), not minute buckets —
+    /// a pair straddling a minute boundary is still one rez. Pruned to a
+    /// bounded window below so it never grows unbounded.
+    last_rez_dedup: std::collections::HashMap<String, String>,
 }
 
 impl DataIngestCoordinator {
@@ -163,6 +174,7 @@ impl DataIngestCoordinator {
             pending_cow_interaction: None,
             recent_kills: std::collections::HashMap::new(),
             arena_tracker: crate::arena_parser::ArenaTracker::new(),
+            last_rez_dedup: std::collections::HashMap::new(),
         })
     }
 
@@ -260,6 +272,28 @@ impl DataIngestCoordinator {
                 if meta.len() < position {
                     startup_log!("Player.log was rotated (size {} < saved position {}), starting from beginning",
                         meta.len(), position);
+                    // Persist the reset NOW: update_position's monotonic MAX
+                    // guard would keep the stale larger cursor forever, so
+                    // every subsequent launch would re-detect the rotation,
+                    // re-parse Player.log from 0, and re-insert non-idempotent
+                    // catch-up rows (corpse_extracts, item_transactions)
+                    // until the new file outgrows the stale offset. The
+                    // watcher built below is fresh (position_reset = false),
+                    // so no later save cycle can force this cursor down —
+                    // this is the only site that can persist the reset.
+                    let wconn = self
+                        .db_pool
+                        .get_write()
+                        .map_err(|e| format!("Database error: {}", e))?;
+                    log_positions::force_position(
+                        &wconn,
+                        player_log_path.to_str().unwrap_or(""),
+                        "player",
+                        0,
+                        saved_character.as_deref(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to force-save rotated position: {}", e))?;
                     position = 0;
                 }
             }
@@ -346,8 +380,14 @@ impl DataIngestCoordinator {
             .ok()
             .map(|mtime| chrono::DateTime::<chrono::Utc>::from(mtime).date_naive());
 
-        let mut conn = self.db_pool.get().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut conn = self.db_pool.get_write().map_err(|e| e.to_string())?;
+        // BEGIN IMMEDIATE: runs at startup alongside other backfills; a deferred
+        // tx that upgrades read→write on its first INSERT gets an instant
+        // SQLITE_BUSY that busy_timeout can't retry. Acquiring the write lock up
+        // front makes busy_timeout apply to the acquisition instead.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let mut inserted = 0usize;
         {
             let mut stmt = tx
@@ -394,17 +434,33 @@ impl DataIngestCoordinator {
             if let Some(path) = self.settings.get_player_log_path() {
                 let conn = self
                     .db_pool
-                    .get()
+                    .get_write()
                     .map_err(|e| format!("Database error: {}", e))?;
-                log_positions::update_position(
-                    &conn,
-                    path.to_str().unwrap_or(""),
-                    "player",
-                    position,
-                    watcher.get_active_character(),
-                    None,
-                )
-                .map_err(|e| format!("Failed to save position: {}", e))?;
+                if watcher.position_was_reset() {
+                    // Rotation reset pending (stop raced the next save
+                    // cycle): force the reset value — the monotonic update
+                    // would keep the stale larger cursor. The watcher is
+                    // dropped below, so no flag clearing is needed.
+                    log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to force-save position: {}", e))?;
+                } else {
+                    log_positions::update_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        position,
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to save position: {}", e))?;
+                }
             }
         }
 
@@ -443,7 +499,7 @@ impl DataIngestCoordinator {
                     if !events.is_empty() {
                         startup_log!("Final flush: {} events from old chat log", events.len());
                         // Process inline to avoid borrow issues with self
-                        let conn = self.db_pool.get()
+                        let conn = self.db_pool.get_write()
                             .map_err(|e| format!("Database error: {}", e))?;
                         let log_file = watcher.get_file_name().to_string();
                         let excluded_channels = &self.settings.get().excluded_chat_channels;
@@ -516,18 +572,34 @@ impl DataIngestCoordinator {
 
             let conn = self
                 .db_pool
-                .get()
+                .get_write()
                 .map_err(|e| format!("Database error: {}", e))?;
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
-            log_positions::update_position(
-                &conn,
-                &file_path_str,
-                "chat",
-                position,
-                None,
-                Some(&metadata),
-            )
-            .map_err(|e| format!("Failed to save position: {}", e))?;
+            if watcher.position_was_reset() {
+                // Rotation reset pending (stop raced the next save cycle):
+                // the monotonic update would keep the stale larger cursor —
+                // force the reset value instead. The watcher is dropped
+                // below, so no flag clearing is needed.
+                log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to force-save position: {}", e))?;
+            } else {
+                log_positions::update_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    position,
+                    None,
+                    Some(&metadata),
+                )
+                .map_err(|e| format!("Failed to save position: {}", e))?;
+            }
         }
 
         // Emit status change event
@@ -565,20 +637,22 @@ impl DataIngestCoordinator {
 
         // Persist watcher positions every poll cycle so a crash doesn't
         // lose all progress and cause a full re-parse on next launch.
-        self.save_watcher_positions();
+        self.save_watcher_positions_mut();
 
         Ok(())
     }
 
     /// Persist current watcher byte offsets to the database.
     /// Called every poll cycle so a crash only loses ~1 polling interval of progress.
-    fn save_watcher_positions(&self) {
-        let conn = match self.db_pool.get() {
+    /// `&mut self` because a detected truncation/rotation must also force the
+    /// stored cursor down (and clear the watcher's reset flag).
+    fn save_watcher_positions_mut(&mut self) {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
 
-        if let Some(watcher) = &self.player_watcher {
+        if let Some(watcher) = &mut self.player_watcher {
             if let Some(path) = self.settings.get_player_log_path() {
                 log_positions::update_position(
                     &conn,
@@ -589,10 +663,33 @@ impl DataIngestCoordinator {
                     None,
                 )
                 .ok();
+                if watcher.position_was_reset() {
+                    // Truncation/rotation this cycle: the monotonic MAX guard
+                    // would keep the stale larger offset — force the cursor
+                    // down. Clear the flag ONLY after the force succeeds:
+                    // a discarded failure would leave the stale cursor in
+                    // place with no later poll retrying the reset.
+                    if log_positions::force_position(
+                        &conn,
+                        path.to_str().unwrap_or(""),
+                        "player",
+                        watcher.get_position(),
+                        watcher.get_active_character(),
+                        None,
+                    )
+                    .is_ok()
+                    {
+                        watcher.clear_position_reset();
+                    } else {
+                        eprintln!(
+                            "[coordinator] Failed to persist rotation reset for Player.log; will retry next cycle"
+                        );
+                    }
+                }
             }
         }
 
-        if let Some(watcher) = &self.chat_watcher {
+        if let Some(watcher) = &mut self.chat_watcher {
             let file_path_str = watcher.get_file_path().to_string_lossy().to_string();
             let file_name = watcher.get_file_name().to_string();
             let metadata = serde_json::json!({ "file_name": file_name }).to_string();
@@ -605,6 +702,25 @@ impl DataIngestCoordinator {
                 Some(&metadata),
             )
             .ok();
+            if watcher.position_was_reset() {
+                if log_positions::force_position(
+                    &conn,
+                    &file_path_str,
+                    "chat",
+                    watcher.get_position(),
+                    None,
+                    Some(&metadata),
+                )
+                .is_ok()
+                {
+                    watcher.clear_position_reset();
+                } else {
+                    eprintln!(
+                        "[coordinator] Failed to persist rotation reset for {}; will retry next cycle",
+                        file_name
+                    );
+                }
+            }
         }
     }
 
@@ -715,7 +831,7 @@ impl DataIngestCoordinator {
                         self.game_state.get_active_character(),
                         self.game_state.get_active_server(),
                     ) {
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             conn.execute(
                                 "INSERT INTO game_state_area (character_name, server_name, area_name, last_confirmed_at)
                                  VALUES (?1, ?2, ?3, datetime('now'))
@@ -736,7 +852,7 @@ impl DataIngestCoordinator {
                         self.game_state.get_active_character(),
                         self.game_state.get_active_server(),
                     ) {
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             // Resolve skill name → canonical ID + display name
                             let (skill_id, display_name) = {
                                 let guard = self.game_data.blocking_read();
@@ -799,13 +915,17 @@ impl DataIngestCoordinator {
                             self.persist_book_report(timestamp, title, content, book_type);
 
                             // Auto-import gourmand report when the Foods Consumed
-                            // skill report is opened.
+                            // skill report is opened. Content is normalized first:
+                            // live ProcessBook content carries escaped newlines but
+                            // the gourmand parser is line-based (historically the
+                            // live path parsed 0 entries and no-op'd).
                             if book_type == "SkillReport"
                                 && content.trim_start().starts_with("Foods Consumed:")
                             {
-                                if let Ok(conn) = self.db_pool.get() {
+                                let content = normalize_book_content(content);
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::gourmand_commands::import_gourmand_from_content(
-                                        &conn, content,
+                                        &conn, &content,
                                     ) {
                                         Ok(n) if n > 0 => {
                                             startup_log!(
@@ -915,7 +1035,7 @@ impl DataIngestCoordinator {
                             action_type, label, ..
                         } if action_type == "Eat" => {
                             if let Some(food_name) = label.strip_prefix("Using ") {
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::gourmand_commands::record_food_eaten(
                                         &conn, food_name,
                                     ) {
@@ -991,7 +1111,7 @@ impl DataIngestCoordinator {
                         .get_active_server()
                         .map(String::from);
                     if let (Some(character), Some(server), Ok(conn)) =
-                        (active_char, active_server, self.db_pool.get())
+                        (active_char, active_server, self.db_pool.get_write())
                     {
                         let agg_events = self.survey_aggregator.process_event(
                             &mut player_event,
@@ -1069,7 +1189,7 @@ impl DataIngestCoordinator {
                         &local_ts,
                     ) {
                         let mut arena_changed = false;
-                        if let Ok(conn) = self.db_pool.get() {
+                        if let Ok(conn) = self.db_pool.get_write() {
                             if let Ok(1) = crate::db::arena_commands::record_arena_match(
                                 &conn,
                                 &m.fought_at,
@@ -1205,7 +1325,7 @@ impl DataIngestCoordinator {
                                     self.game_state.get_active_character().map(String::from),
                                     self.game_state.get_active_server().map(String::from),
                                 ) {
-                                    if let Ok(conn) = self.db_pool.get() {
+                                    if let Ok(conn) = self.db_pool.get_write() {
                                         // Only "loot" gains can belong to a
                                         // survey; summoned items never do.
                                         let survey_use_id = if context == "loot" {
@@ -1264,7 +1384,7 @@ impl DataIngestCoordinator {
                                     .and_then(|gd| gd.find_equipment_base_name(item_name))
                                     .unwrap_or_else(|| item_name.to_string());
 
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     if let (Some(character), Some(server)) = (
                                         self.game_state.get_active_character(),
                                         self.game_state.get_active_server(),
@@ -1300,7 +1420,7 @@ impl DataIngestCoordinator {
                                 // widget's per-monster cooldowns. Non-monster
                                 // (prodigy-level) awards are skipped by the
                                 // recorder; they still reach the frontend below.
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     crate::db::combat_wisdom_commands::record_combat_wisdom_earn(
                                         &conn,
                                         &local_ts,
@@ -1325,7 +1445,7 @@ impl DataIngestCoordinator {
                             ChatStatusEvent::RouletteResult { timestamp, number } => {
                                 // Persist the casino roulette spin outcome for the
                                 // Roulette widget's history pie chart. Idempotent.
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     crate::db::roulette_commands::record_roulette_result(
                                         &conn, timestamp, *number,
                                     )
@@ -1337,7 +1457,7 @@ impl DataIngestCoordinator {
                                 // every saved copy so the Words of Power widget
                                 // stops offering a dead word. Idempotent (a
                                 // replayed use line deletes nothing).
-                                if let Ok(conn) = self.db_pool.get() {
+                                if let Ok(conn) = self.db_pool.get_write() {
                                     match crate::db::words_of_power_commands::delete_words_by_word(
                                         &conn, word,
                                     ) {
@@ -1423,12 +1543,59 @@ impl DataIngestCoordinator {
 
                     // Check Action Emotes channel for resuscitate events
                     if let Some(rez_event) = parse_resuscitate_message(&msg) {
-                        if let Err(e) = self.persist_resuscitate_event(&rez_event) {
-                            eprintln!("Failed to persist resuscitate event: {}", e);
+                        // Dedup guard: if the game emits both phrasings for
+                        // one rez ("X resuscitates Y" + "Y comes back to
+                        // life!" within ~30s of each other), persist only the
+                        // first. Identity = target + a rolling 30-second
+                        // window since the last persisted rez of that target
+                        // — NOT minute buckets, which double-count pairs
+                        // straddling a minute boundary. Keyed per target so
+                        // interleaved rezzes of different targets each
+                        // dedup independently. Old targets are pruned to
+                        // bound memory.
+                        let dup_key = match &rez_event {
+                            crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { timestamp, target_name, .. } => {
+                                Some((target_name.clone(), timestamp.clone()))
+                            }
+                            _ => None,
+                        };
+                        let is_duplicate = dup_key
+                            .as_ref()
+                            .map(|(target, ts)| {
+                                self.last_rez_dedup
+                                    .get(target)
+                                    .map(|prev| rez_within_dedup_window(prev, ts))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        // Prune stale entries: keep a target only while the
+                        // current event still falls inside its dedup window
+                        // — once the window passes, the paired line (if any)
+                        // has long since arrived and the entry is dead.
+                        if let Some((_, ts)) = &dup_key {
+                            self.last_rez_dedup
+                                .retain(|_, prev| rez_within_dedup_window(prev, ts));
                         }
-                        self.app_handle
-                            .emit("character-resuscitated", &rez_event)
-                            .ok();
+
+                        if is_duplicate {
+                            eprintln!("[coordinator] Skipped duplicate rez event for {}", match &rez_event {
+                                crate::chat_resuscitate_parser::ChatResuscitateEvent::Resuscitated { target_name, .. } => target_name.clone(),
+                                _ => String::new(),
+                            });
+                        } else {
+                            if let Err(e) = self.persist_resuscitate_event(&rez_event) {
+                                eprintln!("Failed to persist resuscitate event: {}", e);
+                            } else if let Some((target, ts)) = dup_key {
+                                // Arm the dedup guard only AFTER a successful
+                                // persist: if the insert fails, the paired
+                                // line must still be able to produce a row.
+                                self.last_rez_dedup.insert(target, ts);
+                            }
+                            self.app_handle
+                                .emit("character-resuscitated", &rez_event)
+                                .ok();
+                        }
                     }
 
                     messages.push(msg);
@@ -1453,7 +1620,7 @@ impl DataIngestCoordinator {
                     }
 
                     // Auto-create server record
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO servers (server_name) VALUES (?1) ON CONFLICT DO NOTHING",
                             rusqlite::params![server_name],
@@ -1480,7 +1647,7 @@ impl DataIngestCoordinator {
                         .ok();
 
                     // Auto-register character with current server
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO user_characters (character_name, server_name, source, last_login_time)
                              VALUES (?1, COALESCE(?2, 'Unknown'), 'login', CURRENT_TIMESTAMP)
@@ -1515,7 +1682,7 @@ impl DataIngestCoordinator {
         if !messages.is_empty() {
             let conn = self
                 .db_pool
-                .get()
+                .get_write()
                 .map_err(|e| format!("Database error: {}", e))?;
 
             // Use the actual file name from the watcher, not the position
@@ -1579,7 +1746,7 @@ impl DataIngestCoordinator {
         ) else {
             return;
         };
-        if let Ok(conn) = self.db_pool.get() {
+        if let Ok(conn) = self.db_pool.get_write() {
             conn.execute(
                 "UPDATE currency_estimate
                     SET delta_since = delta_since + ?1, updated_at = datetime('now')
@@ -1633,7 +1800,7 @@ impl DataIngestCoordinator {
 
         let conn = self
             .db_pool
-            .get()
+            .get_write()
             .map_err(|e| format!("Database connection error: {e}"))?;
         conn.execute(
             "INSERT INTO character_deaths
@@ -1732,7 +1899,7 @@ impl DataIngestCoordinator {
             .to_string();
         let entity_id_str = corpse_entity_id.to_string();
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to get DB connection for corpse search: {e}");
@@ -1840,7 +2007,7 @@ impl DataIngestCoordinator {
                     // Store instance_id bit-preserved as a signed i64 so the same
                     // string maps to the same dedup key as the backfill path.
                     let instance_id_signed = *instance_id as i64;
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT OR IGNORE INTO enemy_kill_loot
                                 (kill_id, item_name, quantity, instance_id)
@@ -1867,7 +2034,7 @@ impl DataIngestCoordinator {
                     }
                     let character = self.game_state.get_active_character().map(String::from);
                     let server = self.game_state.get_active_server().map(String::from);
-                    if let Ok(conn) = self.db_pool.get() {
+                    if let Ok(conn) = self.db_pool.get_write() {
                         conn.execute(
                             "INSERT INTO corpse_extracts
                                 (character_name, server_name, corpse_name, item_name,
@@ -1928,7 +2095,7 @@ impl DataIngestCoordinator {
 
         let conn = self
             .db_pool
-            .get()
+            .get_write()
             .map_err(|e| format!("Database connection error: {e}"))?;
         conn.execute(
             "INSERT INTO character_resuscitations
@@ -2033,27 +2200,20 @@ impl DataIngestCoordinator {
         content: &str,
         book_type: &str,
     ) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-        let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        conn.execute(
-            "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(character_name, server_name, book_type, title) DO UPDATE SET
-                content = excluded.content,
-                captured_at = excluded.captured_at",
-            rusqlite::params![character, server, book_type, title, content, dt],
-        )
-        .ok();
-        self.app_handle
-            .emit("game-state-updated", vec!["books"])
-            .ok();
+        if let Err(e) = persist_book_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            book_type,
+            title,
+            content,
+        ) {
+            eprintln!("[coordinator] Failed to persist book: {e}");
+        }
     }
 
     /// Parse the Gardening Almanac HTML content and persist structured events
@@ -2066,7 +2226,7 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2163,7 +2323,7 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2212,38 +2372,19 @@ impl DataIngestCoordinator {
     /// Parse structured stats from PlayerAge or Behavior Report books and
     /// persist them to the `character_stats` table as key-value pairs.
     fn ingest_report_stats(&self, book_type: &str, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
-        };
-        let stats = match book_type {
-            "PlayerAge" => crate::report_stats::parse_player_age(content),
-            "HelpScreen" => crate::report_stats::parse_behavior_report(content),
-            _ => return,
-        };
-        if stats.is_empty() {
+        let Some((character, server)) = self.active_character_server() else {
             return;
-        }
-        let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
         };
-        match crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt) {
-            Ok(n) => {
-                startup_log!(
-                    "[coordinator] Imported {} stats from {} report",
-                    n,
-                    book_type,
-                );
-                self.app_handle
-                    .emit("game-state-updated", vec!["report_stats"])
-                    .ok();
-            }
-            Err(e) => {
-                eprintln!("[coordinator] Failed to persist report stats: {e}");
-            }
-        }
+        ingest_report_stats_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            book_type,
+            content,
+        )
+        .map_err(|e| eprintln!("[coordinator] {e}"))
+        .ok();
     }
 
     // ── Milking timers ────────────────────────────────────────────
@@ -2257,7 +2398,7 @@ impl DataIngestCoordinator {
         };
         let zone = self.current_area.clone().unwrap_or_default();
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2287,7 +2428,7 @@ impl DataIngestCoordinator {
         let zone = self.current_area.clone().unwrap_or_default();
         let backfill_time =
             (chrono::Utc::now() - chrono::Duration::minutes(59)).to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2315,7 +2456,7 @@ impl DataIngestCoordinator {
             None => return,
         };
         let dt = chrono::Utc::now().to_rfc3339();
-        let conn = match self.db_pool.get() {
+        let conn = match self.db_pool.get_write() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -2342,56 +2483,23 @@ impl DataIngestCoordinator {
     /// Most Common Destination: Serbule\n
     /// ```
     fn ingest_teleportation_binds(&self, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-
-        let primary = Self::extract_bind_field(content, "Primary Bind Location:");
-        let secondary = Self::extract_bind_field(content, "Secondary Bind Location:");
-
-        let conn = match self.db_pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let dt = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO game_state_teleportation
-                (character_name, server_name, primary_bind, secondary_bind, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(character_name, server_name) DO UPDATE SET
-                primary_bind = excluded.primary_bind,
-                secondary_bind = excluded.secondary_bind,
-                last_updated = excluded.last_updated",
-            rusqlite::params![character, server, primary, secondary, dt],
-        )
-        .ok();
-
-        startup_log!(
-            "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
-            primary,
-            secondary
-        );
-        self.app_handle
-            .emit("game-state-updated", vec!["teleportation"])
-            .ok();
-    }
-
-    /// Extract a named field value from teleportation status text.
-    /// Returns `None` if the field is missing or has value "(none)".
-    fn extract_bind_field(content: &str, field: &str) -> Option<String> {
-        for line in content.split('\n') {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix(field) {
-                let value = rest.trim();
-                if value.is_empty() || value == "(none)" {
-                    return None;
-                }
-                return Some(value.to_string());
-            }
+        // Live ProcessBook content carries escaped newlines; the file path
+        // carries real ones. Normalize once here so `extract_bind_field`
+        // sees real line breaks on both paths (historically the live path
+        // silently matched no fields).
+        let content = normalize_book_content(content);
+        if let Err(e) = ingest_teleport_binds_content(
+            &self.db_pool,
+            &self.app_handle,
+            &character,
+            &server,
+            &content,
+        ) {
+            eprintln!("[coordinator] Teleportation binds failed: {e}");
         }
-        None
     }
 
     /// Parse a hoplology "Equipment Studied:" skill report and backfill studied items.
@@ -2399,58 +2507,25 @@ impl DataIngestCoordinator {
     /// Content format (escaped newlines):
     ///   "Equipment Studied:\n\n  CrudBurst's Hammer of Thumping\n  Thentree Harness\n"
     fn ingest_hoplology_report(&self, _timestamp: &str, content: &str) {
-        let (character, server) = match self.active_character_server() {
-            Some(cs) => cs,
-            None => return,
+        let Some((character, server)) = self.active_character_server() else {
+            return;
         };
-
-        let conn = match self.db_pool.get() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        // Use current wall-clock time as the "first seen" timestamp for
-        // report-backfilled items (the player.log timestamp is just HH:MM:SS
-        // which isn't a valid datetime).
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-        // Try to acquire CDN data for base-name resolution
-        let game_data = self.game_data.try_read().ok();
-
-        let mut inserted = 0u32;
-        // Content uses literal \n (escaped in the log line) — split on those
-        for line in content.split("\\n") {
-            let trimmed = line.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("Equipment Studied:")
-            {
-                continue;
-            }
-            // Resolve to base equipment name if CDN data is available
-            let base_name = game_data
-                .as_ref()
-                .and_then(|gd| gd.find_equipment_base_name(trimmed))
-                .unwrap_or_else(|| trimmed.to_string());
-
-            match crate::db::hoplology_commands::insert_hoplology_study_from_report(
-                &conn, &character, &server, &base_name, &now,
-            ) {
-                Ok(Some(_)) => inserted += 1,
-                Ok(None) => {} // already known
-                Err(e) => {
-                    eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
-                }
-            }
-        }
-
-        if inserted > 0 {
-            startup_log!(
-                "[coordinator] Hoplology report: backfilled {} new items",
-                inserted
-            );
-            self.app_handle
-                .emit("game-state-updated", vec!["hoplology"])
-                .ok();
+        // Live ProcessBook content carries escaped newlines; the file path
+        // carries real ones. Normalize once here so the line splitter sees
+        // real line breaks on both paths (historically the live path split
+        // on literal `\n` only).
+        let content = normalize_book_content(content);
+        match ingest_hoplology_content(
+            &self.db_pool,
+            &self.game_data,
+            &self.app_handle,
+            &character,
+            &server,
+            &content,
+        ) {
+            Ok(0) => startup_log!("[coordinator] Hoplology report: no new items"),
+            Ok(_) => {} // logged inside
+            Err(e) => eprintln!("[coordinator] Hoplology report failed: {e}"),
         }
     }
 
@@ -2513,7 +2588,7 @@ impl DataIngestCoordinator {
 
         let dt = chrono::Utc::now().to_rfc3339();
 
-        if let Ok(conn) = self.db_pool.get() {
+        if let Ok(conn) = self.db_pool.get_write() {
             match crate::db::words_of_power_commands::insert_word_of_power(
                 &conn,
                 &char_name,
@@ -3285,6 +3360,245 @@ fn parse_duration_text(text: &str) -> Option<chrono::Duration> {
     }
 }
 
+// ============================================================
+// Book-content ingestion (shared by live ProcessBook dispatch and
+// the Books-directory backfill watcher)
+// ============================================================
+
+/// Normalize ProcessBook's escaped-newline content into real newlines.
+///
+/// Live `ProcessBook` content carries literal `\n` (and `\t`) escape
+/// sequences; files in `<game_data>/Books/` carry real newlines. Feeding
+/// both through this no-op-on-real-newlines replace makes every downstream
+/// line splitter behave identically on either shape. (Extracted per-shape
+/// helpers historically normalized inconsistently — `parse_shop_log` and
+/// `parse_player_age` did, the teleport-bind / hoplology / gourmand
+/// splitters did not — so live-path bind parsing silently matched nothing.)
+pub(crate) fn normalize_book_content(content: &str) -> String {
+    content.replace("\\n", "\n").replace("\\t", "\t")
+}
+
+/// Persist a book report to `game_state_books`, upserting by
+/// (character, server, book_type, title) so re-running a report overwrites.
+/// Shared by the live coordinator and the Books-directory watcher.
+///
+/// Mirrors the live `persist_book_report` behavior exactly (swallows SQL
+/// errors to keep ingest flowing) but returns `Err` on pool acquisition
+/// failure so callers can log it.
+pub fn persist_book_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    book_type: &str,
+    title: &str,
+    content: &str,
+) -> Result<(), String> {
+    let dt = chrono::Utc::now().to_rfc3339();
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Database connection error: {e}"))?;
+    conn.execute(
+        "INSERT INTO game_state_books (character_name, server_name, book_type, title, content, captured_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(character_name, server_name, book_type, title) DO UPDATE SET
+            content = excluded.content,
+            captured_at = excluded.captured_at",
+        rusqlite::params![character, server, book_type, title, content, dt],
+    )
+    .map_err(|e| format!("Failed to persist book: {e}"))?;
+    app_handle
+        .emit("game-state-updated", vec!["books"])
+        .ok();
+    Ok(())
+}
+
+/// Parse structured stats from a PlayerAge or Behavior Report (HelpScreen)
+/// book and persist them to `character_report_stats`. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_report_stats_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    book_type: &str,
+    content: &str,
+) -> Result<usize, String> {
+    let stats = match book_type {
+        "PlayerAge" => crate::report_stats::parse_player_age(content),
+        "HelpScreen" => crate::report_stats::parse_behavior_report(content),
+        _ => return Ok(0),
+    };
+    if stats.is_empty() {
+        return Ok(0);
+    }
+    let dt = chrono::Utc::now().to_rfc3339();
+    let conn = db
+        .get_write()
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    let n = crate::report_stats::persist_stats(&conn, &character, &server, &stats, &dt)
+        .map_err(|e| format!("Failed to persist report stats: {e}"))?;
+    startup_log!(
+        "[coordinator] Imported {} stats from {} report",
+        n,
+        book_type,
+    );
+    app_handle
+        .emit("game-state-updated", vec!["report_stats"])
+        .ok();
+    Ok(n)
+}
+
+/// Extract a named field value from teleportation status text.
+/// Returns `None` if the field is missing or has value "(none)".
+pub(crate) fn extract_bind_field(content: &str, field: &str) -> Option<String> {
+    for line in content.split('\n') {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(field) {
+            let value = rest.trim();
+            if value.is_empty() || value == "(none)" {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Parse teleportation bind locations from a "Skill Info" SkillReport book
+/// and persist them to `game_state_teleportation`. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_teleport_binds_content(
+    db: &DbPool,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    content: &str,
+) -> Result<(), String> {
+    let primary = extract_bind_field(content, "Primary Bind Location:");
+    let secondary = extract_bind_field(content, "Secondary Bind Location:");
+
+    // Upsert MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every bind
+    // update (execute failure swallowed by `.ok()`).
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+
+    let dt = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO game_state_teleportation
+            (character_name, server_name, primary_bind, secondary_bind, last_updated)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(character_name, server_name) DO UPDATE SET
+            primary_bind = excluded.primary_bind,
+            secondary_bind = excluded.secondary_bind,
+            last_updated = excluded.last_updated",
+        rusqlite::params![character, server, primary, secondary, dt],
+    )
+    .map_err(|e| format!("Failed to upsert teleportation binds: {e}"))?;
+
+    startup_log!(
+        "[coordinator] Teleportation binds updated: primary={:?}, secondary={:?}",
+        primary,
+        secondary
+    );
+    app_handle
+        .emit("game-state-updated", vec!["teleportation"])
+        .ok();
+    Ok(())
+}
+
+/// Parse a hoplology "Equipment Studied:" skill report and backfill studied
+/// items. Returns the number of newly inserted studies. Shared by the live
+/// coordinator and the Books-directory watcher.
+pub fn ingest_hoplology_content(
+    db: &DbPool,
+    game_data: &GameDataState,
+    app_handle: &AppHandle,
+    character: &str,
+    server: &str,
+    content: &str,
+) -> Result<usize, String> {
+    // CDN data MUST be loaded before backfilling: the dedup key is the
+    // (CDN-resolved) base item name, so a report ingested before
+    // `init_game_data` swaps the real data in would store raw crafted
+    // names ("Hailin' Thorian Kilt of Deathspark") under a different
+    // UNIQUE key than the same item's base name ("Thorian Kilt") —
+    // permanently polluting the to-study list with rows the widget can
+    // never reconcile. The Books watcher treats Err as retry-later (and
+    // this error as transient — it never trips the give-up counter), so
+    // the window self-heals once the CDN load lands, however long that
+    // takes. (The live path's per-open dispatch has the same latency but
+    // re-fires on every book open; the watcher is one-shot per mtime,
+    // making a silent fallback permanent there — hence the hard gate
+    // rather than best-effort.)
+    // The read guard is held for the WHOLE function: base-name resolution
+    // happens per line below, and dropping the guard after the emptiness
+    // check would reopen a window where a concurrent refresh (holding the
+    // write lock) makes the later `try_read().ok()` fail and silently
+    // fall back to raw crafted names — the exact pollution this gate
+    // exists to prevent.
+    let game_data = game_data
+        .try_read()
+        .map_err(|_| "Game data not loaded yet; retrying later".to_string())?;
+    if game_data.items.is_empty() {
+        return Err("Game data not loaded yet; retrying later".to_string());
+    }
+
+    // Inserts MUST run on the writer connection: the read pool is
+    // PRAGMA query_only, so `get()` here silently dropped every study
+    // row. Failures propagate so the Books watcher can retry the file.
+    // Taken AFTER the game-data gate: a DB error is transient (never
+    // trips the watcher's give-up counter) the same as a not-loaded-yet
+    // gate error.
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+
+    // Use current wall-clock time as the "first seen" timestamp for
+    // report-backfilled items (the player.log timestamp is just HH:MM:SS
+    // which isn't a valid datetime).
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut inserted = 0usize;
+    // Normalized content (real newlines) — one entry per line
+    for line in content.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Equipment Studied:")
+        {
+            continue;
+        }
+        // Resolve to base equipment name if CDN data is available
+        let base_name = game_data
+            .find_equipment_base_name(trimmed)
+            .unwrap_or_else(|| trimmed.to_string());
+
+        match crate::db::hoplology_commands::insert_hoplology_study_from_report(
+            &conn, &character, &server, &base_name, &now,
+        ) {
+            Ok(Some(_)) => inserted += 1,
+            Ok(None) => {} // already known
+            Err(e) => {
+                // Propagate the first failure: already-inserted rows are
+                // idempotent, so returning Err makes the Books watcher treat
+                // the file as unseen and retry it — instead of marking the
+                // mtime seen over a partial import.
+                eprintln!("[coordinator] Failed to insert hoplology study '{}': {}", trimmed, e);
+                return Err(format!("hoplology insert failed for '{}': {e}", trimmed));
+            }
+        }
+    }
+
+    if inserted > 0 {
+        startup_log!(
+            "[coordinator] Hoplology report: backfilled {} new items",
+            inserted
+        );
+        app_handle
+            .emit("game-state-updated", vec!["hoplology"])
+            .ok();
+    }
+    Ok(inserted)
+}
+
 /// Normalize an equipped combat-skill pair into a stable, order-independent key
 /// (e.g. `Hammer`/`FireMagic` and `FireMagic`/`Hammer` both → `"FireMagic+Hammer"`).
 /// Empty/placeholder slots are dropped; returns None when nothing meaningful is set.
@@ -3371,3 +3685,65 @@ mod loadout_tests {
     }
 }
 
+
+/// True when `later` falls within the rez-dedup window of `earlier`
+/// (`"YYYY-MM-DD HH:MM:SS"` UTC strings, zero-padded so lexicographic
+/// order equals chronological order). The game emits both rez phrasings
+/// for one event seconds apart — but never instantly, so the window
+/// covers the pair while staying far below any plausible re-rez cooldown.
+/// Malformed timestamps never match (fail-open: the event is persisted).
+pub(crate) fn rez_within_dedup_window(earlier: &str, later: &str) -> bool {
+    const WINDOW: chrono::Duration = chrono::Duration::seconds(30);
+    match (
+        chrono::NaiveDateTime::parse_from_str(earlier, "%Y-%m-%d %H:%M:%S"),
+        chrono::NaiveDateTime::parse_from_str(later, "%Y-%m-%d %H:%M:%S"),
+    ) {
+        (Ok(prev), Ok(cur)) => {
+            // A cursor moving backward (clock skew, out-of-order replay)
+            // can't be a dup of itself — only forward progress within the
+            // window suppresses.
+            (cur - prev).ge(&chrono::Duration::zero()) && (cur - prev) <= WINDOW
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod rez_dedup_tests {
+    use super::rez_within_dedup_window as within;
+
+    #[test]
+    fn paired_phrasing_window() {
+        // Pair from a single rez: seconds apart → suppressed.
+        assert!(within("2026-10-04 12:34:56", "2026-10-04 12:34:59"));
+        // Exactly at the window edge (30s) is still within it.
+        assert!(within("2026-10-04 12:34:56", "2026-10-04 12:35:26"));
+    }
+
+    #[test]
+    fn boundary_straddle_is_one_rez() {
+        // Regression: minute buckets suppressed these; the rolling window
+        // must keep treating a :59→:01 straddle as one rez.
+        assert!(within("2026-10-04 12:34:59", "2026-10-04 12:35:01"));
+        assert!(within("2026-10-04 23:59:59", "2026-10-05 00:00:10"));
+    }
+
+    #[test]
+    fn legitimate_re_rez_is_kept() {
+        // A real second rez of the same target is outside the window.
+        assert!(!within("2026-10-04 12:34:56", "2026-10-04 12:35:27"));
+        assert!(!within("2026-10-04 12:34:56", "2026-10-04 12:35:31"));
+    }
+
+    #[test]
+    fn distinct_events_and_malformed() {
+        // Different day/hour entirely.
+        assert!(!within("2026-10-04 12:34:56", "2026-10-05 12:34:56"));
+        // Backward timestamps can't dedup (out-of-order replay, clock skew).
+        assert!(!within("2026-10-04 12:35:00", "2026-10-04 12:34:59"));
+        // Malformed/short timestamps never match (fail-open).
+        assert!(!within("2026-10-04", "2026-10-04 12:34:56"));
+        assert!(!within("", "2026-10-04 12:34:56"));
+        assert!(!within("garbage", "2026-10-04 12:34:56"));
+    }
+}

@@ -24,8 +24,8 @@
       <!-- Active filter chips -->
       <div v-if="parsed.sender || parsed.channel || parsed.textWords.length > 0" class="flex gap-2 mt-2 flex-wrap">
         <span
-          v-for="word in parsed.textWords"
-          :key="'text-' + word"
+          v-for="(word, i) in parsed.rawTokens.length > 0 ? parsed.rawTokens : parsed.textWords"
+          :key="'text-' + word + '-' + i"
           class="inline-flex items-center gap-1 px-2.5 py-1 bg-text-secondary/15 text-text-primary text-sm rounded-full"
         >
           {{ word }}
@@ -55,6 +55,11 @@
           >&times;</button>
         </span>
       </div>
+
+      <!-- Result count -->
+      <div v-if="resultCount !== null" class="mt-2 text-xs text-text-muted">
+        {{ resultCount.toLocaleString() }} matching message{{ resultCount === 1 ? '' : 's' }} {{ dateNav.activeDay.value ? `on ${dateNav.activeDay.value}` : 'across all history' }}
+      </div>
     </div>
 
     <!-- Context mode header -->
@@ -80,6 +85,8 @@
       :sort-order="contextMessageId ? undefined : sortOrder"
       :clickable="!contextMessageId"
       :highlight-id="contextMessageId ?? undefined"
+      :highlight-terms="contextMessageId ? [] : parsed.termKinds"
+      :date-nav="dateNav"
       @load-more="loadMore"
       @toggle-sort="toggleSort"
       @message-click="onMessageClick"
@@ -88,11 +95,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { ChatMessage, ChatFilter } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
 import { parseSearchQuery } from '../../utils/parseSearchQuery'
+import { useChatDateNav, fetchMessagesAroundTime } from '../../composables/useChatDateNav'
 
 const rawQuery = ref('')
 const messages = ref<ChatMessage[]>([])
@@ -101,7 +109,11 @@ const hasMore = ref(true)
 const offset = ref(0)
 const sortOrder = ref<'asc' | 'desc'>('desc')
 const searchInput = ref<HTMLInputElement>()
+const resultCount = ref<number | null>(null)
 const LIMIT = 100
+
+// Date navigation
+const dateNav = useChatDateNav()
 
 // Context mode state
 const contextMessageId = ref<number | null>(null)
@@ -110,6 +122,13 @@ const contextLoading = ref(false)
 const contextChannel = ref<string | null>(null)
 
 let searchTimeout: number | null = null
+// Query generation: bumped ONLY when the filter/query changes (page-0
+// load). Ordinary pagination (loadMore) must NOT bump it — if it did, a
+// page-2 start racing the page-0 count would discard the only count
+// response and later pages never request another one, leaving the label
+// empty. Query/ page generations are tracked separately.
+let queryGeneration = 0
+let searchGeneration = 0
 
 const parsed = computed(() => parseSearchQuery(rawQuery.value))
 
@@ -119,19 +138,33 @@ const displayMessages = computed(() =>
 
 async function loadMessages() {
   loading.value = true
+  // Page-0 loads are new queries: bump the query generation and drop the
+  // previous count immediately so the label can't show a stale number.
+  // Page-N loads keep the query generation — the in-flight count from the
+  // page-0 load must still be able to land.
+  const isPage0 = offset.value === 0
+  if (isPage0) {
+    queryGeneration++
+    resultCount.value = null
+  }
+  const countGeneration = queryGeneration
+  const generation = ++searchGeneration
   try {
     const p = parsed.value
     const filter: ChatFilter = {
       searchText: p.text || undefined,
       sender: p.sender || undefined,
       channel: p.channel || undefined,
+      ...dateNav.filterParams(),
       limit: LIMIT,
       offset: offset.value,
       sortOrder: sortOrder.value,
     }
 
-    console.log('[ChatSearch] filter:', JSON.stringify(filter))
     const newMessages = await invoke<ChatMessage[]>('get_chat_messages', filter)
+
+    // A newer search started while this one was in flight: discard.
+    if (generation !== searchGeneration) return
 
     if (offset.value === 0) {
       messages.value = newMessages
@@ -141,10 +174,24 @@ async function loadMessages() {
 
     hasMore.value = newMessages.length === LIMIT
     offset.value += newMessages.length
+
+    // Count over the full filter (no limit/offset) when viewing page 0
+    if (offset.value === newMessages.length) {
+      invoke<number>('count_chat_messages', {
+        searchText: p.text || undefined,
+        sender: p.sender || undefined,
+        channel: p.channel || undefined,
+        ...dateNav.filterParams(),
+      })
+        .then(n => {
+          if (countGeneration === queryGeneration) resultCount.value = n
+        })
+        .catch(e => console.error('Failed to count messages:', e))
+    }
   } catch (e) {
     console.error('Failed to search messages:', e)
   } finally {
-    loading.value = false
+    if (generation === searchGeneration) loading.value = false
   }
 }
 
@@ -154,35 +201,59 @@ function loadMore() {
 }
 
 function refresh() {
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  // With a day filter active, refresh re-centers on that day (the plain
+  // day-bounds query can legitimately be empty; around-time keeps context).
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function onSearchInput() {
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = window.setTimeout(() => {
     exitContext()
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
+    if (dateNav.activeDay.value) {
+      loadAroundDay(dateNav.activeDay.value)
+    } else {
+      offset.value = 0
+      hasMore.value = true
+      loadMessages()
+    }
   }, 300)
 }
 
 function toggleSort() {
   sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc'
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function removeTextWord(word: string) {
-  // Remove the first occurrence of this word (not inside an operator)
+  // Remove the token exactly as it appears in the query. `\b` boundaries
+  // fail on tokens starting/ending with non-word chars (quotes, `*`), so
+  // match the escaped token between whitespace boundaries instead.
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  rawQuery.value = rawQuery.value.replace(new RegExp(`\\b${escaped}\\b`, 'i'), '').trim().replace(/\s+/g, ' ')
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  rawQuery.value = rawQuery.value
+    .replace(new RegExp(`(?:^|(?<=\\s))${escaped}(?:(?=\\s)|$)`, 'i'), '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/""/g, '')
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 function removeOperator(op: 'from' | 'in') {
@@ -191,9 +262,13 @@ function removeOperator(op: 'from' | 'in') {
     ? /\bfrom:(?:"[^"]*"|[\S]+)/gi
     : /\bin:(?:"[^"]*"|[\S]+)/gi
   rawQuery.value = rawQuery.value.replace(pattern, '').trim().replace(/\s+/g, ' ')
-  offset.value = 0
-  hasMore.value = true
-  loadMessages()
+  if (dateNav.activeDay.value) {
+    loadAroundDay(dateNav.activeDay.value)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
 }
 
 async function onMessageClick(msg: ChatMessage) {
@@ -220,8 +295,78 @@ function exitContext() {
   contextChannel.value = null
 }
 
+// Day filter changes reload from the day boundary
+watch(() => dateNav.activeDay.value, (day, prev) => {
+  if (day === prev) return
+  exitContext()
+  if (day) {
+    loadAroundDay(day)
+  } else {
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  }
+})
+
+async function loadAroundDay(day: string) {
+  loading.value = true
+  // A day change is a new query: bump the query generation so any in-flight
+  // count from the previous query can't land, then use this generation for
+  // the day's own count request.
+  queryGeneration++
+  const countGeneration = queryGeneration
+  const generation = ++searchGeneration
+  try {
+    // Day window in the current sort order with the complete parsed search
+    // filter (text + sender + channel chips) preserved — same filter
+    // semantics as loadMessages(). The window is bounded to the day, so
+    // continuation is ordinary offset pagination.
+    const p = parsed.value
+    const result = await fetchMessagesAroundTime(
+      day,
+      {
+        searchText: p.text || undefined,
+        sender: p.sender || undefined,
+        channel: p.channel || undefined,
+        sortOrder: sortOrder.value,
+      },
+      LIMIT,
+    )
+    if (generation !== searchGeneration) return
+    messages.value = result
+    offset.value = result.length
+    resultCount.value = null
+    if (result.length === 0) {
+      hasMore.value = false
+      return
+    }
+    hasMore.value = result.length === LIMIT
+    // Recompute the count over the full filter + day bounds.
+    invoke<number>('count_chat_messages', {
+      searchText: p.text || undefined,
+      sender: p.sender || undefined,
+      channel: p.channel || undefined,
+      startTime: `${day} 00:00:00`,
+      endTime: `${day} 23:59:59`,
+    })
+      .then(n => {
+        if (countGeneration === queryGeneration) resultCount.value = n
+      })
+      .catch(e => console.error('Failed to count messages:', e))
+  } catch (e) {
+    console.error('Failed to load messages around day:', e)
+    // Fall back to day-filtered paging
+    offset.value = 0
+    hasMore.value = true
+    loadMessages()
+  } finally {
+    if (generation === searchGeneration) loading.value = false
+  }
+}
+
 onMounted(() => {
   loadMessages()
+  dateNav.loadDays()
   nextTick(() => searchInput.value?.focus())
 })
 </script>

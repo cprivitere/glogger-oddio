@@ -149,7 +149,7 @@ pub fn survey_tracker_start_session(
         .active_character_server()
         .ok_or_else(|| "no active character".to_string())?;
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     coord
         .survey_aggregator_mut()
         .start_manual_session(&conn, &character, &server, &now)
@@ -167,7 +167,7 @@ pub fn survey_tracker_end_session(
         None => return Ok(None),
     };
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     coord
         .survey_aggregator_mut()
         .end_active_session(&conn, &character, &server, &now)
@@ -698,14 +698,18 @@ fn compute_duration_seconds(started_at: &str, ended_at: Option<&str>) -> Option<
 
 /// Update a session's `notes` field. Used by the History tab's editable
 /// notes textarea. Returns `Err` if the session doesn't exist.
+///
+/// Never touches the coordinator or holds its mutex — goes straight to the
+/// write pool, so an UPDATE queued behind other writers never stalls log
+/// ingestion. `survey_tracker_update_session_name` and
+/// `survey_tracker_update_session_times` share this property.
 #[tauri::command]
 pub fn survey_tracker_update_session_notes(
-    coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
+    db: State<'_, crate::db::DbPool>,
     session_id: i64,
     notes: String,
 ) -> Result<(), String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     let updated = conn
         .execute(
             "UPDATE survey_sessions SET notes = ?2 WHERE id = ?1",
@@ -722,12 +726,11 @@ pub fn survey_tracker_update_session_notes(
 /// Update a session's user-facing name.
 #[tauri::command]
 pub fn survey_tracker_update_session_name(
-    coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
+    db: State<'_, crate::db::DbPool>,
     session_id: i64,
     name: String,
 ) -> Result<(), String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     persistence::update_session_name(&conn, session_id, &name).map_err(|e| e.to_string())
 }
 
@@ -735,13 +738,12 @@ pub fn survey_tracker_update_session_name(
 /// an override (reverts to the computed bounds from event timestamps).
 #[tauri::command]
 pub fn survey_tracker_update_session_times(
-    coordinator: State<'_, Arc<Mutex<DataIngestCoordinator>>>,
+    db: State<'_, crate::db::DbPool>,
     session_id: i64,
     user_started_at: Option<String>,
     user_ended_at: Option<String>,
 ) -> Result<(), String> {
-    let coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = db.get_write().map_err(|e| e.to_string())?;
     persistence::update_session_user_times(
         &conn,
         session_id,
@@ -762,7 +764,7 @@ pub fn survey_tracker_delete_session(
     session_id: i64,
 ) -> Result<(), String> {
     let mut coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get().map_err(|e| e.to_string())?;
+    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
     // Delete uses first (no cascade defined). Then delete the session header.
     conn.execute(
         "DELETE FROM survey_uses WHERE session_id = ?1",
