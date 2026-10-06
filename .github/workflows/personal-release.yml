@@ -1,8 +1,15 @@
 name: Personal Release
 
-# Builds the glogger.Personal installer on a v<version>-personal tag push and
-# publishes it as a GitHub Release on this fork. Personal profile has
-# createUpdaterArtifacts:false, so no signing secrets are required.
+# Builds the signed glogger.Personal installer on a v<version>-personal tag push
+# and publishes it as a GitHub Release on this fork.
+#
+# tauri.personal.conf.json sets createUpdaterArtifacts:true, so the NSIS
+# installer is signed with the personal minisign key
+# (secrets.PERSONAL_TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]); the matching public
+# key is embedded in that config. After publishing the version release, the
+# `latest.json` updater manifest is pushed to the `personal-latest` pointer
+# release — that tag URL is the updater endpoint compiled into the app, so it
+# stays stable while the asset behind it is replaced on every release.
 
 on:
   push:
@@ -14,6 +21,7 @@ permissions:
 
 env:
   PERSONAL_REPO: ${{ github.repository }}
+  CHANNEL_TAG: personal-latest
 
 jobs:
   build:
@@ -43,9 +51,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.PERSONAL_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.PERSONAL_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
           args: --config src-tauri/tauri.personal.conf.json
+          updaterJsonPreferNsis: true
 
       - name: Collect installer
         shell: bash
@@ -56,7 +67,15 @@ jobs:
           if [ -z "$BUNDLE_DIR" ]; then
             echo "ERROR: no bundle dir"; find src-tauri/target -name bundle -type d; exit 1
           fi
-          cp "$BUNDLE_DIR"/nsis/*.exe "release-artifacts/glogger-${VERSION}-personal-windows-setup.exe"
+          NAME="glogger-${VERSION}-personal-windows-setup.exe"
+          cp "$BUNDLE_DIR"/nsis/*.exe "release-artifacts/$NAME"
+          SIG=$(ls "$BUNDLE_DIR"/nsis/*.exe.sig 2>/dev/null | head -1)
+          if [ -z "$SIG" ]; then
+            echo "ERROR: no .sig — the build was not signed (missing PERSONAL_TAURI_SIGNING_PRIVATE_KEY secret?)"
+            find "$BUNDLE_DIR" -type f
+            exit 1
+          fi
+          cp "$SIG" "release-artifacts/$NAME.sig"
           ls -la release-artifacts/
 
       - name: Upload artifact
@@ -74,6 +93,34 @@ jobs:
         with:
           name: personal-nsis
           path: all-artifacts
+
+      - name: Generate latest.json updater manifest
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(echo "$TAG" | sed 's/^v//; s/-personal$//')"
+          NAME="glogger-${VERSION}-personal-windows-setup.exe"
+          BASE_URL="https://github.com/$PERSONAL_REPO/releases/download/$TAG"
+          if [ ! -f "all-artifacts/$NAME.sig" ]; then
+            echo "ERROR: missing signature all-artifacts/$NAME.sig"; ls -la all-artifacts; exit 1
+          fi
+          SIG="$(cat "all-artifacts/$NAME.sig")"
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          cat > all-artifacts/latest.json <<ENDJSON
+          {
+            "version": "${VERSION}",
+            "notes": "Personal build ${TAG}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "url": "${BASE_URL}/${NAME}",
+                "signature": "${SIG}"
+              }
+            }
+          }
+          ENDJSON
+          python3 -m json.tool all-artifacts/latest.json
+          echo "verified: latest.json parses"
 
       - name: Create release
         shell: bash
@@ -93,7 +140,22 @@ jobs:
             echo
             echo "---"
             echo
-            echo "**Personal build** — the \`glogger.Personal\` profile. Data lives in \`%APPDATA%\\\\glogger.Personal\` and is preserved across reinstalls."
+            echo "**Personal build** — the \`glogger.Personal\` profile. Data lives in \`%APPDATA%\\glogger.Personal\` and is preserved across reinstalls. Installed Personal builds auto-update from the \`$CHANNEL_TAG\` channel."
           } > RELEASE_NOTES.md
           gh release create "$TAG" --repo "$PERSONAL_REPO" --title "Personal $TAG" --notes-file RELEASE_NOTES.md --latest
-          gh release upload "$TAG" all-artifacts/*.exe --repo "$PERSONAL_REPO"
+          gh release upload "$TAG" all-artifacts/*.exe all-artifacts/*.sig --repo "$PERSONAL_REPO"
+
+      - name: Update the update-channel pointer release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Stable tag whose latest.json is the compiled-in updater endpoint,
+          # so it must always hold the newest signed manifest (not the newest
+          # release's assets, which may come from a different build line).
+          gh release view "$CHANNEL_TAG" --repo "$PERSONAL_REPO" >/dev/null 2>&1 || \
+            gh release create "$CHANNEL_TAG" --repo "$PERSONAL_REPO" \
+              --title 'Personal update channel' --latest=false \
+              --notes 'Pointer release: holds latest.json for the glogger.Personal updater endpoint. Replaced on every v*-personal release — do not delete.'
+          gh release upload "$CHANNEL_TAG" all-artifacts/latest.json --repo "$PERSONAL_REPO" --clobber
+          echo "channel updated: https://github.com/$PERSONAL_REPO/releases/download/$CHANNEL_TAG/latest.json"

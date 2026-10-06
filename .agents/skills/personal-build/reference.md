@@ -68,11 +68,56 @@ Must be run on `personal` with a clean tree. It runs `scripts/bump-version.sh`
 (sets `0.12.18`-style version everywhere, including the personal window
 title), commits `release: v<version>-personal`, tags it, and pushes both the
 branch and the tag to `origin`. CI
-(`.github/workflows/personal-release.yml`) then builds the Windows NSIS
-`glogger.Personal` installer and publishes it to
+(`.github/workflows/personal-release.yml`) then builds the **signed** Windows
+NSIS `glogger.Personal` installer and publishes it to
 `https://github.com/cprivitere/glogger-oddio/releases/tag/v<version>-personal`
-as `glogger-<version>-personal-windows-setup.exe`. The upstream Flatpak
-workflow ignores `v*-personal` tags.
+as `glogger-<version>-personal-windows-setup.exe` (+ `.sig`), and refreshes the
+update channel (next section). The upstream Flatpak workflow ignores
+`v*-personal` tags.
+
+## Auto-update & signing
+
+The `glogger.Personal` profile ships a working in-app updater
+(`tauri-plugin-updater`, polled 5 s after startup + hourly; banner in the
+header, full UI in Help → Changelog).
+
+| Piece | Value |
+|---|---|
+| Private key (build-time signing) | `C:\Users\cprivitere\.tauri\glogger-personal.key` (password in `glogger-personal.key.password` next to it) — **outside the repo; this is the only copy** |
+| Fork secrets | `PERSONAL_TAURI_SIGNING_PRIVATE_KEY`, `PERSONAL_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (set via `gh secret set … --repo cprivitere/glogger-oddio --body "$(cat <file>)"`) |
+| Public key (compiled into the app) | `plugins.updater.pubkey` in `src-tauri/tauri.personal.conf.json` |
+| Update endpoint (compiled into the app) | `https://github.com/cprivitere/glogger-oddio/releases/download/personal-latest/latest.json` |
+| Manifest producer | `personal-release.yml` → *Generate latest.json updater manifest* → uploaded to the `personal-latest` pointer release (`--clobber`) |
+| Manually installed `.sig` verification | `tauri signer sign` produces the same minisign payload; CI verifies `latest.json` parses |
+
+Why a `personal-latest` pointer release instead of `releases/latest/download/…`:
+`--latest` on the fork is shared with the fork's `glogger.Release` (upstream-mirror)
+releases, which are signed with a *different* key. A dedicated tag keeps the
+personal channel pointing only at personal builds — and its URL is stable, so
+the endpoint never has to change.
+
+Invariants (break either one and updates fail silently — `check()` still
+reports an update, the install fails at signature verification):
+
+1. `tauri.personal.conf.json`'s `pubkey` == public half of the secret.
+2. The endpoint stays the `personal-latest` tag.
+
+Local builds are **unsigned** by design (`scripts/personal-build.sh` adds a
+`createUpdaterArtifacts:false` override when no key is in the environment) —
+that is harmless, because the updater verifies the artifact it *downloads*, not
+the running binary. For a signed local build:
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/glogger-personal.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/glogger-personal.key.password)" \
+npm run tauri:build:personal
+```
+
+Rotating the key: `npx tauri signer generate -w ~/.tauri/glogger-personal.key -p '<pw>' -f`
+(via `node node_modules/@tauri-apps/cli/tauri.js signer generate …` — bare `npx tauri` fails on this machine), update both secrets, then paste the new
+`glogger-personal.key.pub` content into `plugins.updater.pubkey` and publish a
+release. **Installed builds cannot auto-update across a key rotation** — the old
+pubkey is compiled in, so the new-key release must be installed manually once.
 
 ## Data safety invariants (NEVER break these)
 

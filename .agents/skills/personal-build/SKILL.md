@@ -14,10 +14,11 @@ Operate the user's personal glogger daily-driver: integrate tested work into the
 |---|---|
 | Integrate tested work | `git checkout personal` → `git merge <branch-or-commit>` (or commit logical chunks) |
 | Verify before build | `cd src-tauri && cargo test --lib` (expect 585+, 0 failed); `npm run build` if frontend touched |
-| Build daily driver | `npm run tauri:build:personal` (from repo root) |
+| Build daily driver | `npm run tauri:build:personal` (from repo root; unsigned locally — see *Auto-update*) |
 | Installer output | `src-tauri/target/release/bundle/nsis/*.exe` |
-| Publish a fork release | `npm run release:personal <patch\|minor\|major\|x.y.z>` (bumps, commits, tags `v<version>-personal`, pushes; CI builds + publishes the fork Release) |
-| Install/update | Run the NSIS setup — appdata `%APPDATA%\glogger.Personal` is preserved on reinstall |
+| Publish a fork release | `npm run release:personal <patch\|minor\|major\|x.y.z>` (bumps, commits, tags `v<version>-personal`, pushes; CI builds + signs + publishes the fork Release and refreshes the update channel) |
+| Install/update | Run the NSIS setup — appdata `%APPDATA%\glogger.Personal` is preserved on reinstall. Once a signed build is installed, the app updates itself (banner in the header / Help → Changelog) |
+| Signing key material | `~/.tauri/glogger-personal.key` + `.password` (outside the repo) ↔ fork secrets `PERSONAL_TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`; pubkey embedded in `src-tauri/tauri.personal.conf.json` |
 | Fresh production data copy | Close glogger → copy `%APPDATA%\glogger.Release\{glogger.db,glogger.db-wal,glogger.db-shm,settings.json}` → `%APPDATA%\glogger.Personal\` |
 | Type check only | `npm run build` (vue-tsc) |
 
@@ -33,7 +34,7 @@ Operate the user's personal glogger daily-driver: integrate tested work into the
 1. Pre-flight: confirm branch = `personal`, tree clean (`git status --short`).
 2. Verify: `cargo test --lib` (src-tauri dir) + `npm run build` if TS changed.
 3. Build: `npm run tauri:build:personal`. NSIS bundle lands in `src-tauri/target/release/bundle/nsis/`.
-4. Install: run the setup exe (installs to `%LOCALAPPDATA%\glogger-personal`, overwrites previous personal build, does not touch data dir).
+4. Install: run the setup exe (installs to `%LOCALAPPDATA%\glogger\`, overwrites previous personal build, does not touch data dir).
 5. Smoke: launch → title `glogger v<ver> PERSONAL` → confirm recent events (log positions advance).
 
 ## Data recovery / resync
@@ -47,7 +48,8 @@ If the Personal DB drifts stale and the user wants a fresh production snapshot: 
 - npm only (Node 24). No bun/yarn/pnpm.
 - Do not run two glogger instances against the same data dir simultaneously.
 - `version:bump` does NOT wipe Personal data (no seed gate on `glogger.Personal`); it DOES wipe Experimental data — that's by design.
-- Updater signing: `tauri.conf.json` has `createUpdaterArtifacts: true`, so builds error at the signing step unless `TAURI_SIGNING_PRIVATE_KEY` is set. The personal profile already overrides it to `false` (`tauri.personal.conf.json`) — if that override ever disappears, the error is benign (installer is already produced).
+- Updater signing (`createUpdaterArtifacts: true` on the personal profile): a build **fails** without `TAURI_SIGNING_PRIVATE_KEY`, but `npm run tauri:build:personal` runs `scripts/personal-build.sh`, which injects a `createUpdaterArtifacts:false` override when the variable is unset — so local builds stay unsigned and working. Never publish an unsigned build: CI's *Collect installer* step hard-fails when the NSIS `.exe.sig` is missing.
+- **Auto-update correctness:** the `pubkey` in `src-tauri/tauri.personal.conf.json` must be the public half of the key in the fork's `PERSONAL_TAURI_SIGNING_PRIVATE_KEY` secret, and the endpoint must stay the `personal-latest` channel tag. If either drifts, every update is silently rejected (`check()` succeeds, install fails verification) — see *Auto-update & signing* in `reference.md`.
 
 ## Deep reference
 
