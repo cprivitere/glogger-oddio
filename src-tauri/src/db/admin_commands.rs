@@ -1,4 +1,4 @@
-use super::{DbConnection, DbPool};
+use super::{WriteConn, DbPool};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 /// Advanced database administration commands
@@ -280,9 +280,10 @@ pub fn purge_player_data(
     let mut result = run_purge(&conn, cutoff.as_deref());
 
     // Reclaim freed pages back to the OS. VACUUM can't run inside a transaction;
-    // run_purge uses autocommit deletes, so this is safe here.
-    conn.execute_batch("VACUUM")
-        .map_err(|e| format!("Failed to vacuum database: {e}"))?;
+    // run_purge uses autocommit deletes, so this is safe here. Retried on
+    // SQLITE_BUSY so a short-lived read snapshot doesn't fail the purge.
+    super::vacuum_with_retry(&conn, 3)
+        .map_err(|e| format!("Failed to vacuum database (busy after 3 attempts): {e}"))?;
 
     result.bytes_reclaimed = (size_before - db_size_bytes(&conn)).max(0);
     Ok(result)
@@ -307,8 +308,8 @@ pub fn compact_database(db: State<'_, DbPool>) -> Result<CompactResult, String> 
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let bytes_before = db_size_bytes(&conn);
-    conn.execute_batch("VACUUM")
-        .map_err(|e| format!("Failed to vacuum database: {e}"))?;
+    super::vacuum_with_retry(&conn, 3)
+        .map_err(|e| format!("Failed to vacuum database (busy after 3 attempts): {e}"))?;
     let bytes_after = db_size_bytes(&conn);
 
     Ok(CompactResult {
@@ -325,7 +326,7 @@ pub fn compact_database(db: State<'_, DbPool>) -> Result<CompactResult, String> 
 /// something was actually removed (so a no-op startup doesn't pay the rewrite).
 /// Errors on individual tables are logged and skipped, never fatal.
 pub fn check_auto_purge(
-    conn: &DbConnection,
+    conn: &WriteConn,
     auto_purge_days: Option<u32>,
 ) -> Result<PurgeResult, String> {
     let Some(days) = auto_purge_days else {
@@ -353,8 +354,8 @@ pub fn check_auto_purge(
             result.item_transactions_deleted,
             result.chat_messages_deleted,
         );
-        if let Err(e) = conn.execute_batch("VACUUM") {
-            eprintln!("[auto-purge] VACUUM failed: {e}");
+        if let Err(e) = super::vacuum_with_retry(conn, 3) {
+            eprintln!("[auto-purge] VACUUM failed after 3 attempts: {e}");
         }
         result.bytes_reclaimed = (size_before - db_size_bytes(conn)).max(0);
     }

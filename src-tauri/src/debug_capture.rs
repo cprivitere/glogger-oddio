@@ -15,7 +15,7 @@
 //! 3. `discard()` — can be called at any time (active or stopped) to throw
 //!    away captured data without saving.
 
-use crate::db::DbPool;
+use crate::db::{DbPool, DbRead};
 use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -453,8 +453,8 @@ pub fn snapshot_game_state(
 }
 
 /// Generic helper: query all rows from a game_state table as JSON values.
-fn query_table_as_json(
-    conn: &rusqlite::Connection,
+fn query_table_as_json<C: DbRead + ?Sized>(
+    conn: &C,
     table: &str,
     character: &str,
     server: &str,
@@ -524,8 +524,8 @@ fn query_table_as_json(
 }
 
 /// Query the composite world state (weather, combat, mount, area).
-fn query_world_state(
-    conn: &rusqlite::Connection,
+fn query_world_state<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> serde_json::Value {
@@ -547,8 +547,8 @@ fn query_world_state(
 }
 
 /// Query active skills.
-fn query_active_skills(
-    conn: &rusqlite::Connection,
+fn query_active_skills<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> serde_json::Value {

@@ -157,12 +157,13 @@ pub fn import_inventory_report_internal(
         ));
     }
 
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     // 4. Begin transaction
-    conn.execute("BEGIN", [])
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     let result = (|| -> Result<InventoryImportResult, String> {
@@ -204,6 +205,7 @@ pub fn import_inventory_report_internal(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
         ).map_err(|e| format!("Failed to prepare item insert: {e}"))?;
 
+        let mut items_imported = 0usize;
         for item in &report.items {
             let is_inv = item.is_in_inventory.unwrap_or(false);
             let is_crafted = item.is_crafted.unwrap_or(false);
@@ -214,7 +216,7 @@ pub fn import_inventory_report_internal(
                 .as_ref()
                 .map(|powers| serde_json::to_string(powers).unwrap_or_default());
 
-            item_stmt
+            items_imported += item_stmt
                 .execute(rusqlite::params![
                     snapshot_id,
                     item.type_id,
@@ -246,7 +248,7 @@ pub fn import_inventory_report_internal(
             "DELETE FROM game_state_storage WHERE character_name = ?1 AND server_name = ?2",
             rusqlite::params![report.character, report.server_name],
         )
-        .ok();
+        .map_err(|e| format!("Failed to clear storage: {e}"))?;
 
         let mut storage_query = conn
             .prepare(
@@ -288,14 +290,14 @@ pub fn import_inventory_report_internal(
                     stack_size,
                     now,
                 ])
-                .ok();
+                .map_err(|e| format!("Failed to insert storage item: {e}"))?;
         }
 
         // 9. Seed game_state_inventory from this snapshot (inventory items only)
         conn.execute(
             "DELETE FROM game_state_inventory WHERE character_name = ?1 AND server_name = ?2 AND source = 'snapshot'",
             rusqlite::params![report.character, report.server_name],
-        ).ok();
+        ).map_err(|e| format!("Failed to clear inventory: {e}"))?;
 
         let mut inv_query = conn
             .prepare(
@@ -342,30 +344,24 @@ pub fn import_inventory_report_internal(
                     stack_size,
                     now,
                 ])
-                .ok();
+                .map_err(|e| format!("Failed to insert inventory item: {e}"))?;
         }
 
         Ok(InventoryImportResult {
             character_name: report.character.clone(),
             server_name: report.server_name.clone(),
             snapshot_timestamp: report.timestamp.clone(),
-            items_imported: report.items.len(),
+            items_imported,
             was_duplicate: false,
         })
     })();
 
-    // 8. Commit or rollback
-    match &result {
-        Ok(_) => {
-            conn.execute("COMMIT", [])
-                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-        }
-        Err(_) => {
-            conn.execute("ROLLBACK", []).ok();
-        }
-    }
+    // 8. Commit (a dropped `Transaction` rolls back on any earlier `?`)
+    let value = result?;
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
-    result
+    Ok(value)
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-use super::DbPool;
+use super::{DbPool, DbRead};
 use crate::cdn_commands::GameDataState;
 use rusqlite::params;
 use serde::Serialize;
@@ -204,8 +204,13 @@ pub async fn scan_snapshot_for_brewing_discoveries(
     };
 
     // Phase 3: writer only around the upserts.
-    let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
-    record_brewing_items(&conn, &character, &timestamp, &items)
+    let mut conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
+    let result = record_brewing_items(&*tx, &character, &timestamp, &items)?;
+    tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+    Ok(result)
 }
 
 // ── Query discoveries ───────────────────────────────────────────────────────
@@ -321,7 +326,7 @@ pub async fn scan_all_snapshots_for_brewing(
     // Phase 3: one writer checkout, one transaction over all backfills.
     let mut conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     let mut total_new = 0u32;
@@ -358,8 +363,8 @@ struct BrewingItem {
 
 /// Fetch a snapshot's (character_name, raw_json, snapshot_timestamp) row.
 /// Read-side helper — takes any connection, use `db.get()` for scans.
-fn read_snapshot_row(
-    conn: &rusqlite::Connection,
+fn read_snapshot_row<C: DbRead + ?Sized>(
+    conn: &C,
     snapshot_id: i64,
 ) -> Result<(String, String, String), String> {
     conn.query_row(
@@ -634,7 +639,10 @@ pub async fn import_brewing_discoveries_csv(
         }
     }
 
-    let conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("DB error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
     let mut insert_stmt = conn
         .prepare(
             "INSERT INTO brewing_discoveries (
@@ -809,6 +817,10 @@ pub async fn import_brewing_discoveries_csv(
             skipped_lines.join("\n")
         );
     }
+
+    drop(insert_stmt);
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(BrewingScanResult {
         new_discoveries,

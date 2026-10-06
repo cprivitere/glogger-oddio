@@ -209,7 +209,7 @@ impl GameStateManager {
             Some(s) => s.clone(),
             None => return ProcessResult { domains_updated: vec![] },
         };
-        let conn = match db.get_write() {
+        let mut conn = match db.get_write() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[game_state] DB error on process_events_batch: {e}");
@@ -220,13 +220,21 @@ impl GameStateManager {
         let game_data_guard = game_data_arc.try_read().ok();
 
         let mut all_domains = Vec::new();
-        conn.execute("BEGIN IMMEDIATE", []).ok();
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("[game_state] begin transaction failed: {e}");
+                return ProcessResult { domains_updated: vec![] };
+            }
+        };
         for event in events {
             let mut domains = Vec::new();
-            self.process_event_inner(event, &conn, &character, &server, &game_data_guard, &mut domains);
+            self.process_event_inner(event, &tx, &character, &server, &game_data_guard, &mut domains);
             all_domains.extend(domains);
         }
-        conn.execute("COMMIT", []).ok();
+        if let Err(e) = tx.commit() {
+            eprintln!("[game_state] commit failed: {e}");
+        }
 
         all_domains.sort_unstable();
         all_domains.dedup();

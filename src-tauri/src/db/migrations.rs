@@ -27,6 +27,14 @@ pub fn run_migrations(conn: &Connection, tz_offset_seconds: Option<i32>) -> Resu
 
     let current_version = super::get_schema_version(conn)?;
 
+    // Apply every pending migration inside one transaction so a mid-run
+    // failure rolls the whole run back and leaves `schema_migrations` at the
+    // last committed version (a non-idempotent ALTER/CREATE mid-way would
+    // otherwise leave a half-applied schema). `&tx` coerces to `&Connection`
+    // at every `migration_vN(..)` / `record_migration(..)` call site.
+    let tx = conn.unchecked_transaction()?;
+    let conn = &tx;
+
     if current_version < 1 {
         migration_v1_unified_schema(conn)?;
         super::record_migration(conn, 1)?;
@@ -367,6 +375,7 @@ pub fn run_migrations(conn: &Connection, tz_offset_seconds: Option<i32>) -> Resu
         super::record_migration(conn, 68)?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -3289,5 +3298,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(homer_rows, 1, "re-milk upserts, never duplicates");
+    }
+
+    #[test]
+    fn run_migrations_is_idempotent_and_atomic() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn, None).unwrap();
+        assert_eq!(
+            crate::db::get_schema_version(&conn).unwrap(),
+            68,
+            "fresh DB migrates to the head version"
+        );
+        // Second run: every `if current_version < N` block is skipped. If the
+        // run had left the version table unadvanced (or partially advanced),
+        // the non-idempotent ALTER/CREATE blocks would re-run and error here.
+        run_migrations(&conn, None).unwrap();
+        assert_eq!(crate::db::get_schema_version(&conn).unwrap(), 68);
     }
 }

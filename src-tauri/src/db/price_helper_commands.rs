@@ -226,9 +226,12 @@ pub fn add_price_helper_entry(
     db: State<'_, DbPool>,
     input: AddQuoteEntryInput,
 ) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     let next_order: i32 = conn
         .query_row(
@@ -249,9 +252,12 @@ pub fn add_price_helper_entry(
         "UPDATE price_helper_quotes SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
         [input.quote_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch quote: {e}"))?;
 
-    Ok(conn.last_insert_rowid())
+    let new_id = conn.last_insert_rowid();
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    Ok(new_id)
 }
 
 #[tauri::command]
@@ -259,9 +265,12 @@ pub fn update_price_helper_entry(
     db: State<'_, DbPool>,
     input: UpdateQuoteEntryInput,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     conn.execute(
         "UPDATE price_helper_entries SET quantity = ?1 WHERE id = ?2",
@@ -274,23 +283,28 @@ pub fn update_price_helper_entry(
          WHERE id = (SELECT quote_id FROM price_helper_entries WHERE id = ?1)",
         [input.id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch quote: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn remove_price_helper_entry(db: State<'_, DbPool>, entry_id: i64) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     conn.execute(
         "UPDATE price_helper_quotes SET updated_at = CURRENT_TIMESTAMP
          WHERE id = (SELECT quote_id FROM price_helper_entries WHERE id = ?1)",
         [entry_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch quote: {e}"))?;
 
     conn.execute(
         "DELETE FROM price_helper_entries WHERE id = ?1",
@@ -298,5 +312,7 @@ pub fn remove_price_helper_entry(db: State<'_, DbPool>, entry_id: i64) -> Result
     )
     .map_err(|e| format!("Failed to remove entry: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }

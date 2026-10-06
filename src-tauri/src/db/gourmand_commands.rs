@@ -101,15 +101,19 @@ pub fn import_gourmand_from_content(
         return Ok(0);
     }
 
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     // Delete only non-manual entries; manual marks are preserved
-    conn.execute(
+    tx.execute(
         "DELETE FROM gourmand_eaten_foods WHERE manually_marked = 0",
         [],
     )
     .map_err(|e| format!("Failed to clear old data: {e}"))?;
 
     // Upsert: if a manually-marked entry matches a report entry, upgrade it to imported
-    let mut stmt = conn
+    let mut stmt = tx
         .prepare(
             "INSERT INTO gourmand_eaten_foods (food_name, times_eaten, manually_marked)
              VALUES (?1, ?2, 0)
@@ -121,6 +125,10 @@ pub fn import_gourmand_from_content(
         stmt.execute(params![&entry.name, entry.count])
             .map_err(|e| format!("Insert error: {e}"))?;
     }
+    drop(stmt);
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(entries.len())
 }
@@ -136,9 +144,12 @@ pub fn import_gourmand_report(
 
     let entries = parse_gourmand_report(&content)?;
 
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Delete only non-manual entries; manual marks are preserved
     conn.execute(
@@ -160,6 +171,10 @@ pub fn import_gourmand_report(
         stmt.execute(params![&entry.name, entry.count])
             .map_err(|e| format!("Insert error: {e}"))?;
     }
+    drop(stmt);
+
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(GourmandImportResult {
         foods_imported: entries.len(),
@@ -292,9 +307,12 @@ pub fn import_latest_gourmand_report(
         return Ok(None);
     }
 
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Check if we already have this exact data (avoid unnecessary re-imports)
     // Only count non-manual entries for comparison
@@ -307,7 +325,8 @@ pub fn import_latest_gourmand_report(
         .unwrap_or(0);
 
     if existing_count == entries.len() as i64 {
-        // Same count — likely the same report. Skip re-import.
+        // Same count — likely the same report. Skip re-import. (Dropping the
+        // transaction rolls back the no-op.)
         return Ok(None);
     }
 
@@ -331,6 +350,10 @@ pub fn import_latest_gourmand_report(
         stmt.execute(params![&entry.name, entry.count])
             .map_err(|e| format!("Insert error: {e}"))?;
     }
+    drop(stmt);
+
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(Some(GourmandImportResult {
         foods_imported: entries.len(),

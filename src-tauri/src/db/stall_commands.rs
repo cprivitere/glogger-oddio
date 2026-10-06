@@ -1,4 +1,4 @@
-use super::DbPool;
+use super::{DbPool, DbRead};
 use crate::settings::SettingsManager;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -125,8 +125,8 @@ fn map_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StallPriceOb
 
 /// Resolve an item query (display name / internal name / numeric id) against
 /// the CDN `items` table. Same triple lookup as `game_data::resolve_item`.
-fn resolve_item_query(
-    conn: &rusqlite::Connection,
+fn resolve_item_query<C: DbRead + ?Sized>(
+    conn: &C,
     item_query: &str,
 ) -> Option<(i64, String, Option<String>)> {
     // Numeric id first.
@@ -182,11 +182,14 @@ pub fn record_stall_prices(
         .unwrap_or_else(|| "Unknown".to_string());
     let observed_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     let mut inserted = 0usize;
     for entry in &entries {
-        let resolved = resolve_item_query(&conn, &entry.item_query);
+        let resolved = resolve_item_query(&*conn, &entry.item_query);
         let (item_name, internal_name, item_type_id) = match &resolved {
             Some((id, name, internal)) => (name.clone(), internal.clone(), Some(*id)),
             // Keep the raw string so unmatched rows still show up for fixing.
@@ -222,6 +225,9 @@ pub fn record_stall_prices(
             Err(e) => return Err(format!("Failed to record price: {e}")),
         }
     }
+
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(inserted)
 }
 
@@ -236,7 +242,7 @@ pub fn update_stall_price_observation(
     stall_label: Option<String>,
     owner_name: Option<String>,
 ) -> Result<(), String> {
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
     let n = conn
         .execute(
             "UPDATE stall_price_observations
@@ -256,7 +262,7 @@ pub fn update_stall_price_observation(
 /// Delete one observation row.
 #[tauri::command]
 pub fn delete_stall_price_observation(db: State<'_, DbPool>, id: i64) -> Result<(), String> {
-    let conn = db.get().map_err(|e| format!("Database error: {e}"))?;
+    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
     conn.execute(
         "DELETE FROM stall_price_observations WHERE id = ?1",
         rusqlite::params![id],

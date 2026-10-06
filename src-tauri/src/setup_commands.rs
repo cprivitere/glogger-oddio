@@ -258,10 +258,13 @@ pub fn delete_character(
     character_name: String,
     server_name: String,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
     // All character-scoped tables to cascade delete
     let tables = [
         "game_state_skills",
@@ -278,14 +281,12 @@ pub fn delete_character(
         "game_state_session",
     ];
 
-    conn.execute("BEGIN", []).ok();
-
     for table in &tables {
         conn.execute(
             &format!("DELETE FROM {table} WHERE character_name = ?1 AND server_name = ?2"),
             rusqlite::params![character_name, server_name],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
     }
 
     // Delete character snapshots and their child data
@@ -309,33 +310,33 @@ pub fn delete_character(
             "DELETE FROM character_skill_levels WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
         conn.execute(
             "DELETE FROM character_npc_favor WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
         conn.execute(
             "DELETE FROM character_recipe_completions WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
         conn.execute(
             "DELETE FROM character_stats WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
         conn.execute(
             "DELETE FROM character_currencies WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
     }
     conn.execute(
         "DELETE FROM character_snapshots WHERE character_name = ?1 AND server_name = ?2",
         rusqlite::params![character_name, server_name],
     )
-    .ok();
+    .map_err(|e| format!("Delete failed: {e}"))?;
 
     // Delete inventory snapshots and their child data
     let inv_snapshot_ids: Vec<i64> =
@@ -358,22 +359,23 @@ pub fn delete_character(
             "DELETE FROM inventory_snapshot_items WHERE snapshot_id = ?1",
             rusqlite::params![sid],
         )
-        .ok();
+        .map_err(|e| format!("Delete failed: {e}"))?;
     }
     conn.execute(
         "DELETE FROM inventory_snapshots WHERE character_name = ?1 AND server_name = ?2",
         rusqlite::params![character_name, server_name],
     )
-    .ok();
+    .map_err(|e| format!("Delete failed: {e}"))?;
 
     // Delete the user_characters record
     conn.execute(
         "DELETE FROM user_characters WHERE character_name = ?1 AND server_name = ?2",
         rusqlite::params![character_name, server_name],
     )
-    .ok();
+    .map_err(|e| format!("Delete failed: {e}"))?;
 
-    conn.execute("COMMIT", []).ok();
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     // If the deleted character was the active one, clear it from settings
     let settings = settings_manager.get();

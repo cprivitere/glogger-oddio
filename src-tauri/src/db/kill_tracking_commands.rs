@@ -7,7 +7,7 @@
 ///   `source_label` so a re-import of the same file replaces rather than
 ///   double-counts
 /// - "combined": mine + imported, summed
-use super::DbPool;
+use super::{DbPool, DbRead};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -129,7 +129,7 @@ fn drop_binds(enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> Vec<rusq
     binds
 }
 
-fn mine_total_kills(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> i64 {
+fn mine_total_kills<C: DbRead + ?Sized>(conn: &C, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> i64 {
     let sql = format!(
         "SELECT COUNT(*) FROM enemy_kills WHERE enemy_name = ?{}{}",
         zf.sql("zone"),
@@ -140,7 +140,7 @@ fn mine_total_kills(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilt
         .unwrap_or(0)
 }
 
-fn imported_total_kills(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> i64 {
+fn imported_total_kills<C: DbRead + ?Sized>(conn: &C, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> i64 {
     let sql = format!(
         "SELECT COALESCE(SUM(total_kills), 0) FROM imported_enemy_kills_agg WHERE enemy_name = ?{}{}",
         zf.sql("zone"),
@@ -151,7 +151,7 @@ fn imported_total_kills(conn: &rusqlite::Connection, enemy_name: &str, zf: &Zone
         .unwrap_or(0)
 }
 
-fn mine_loot_rows(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> Vec<(String, i64, i64)> {
+fn mine_loot_rows<C: DbRead + ?Sized>(conn: &C, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> Vec<(String, i64, i64)> {
     let sql = format!(
         "SELECT l.item_name, SUM(l.quantity), COUNT(DISTINCT l.kill_id)
          FROM enemy_kill_loot l
@@ -173,7 +173,7 @@ fn mine_loot_rows(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilter
     .unwrap_or_default()
 }
 
-fn imported_loot_rows(conn: &rusqlite::Connection, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> Vec<(String, i64, i64)> {
+fn imported_loot_rows<C: DbRead + ?Sized>(conn: &C, enemy_name: &str, zf: &ZoneFilter, lf: &LoadoutFilter) -> Vec<(String, i64, i64)> {
     let sql = format!(
         "SELECT item_name, SUM(total_quantity), SUM(times_dropped)
          FROM imported_enemy_kill_loot_agg
@@ -736,7 +736,7 @@ fn is_sqlite_path(path: &str) -> bool {
 /// most-dropped-first for readability. Sums across loadouts (per enemy + zone); the
 /// loadout dimension is a live query-time filter, not part of a shared export. No
 /// character, server, or timestamp data is included — only aggregate counts.
-fn collect_export_enemies(conn: &rusqlite::Connection) -> Result<Vec<ExportedEnemy>, String> {
+fn collect_export_enemies<C: DbRead + ?Sized>(conn: &C) -> Result<Vec<ExportedEnemy>, String> {
     let mut pair_stmt = conn
         .prepare("SELECT DISTINCT enemy_name, zone FROM enemy_kills ORDER BY enemy_name, zone")
         .map_err(|e| format!("Failed to prepare query: {e}"))?;

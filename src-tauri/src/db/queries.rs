@@ -1,4 +1,4 @@
-use super::DbConnection;
+use super::{DbRead, WriteConn};
 use rusqlite::{params, OptionalExtension, Result};
 
 /// Player data query functions
@@ -7,7 +7,7 @@ pub mod player_data {
 
     /// Insert a market price observation
     pub fn insert_market_price(
-        conn: &DbConnection,
+        conn: &WriteConn,
         item_id: u32,
         price: f64,
         quantity: u32,
@@ -25,7 +25,7 @@ pub mod player_data {
 
     /// Record a sale in sales history
     pub fn insert_sale(
-        conn: &DbConnection,
+        conn: &WriteConn,
         item_id: u32,
         quantity: u32,
         sale_price: f64,
@@ -43,7 +43,7 @@ pub mod player_data {
 
     /// Log a generic event
     pub fn log_event(
-        conn: &DbConnection,
+        conn: &WriteConn,
         event_type: &str,
         event_data: &str, // JSON string
     ) -> Result<i64> {
@@ -62,7 +62,7 @@ pub mod cdn_data {
     use super::*;
 
     /// Check if CDN data is loaded and get version
-    pub fn get_cdn_version(conn: &DbConnection) -> Result<Option<u32>> {
+    pub fn get_cdn_version<C: DbRead + ?Sized>(conn: &C) -> Result<Option<u32>> {
         let version: Option<u32> = conn
             .query_row("SELECT version FROM cdn_version WHERE id = 1", [], |row| {
                 row.get(0)
@@ -72,7 +72,7 @@ pub mod cdn_data {
     }
 
     /// Update CDN version (upsert)
-    pub fn set_cdn_version(conn: &DbConnection, version: u32) -> Result<()> {
+    pub fn set_cdn_version(conn: &WriteConn, version: u32) -> Result<()> {
         conn.execute(
             "INSERT OR REPLACE INTO cdn_version (id, version) VALUES (1, ?1)",
             params![version],
@@ -81,7 +81,7 @@ pub mod cdn_data {
     }
 
     /// Clear all CDN data (for refresh)
-    pub fn clear_cdn_data(conn: &DbConnection) -> Result<()> {
+    pub fn clear_cdn_data(conn: &WriteConn) -> Result<()> {
         conn.execute_batch(
             "DELETE FROM recipe_ingredients;
              DELETE FROM recipes;
@@ -101,7 +101,7 @@ pub mod log_positions {
     use super::*;
 
     /// Get the last processed position for a log file
-    pub fn get_position(conn: &DbConnection, file_path: &str) -> Result<u64> {
+    pub fn get_position<C: DbRead + ?Sized>(conn: &C, file_path: &str) -> Result<u64> {
         let position: i64 = conn
             .query_row(
                 "SELECT last_position FROM log_file_positions WHERE file_path = ?1",
@@ -115,8 +115,8 @@ pub mod log_positions {
 
     /// Get the last processed position and player name for a log file.
     /// Returns (position, player_name) so we can restore identity on resume.
-    pub fn get_position_with_player(
-        conn: &DbConnection,
+    pub fn get_position_with_player<C: DbRead + ?Sized>(
+        conn: &C,
         file_path: &str,
     ) -> Result<(u64, Option<String>)> {
         let result = conn.query_row(
@@ -192,8 +192,8 @@ pub mod log_positions {
 
     /// Get all positions for a specific file type
     #[allow(dead_code)]
-    pub fn get_positions_by_type(
-        conn: &DbConnection,
+    pub fn get_positions_by_type<C: DbRead + ?Sized>(
+        conn: &C,
         file_type: &str,
     ) -> Result<Vec<(String, u64)>> {
         let mut stmt = conn.prepare(

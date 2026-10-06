@@ -74,7 +74,7 @@ pub fn insert_stall_events(
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     let mut inserted = 0usize;

@@ -1,4 +1,4 @@
-use super::DbConnection;
+use super::{DbRead, WriteConn};
 /// Database commands for chat message operations
 use crate::chat_parser::ChatMessage;
 use crate::settings::{ConditionMatch, WatchCondition, WatchRule};
@@ -6,24 +6,28 @@ use rusqlite::{params, OptionalExtension, Result};
 
 /// Insert a batch of chat messages into the database.
 /// Messages on excluded channels are silently skipped — they must never be stored.
+///
+/// Runs in its own transaction (`unchecked_transaction`). Callers must NOT
+/// invoke this while already inside a transaction on the same connection.
 pub fn insert_chat_messages(
     conn: &rusqlite::Connection,
     messages: &[ChatMessage],
     log_file: &str,
     excluded_channels: &[String],
 ) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
     let mut inserted = 0;
 
     for msg in messages {
         // Never store messages from excluded channels
-        if let Some(ref channel) = msg.channel {
+        if let Some(channel) = &msg.channel {
             if excluded_channels.iter().any(|c| c == channel) {
                 continue;
             }
         }
 
         // Insert the message - use INSERT OR IGNORE to handle duplicates gracefully
-        let rows_affected = conn.execute(
+        let rows_affected = tx.execute(
             "INSERT OR IGNORE INTO chat_messages (timestamp, channel, sender, message, is_system, log_file, from_player)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -43,12 +47,12 @@ pub fn insert_chat_messages(
         }
 
         // Get the ID of the inserted message
-        let message_id = conn.last_insert_rowid();
+        let message_id = tx.last_insert_rowid();
 
         // Insert item links if any
         for link in &msg.item_links {
             // Look up the item in the game data by name
-            let item_id: Option<i64> = conn
+            let item_id: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM items WHERE name = ?1 COLLATE NOCASE",
                     params![&link.item_name],
@@ -56,7 +60,7 @@ pub fn insert_chat_messages(
                 )
                 .optional()?;
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO chat_item_links (message_id, raw_text, item_name, item_id)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![message_id, &link.raw_text, &link.item_name, item_id],
@@ -66,6 +70,7 @@ pub fn insert_chat_messages(
         inserted += 1;
     }
 
+    tx.commit()?;
     Ok(inserted)
 }
 
@@ -124,8 +129,8 @@ pub struct ChatItemLinkRow {
     pub item_id: Option<i64>,
 }
 
-pub fn get_chat_messages(
-    conn: &DbConnection,
+pub fn get_chat_messages<C: DbRead + ?Sized>(
+    conn: &C,
     filter: &ChatMessageFilter,
 ) -> Result<Vec<ChatMessageRow>> {
     eprintln!("[DEBUG] get_chat_messages filter: {:?}", filter);
@@ -175,8 +180,8 @@ pub fn get_chat_messages(
 
 /// Count chat messages matching the same filter semantics as `get_chat_messages`
 /// (shared WHERE builder, including the FTS MATCH path).
-pub fn count_chat_messages(
-    conn: &DbConnection,
+pub fn count_chat_messages<C: DbRead + ?Sized>(
+    conn: &C,
     filter: &ChatMessageFilter,
 ) -> Result<i64> {
     let (conditions, params) = build_chat_where(filter);
@@ -315,8 +320,8 @@ fn build_chat_where(
 
 
 /// Get item links for a specific message
-fn get_item_links_for_message(
-    conn: &DbConnection,
+fn get_item_links_for_message<C: DbRead + ?Sized>(
+    conn: &C,
     message_id: i64,
 ) -> Result<Vec<ChatItemLinkRow>> {
     let mut stmt = conn.prepare(
@@ -345,8 +350,8 @@ fn get_item_links_for_message(
 /// Get messages around a specific message for context viewing.
 /// Returns `context_count` messages before and after the target message
 /// in the same channel, ordered chronologically.
-pub fn get_messages_around(
-    conn: &DbConnection,
+pub fn get_messages_around<C: DbRead + ?Sized>(
+    conn: &C,
     message_id: i64,
     context_count: i64,
 ) -> Result<Vec<ChatMessageRow>> {
@@ -507,7 +512,7 @@ pub fn build_fts_match_expr(search_text: &str) -> Option<String> {
 }
 
 /// Days (UTC, from stored timestamps) that contain chat messages, newest first.
-pub fn get_chat_days(conn: &DbConnection) -> Result<Vec<ChatDayRow>> {
+pub fn get_chat_days<C: DbRead + ?Sized>(conn: &C) -> Result<Vec<ChatDayRow>> {
     let mut stmt = conn.prepare(
         "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS count
          FROM chat_messages
@@ -543,8 +548,8 @@ pub struct ChatDayRow {
 /// matches the sort toggle so continuation pagination composes cleanly.
 /// Caller filters (channel, sender, search, item filters) always apply.
 /// No offset math — uses the timestamp index for O(log n) boundary seeks.
-pub fn get_messages_around_time(
-    conn: &DbConnection,
+pub fn get_messages_around_time<C: DbRead + ?Sized>(
+    conn: &C,
     anchor_time: &str,
     filter: &ChatMessageFilter,
     context_count: i64,
@@ -605,13 +610,13 @@ fn map_chat_row(row: &rusqlite::Row<'_>) -> Result<ChatMessageRow> {
 
 /// Force a full rebuild of the chat FTS index (call after bulk backfills so
 /// the index is guaranteed consistent even if a historical trigger was missed).
-pub fn rebuild_chat_fts(conn: &DbConnection) -> Result<()> {
+pub fn rebuild_chat_fts(conn: &WriteConn) -> Result<()> {
     conn.execute("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild')", [])?;
     Ok(())
 }
 
 /// Get unique channels
-pub fn get_channels(conn: &DbConnection) -> Result<Vec<String>> {
+pub fn get_channels<C: DbRead + ?Sized>(conn: &C) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT channel FROM chat_messages
          WHERE channel IS NOT NULL
@@ -629,7 +634,7 @@ pub fn get_channels(conn: &DbConnection) -> Result<Vec<String>> {
 }
 
 /// Get message count by channel
-pub fn get_channel_stats(conn: &DbConnection) -> Result<Vec<(String, i64)>> {
+pub fn get_channel_stats<C: DbRead + ?Sized>(conn: &C) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT channel, COUNT(*) as count
          FROM chat_messages
@@ -660,7 +665,7 @@ pub struct ChatStats {
     pub item_links_count: i64,
 }
 
-pub fn get_chat_stats(conn: &DbConnection) -> Result<ChatStats> {
+pub fn get_chat_stats<C: DbRead + ?Sized>(conn: &C) -> Result<ChatStats> {
     let total_messages: i64 = conn
         .query_row("SELECT COUNT(*) FROM chat_messages", [], |row| row.get(0))
         .unwrap_or(0);
@@ -722,7 +727,7 @@ pub fn get_chat_stats(conn: &DbConnection) -> Result<ChatStats> {
 }
 
 /// Get list of unique conversation partners from Tell messages
-pub fn get_tell_conversations(conn: &DbConnection) -> Result<Vec<(String, i64)>> {
+pub fn get_tell_conversations<C: DbRead + ?Sized>(conn: &C) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT sender, COUNT(*) as count
          FROM chat_messages
@@ -748,8 +753,8 @@ pub fn get_tell_conversations(conn: &DbConnection) -> Result<Vec<(String, i64)>>
 /// - ContainsItemLink: matches item link names only
 /// - FromSender: exact sender match (case-insensitive)
 /// - Channel filter: restricts to specified channels
-pub fn get_watch_rule_messages(
-    conn: &DbConnection,
+pub fn get_watch_rule_messages<C: DbRead + ?Sized>(
+    conn: &C,
     rule: &WatchRule,
     limit: i64,
     offset: i64,
@@ -893,16 +898,16 @@ mod tests {
     use r2d2::Pool;
     use r2d2_sqlite::SqliteConnectionManager;
 
-    fn setup() -> DbConnection {
+    fn setup() -> WriteConn {
         let manager = SqliteConnectionManager::memory();
         let pool = Pool::builder().build(manager).unwrap();
         let conn = pool.get().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        run_migrations(&conn, None).unwrap();
+        run_migrations(&*conn, None).unwrap();
         conn
     }
 
-    fn msg_with(conn: &DbConnection, timestamp: &str, channel: &str, sender: &str, message: &str) {
+    fn msg_with(conn: &rusqlite::Connection, timestamp: &str, channel: &str, sender: &str, message: &str) {
         conn.execute(
             "INSERT INTO chat_messages (timestamp, channel, sender, message, is_system, log_file, from_player)
              VALUES (?1, ?2, ?3, ?4, 0, 'Chat-test.log', 0)",
@@ -999,21 +1004,21 @@ mod tests {
     #[test]
     fn test_fts_search_finds_words_case_insensitively() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "Hello Gorgon fans");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "nothing to see here");
-        msg_with(&conn, "2026-07-02 10:00:00", "Trade", "Cara", "GORGON rises again");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "Hello Gorgon fans");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "nothing to see here");
+        msg_with(&*conn, "2026-07-02 10:00:00", "Trade", "Cara", "GORGON rises again");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("gorgon"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("gorgon"))).unwrap();
         assert_eq!(messages.len(), 2);
     }
 
     #[test]
     fn test_fts_search_multiple_words_are_anded() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "hello world");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello there");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "hello world");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "hello there");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("hello world"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("hello world"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].message, "hello world");
     }
@@ -1021,10 +1026,10 @@ mod tests {
     #[test]
     fn test_fts_search_phrase_requires_adjacency() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "world hello");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello world");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "world hello");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "hello world");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("\"hello world\""))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("\"hello world\""))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Bob");
     }
@@ -1032,10 +1037,10 @@ mod tests {
     #[test]
     fn test_fts_prefix_query() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgonite says hi");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "no match here");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "gorgonite says hi");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "no match here");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("gorg*"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("gorg*"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
     }
@@ -1043,11 +1048,11 @@ mod tests {
     #[test]
     fn test_like_fallback_on_fts_syntax() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "message:hello friends");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "hello again");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "message:hello friends");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "hello again");
 
         // `message:hello` would be a column filter in FTS; falls back to LIKE substring
-        let messages = get_chat_messages(&conn, &filter_with(Some("message:hello"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("message:hello"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
     }
@@ -1055,14 +1060,14 @@ mod tests {
     #[test]
     fn test_fts_combined_with_channel_filter() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon for sale");
-        msg_with(&conn, "2026-07-01 10:01:00", "Trade", "Bob", "gorgon for sale");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon for sale");
+        msg_with(&*conn, "2026-07-01 10:01:00", "Trade", "Bob", "gorgon for sale");
 
         let filter = ChatMessageFilter {
             channel: Some("Trade".to_string()),
             ..filter_with(Some("gorgon"))
         };
-        let messages = get_chat_messages(&conn, &filter).unwrap();
+        let messages = get_chat_messages(&*conn, &filter).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].channel.as_deref().unwrap(), "Trade");
     }
@@ -1070,14 +1075,14 @@ mod tests {
     #[test]
     fn test_fts_combined_with_time_range() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon early");
-        msg_with(&conn, "2026-07-05 10:00:00", "General", "Bob", "gorgon late");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon early");
+        msg_with(&*conn, "2026-07-05 10:00:00", "General", "Bob", "gorgon late");
 
         let filter = ChatMessageFilter {
             start_time: Some("2026-07-03".to_string()),
             ..filter_with(Some("gorgon"))
         };
-        let messages = get_chat_messages(&conn, &filter).unwrap();
+        let messages = get_chat_messages(&*conn, &filter).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Bob");
     }
@@ -1086,9 +1091,9 @@ mod tests {
     fn test_fts_searches_sender_column_via_query() {
         // FTS indexes message+sender; a plain word may match the sender only
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Zaxxas", "selling ores");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Zaxxas", "selling ores");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("zaxxas"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("zaxxas"))).unwrap();
         assert_eq!(messages.len(), 1);
     }
 
@@ -1096,25 +1101,25 @@ mod tests {
     fn test_fts_syntax_like_fallback_matches_nothing_safely() {
         // Hyphen-prefixed token is FTS column-op shape → LIKE fallback; no SQL error
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "plain message");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "plain message");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "plain message");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "plain message");
 
         let filter = ChatMessageFilter {
             search_text: Some("-message".to_string()),
             ..Default::default()
         };
-        let messages = get_chat_messages(&conn, &filter).unwrap();
+        let messages = get_chat_messages(&*conn, &filter).unwrap();
         assert_eq!(messages.len(), 0);
     }
 
     #[test]
     fn test_fts_parens_like_fallback_matches_raw_text() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "counting (one) two");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "counting three four");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "counting (one) two");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "counting three four");
 
         // Parens are FTS syntax → LIKE fallback over the raw text
-        let messages = get_chat_messages(&conn, &filter_with(Some("(one)"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("(one)"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
     }
@@ -1126,15 +1131,15 @@ mod tests {
         // query is rejected → LIKE fallback. The fallback strips quotes so
         // the raw substring `!!!` is what matches the row's `spam!!!`.
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "great spam!!! truly");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "nothing here");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "great spam!!! truly");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "nothing here");
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("\"!!!\""))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("\"!!!\""))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
 
         // Bare punctuation word takes the same path.
-        let messages = get_chat_messages(&conn, &filter_with(Some("!!!"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("!!!"))).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
     }
@@ -1142,15 +1147,15 @@ mod tests {
     #[test]
     fn test_fts_search_sort_order_respected() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon one");
-        msg_with(&conn, "2026-07-01 10:01:00", "General", "Bob", "gorgon two");
-        msg_with(&conn, "2026-07-01 10:02:00", "General", "Cara", "gorgon three");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon one");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "gorgon two");
+        msg_with(&*conn, "2026-07-01 10:02:00", "General", "Cara", "gorgon three");
 
         let filter = ChatMessageFilter {
             sort_order: "asc".to_string(),
             ..filter_with(Some("gorgon"))
         };
-        let messages = get_chat_messages(&conn, &filter).unwrap();
+        let messages = get_chat_messages(&*conn, &filter).unwrap();
         assert_eq!(messages[0].message, "gorgon one");
         assert_eq!(messages[2].message, "gorgon three");
     }
@@ -1159,14 +1164,14 @@ mod tests {
     fn test_fts_search_respects_limit_offset() {
         let conn = setup();
         for i in 0..5 {
-            msg_with(&conn, &format!("2026-07-01 10:0{}:00", i), "General", "A", "gorgon spam");
+            msg_with(&*conn, &format!("2026-07-01 10:0{}:00", i), "General", "A", "gorgon spam");
         }
         let filter = ChatMessageFilter {
             limit: 2,
             offset: 1,
             ..filter_with(Some("gorgon"))
         };
-        let messages = get_chat_messages(&conn, &filter).unwrap();
+        let messages = get_chat_messages(&*conn, &filter).unwrap();
         assert_eq!(messages.len(), 2);
         // desc order: newest first; offset skips the newest
         assert_eq!(messages[0].timestamp, "2026-07-01 10:03:00");
@@ -1175,11 +1180,11 @@ mod tests {
     #[test]
     fn test_get_chat_days() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "one");
-        msg_with(&conn, "2026-07-01 15:30:00", "General", "B", "two");
-        msg_with(&conn, "2026-07-03 09:00:00", "General", "C", "three");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "A", "one");
+        msg_with(&*conn, "2026-07-01 15:30:00", "General", "B", "two");
+        msg_with(&*conn, "2026-07-03 09:00:00", "General", "C", "three");
 
-        let days = get_chat_days(&conn).unwrap();
+        let days = get_chat_days(&*conn).unwrap();
         assert_eq!(days.len(), 2);
         assert_eq!(days[0].day, "2026-07-03");
         assert_eq!(days[0].count, 1);
@@ -1191,28 +1196,28 @@ mod tests {
     fn test_get_messages_around_time_day_anchor() {
         let conn = setup();
         // Day before, day of, day after
-        msg_with(&conn, "2026-06-30 22:00:00", "General", "A", "before day");
-        msg_with(&conn, "2026-07-01 09:00:00", "General", "B", "morning");
-        msg_with(&conn, "2026-07-01 18:00:00", "General", "C", "evening");
-        msg_with(&conn, "2026-07-02 09:00:00", "General", "D", "next day");
+        msg_with(&*conn, "2026-06-30 22:00:00", "General", "A", "before day");
+        msg_with(&*conn, "2026-07-01 09:00:00", "General", "B", "morning");
+        msg_with(&*conn, "2026-07-01 18:00:00", "General", "C", "evening");
+        msg_with(&*conn, "2026-07-02 09:00:00", "General", "D", "next day");
 
         // Day-window semantics: the day's rows in the requested sort order,
         // never leaking adjacent days (A, D excluded). Desc with context 2:
         // newest two rows of the day.
         let messages =
-            get_messages_around_time(&conn, "2026-07-01", &filter_sort("desc"), 2).unwrap();
+            get_messages_around_time(&*conn, "2026-07-01", &filter_sort("desc"), 2).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
         // Context covering the whole day
         let messages =
-            get_messages_around_time(&conn, "2026-07-01", &filter_sort("desc"), 5).unwrap();
+            get_messages_around_time(&*conn, "2026-07-01", &filter_sort("desc"), 5).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
         // Oldest-first ordering honors sort_order
         let messages =
-            get_messages_around_time(&conn, "2026-07-01", &filter_sort("asc"), 5).unwrap();
+            get_messages_around_time(&*conn, "2026-07-01", &filter_sort("asc"), 5).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "B");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "C");
@@ -1221,17 +1226,17 @@ mod tests {
     #[test]
     fn test_get_messages_around_time_channel_filter() {
         let conn = setup();
-        msg_with(&conn, "2026-06-30 22:00:00", "General", "A", "gen before");
-        msg_with(&conn, "2026-07-01 09:00:00", "Trade", "B", "trade one");
-        msg_with(&conn, "2026-07-01 12:00:00", "General", "C", "gen mid");
-        msg_with(&conn, "2026-07-01 15:00:00", "Trade", "D", "trade two");
-        msg_with(&conn, "2026-07-01 18:00:00", "Trade", "E", "trade three");
+        msg_with(&*conn, "2026-06-30 22:00:00", "General", "A", "gen before");
+        msg_with(&*conn, "2026-07-01 09:00:00", "Trade", "B", "trade one");
+        msg_with(&*conn, "2026-07-01 12:00:00", "General", "C", "gen mid");
+        msg_with(&*conn, "2026-07-01 15:00:00", "Trade", "D", "trade two");
+        msg_with(&*conn, "2026-07-01 18:00:00", "Trade", "E", "trade three");
 
         let filter = ChatMessageFilter {
             channel: Some("Trade".to_string()),
             ..Default::default()
         };
-        let messages = get_messages_around_time(&conn, "2026-07-01", &filter, 25).unwrap();
+        let messages = get_messages_around_time(&*conn, "2026-07-01", &filter, 25).unwrap();
         // Trade only, day-bounded, newest-first: E, D, B
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "E");
@@ -1242,15 +1247,15 @@ mod tests {
     #[test]
     fn test_get_messages_around_time_search_filter() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 09:00:00", "General", "A", "gorgon sighting");
-        msg_with(&conn, "2026-07-01 11:00:00", "General", "B", "unrelated chat");
-        msg_with(&conn, "2026-07-01 18:00:00", "General", "C", "another gorgon");
+        msg_with(&*conn, "2026-07-01 09:00:00", "General", "A", "gorgon sighting");
+        msg_with(&*conn, "2026-07-01 11:00:00", "General", "B", "unrelated chat");
+        msg_with(&*conn, "2026-07-01 18:00:00", "General", "C", "another gorgon");
 
         let filter = ChatMessageFilter {
             search_text: Some("gorgon".to_string()),
             ..Default::default()
         };
-        let messages = get_messages_around_time(&conn, "2026-07-01", &filter, 25).unwrap();
+        let messages = get_messages_around_time(&*conn, "2026-07-01", &filter, 25).unwrap();
         // Search filter applies to the day window: A and C only, newest-first
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "C");
@@ -1260,13 +1265,13 @@ mod tests {
     #[test]
     fn test_get_messages_around_time_empty_day_is_empty() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "only day");
-        msg_with(&conn, "2026-07-05 10:00:00", "General", "B", "later day");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "A", "only day");
+        msg_with(&*conn, "2026-07-05 10:00:00", "General", "B", "later day");
 
         // Anchor on a day with no messages: empty — a day jump never
         // fabricates rows from other days.
         let messages =
-            get_messages_around_time(&conn, "2026-06-15", &ChatMessageFilter::default(), 25)
+            get_messages_around_time(&*conn, "2026-06-15", &ChatMessageFilter::default(), 25)
                 .unwrap();
         assert_eq!(messages.len(), 0);
     }
@@ -1274,12 +1279,12 @@ mod tests {
     #[test]
     fn test_get_messages_around_time_before_first_row() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "first");
-        msg_with(&conn, "2026-07-01 11:00:00", "General", "B", "second");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "A", "first");
+        msg_with(&*conn, "2026-07-01 11:00:00", "General", "B", "second");
 
         // Oldest-first window from the day start
         let messages =
-            get_messages_around_time(&conn, "2026-07-01", &filter_sort("asc"), 25).unwrap();
+            get_messages_around_time(&*conn, "2026-07-01", &filter_sort("asc"), 25).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
@@ -1288,12 +1293,12 @@ mod tests {
     #[test]
     fn test_rebuild_chat_fts_and_search_after_bulk_insert() {
         let conn = setup();
-        msg_with(&conn, "2026-07-01 10:00:00", "General", "A", "rebuild me");
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "A", "rebuild me");
         // Simulate a missed trigger: manually gut the index, then rebuild
         conn.execute("DELETE FROM chat_messages_fts", []).unwrap();
         rebuild_chat_fts(&conn).unwrap();
 
-        let messages = get_chat_messages(&conn, &filter_with(Some("rebuild"))).unwrap();
+        let messages = get_chat_messages(&*conn, &filter_with(Some("rebuild"))).unwrap();
         assert_eq!(messages.len(), 1);
     }
 }

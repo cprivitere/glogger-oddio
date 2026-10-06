@@ -173,7 +173,10 @@ pub fn import_words_of_power_csv(
     let col_time = find_header_opt(&headers, &["Time", "time"]);
     let col_desc = find_header_opt(&headers, &["Description", "description"]);
 
-    let conn = db.get_write().map_err(|e| e.to_string())?;
+    let mut conn = db.get_write().map_err(|e| e.to_string())?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let mut imported = 0usize;
@@ -230,6 +233,8 @@ pub fn import_words_of_power_csv(
         imported += 1;
     }
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(imported)
 }
 

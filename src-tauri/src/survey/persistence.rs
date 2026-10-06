@@ -11,6 +11,7 @@ use crate::survey::types::{
     SessionStartTrigger, SurveySession, SurveyUse, SurveyUseKind, SurveyUseStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use crate::db::DbRead;
 
 // ============================================================
 // Sessions
@@ -57,8 +58,8 @@ pub const SESSION_COLS: &str =
      name, user_started_at, user_ended_at, \
      first_craft_at, last_craft_at, first_loot_at, last_loot_at";
 
-pub fn active_session(
-    conn: &Connection,
+pub fn active_session<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> Result<Option<SurveySession>> {
@@ -75,7 +76,7 @@ pub fn active_session(
 }
 
 /// Fetch a specific session by ID.
-pub fn get_session(conn: &Connection, session_id: i64) -> Result<Option<SurveySession>> {
+pub fn get_session<C: DbRead + ?Sized>(conn: &C, session_id: i64) -> Result<Option<SurveySession>> {
     conn.query_row(
         &format!("SELECT {SESSION_COLS} FROM survey_sessions WHERE id = ?1"),
         params![session_id],
@@ -393,7 +394,7 @@ pub fn claim_unlinked_chat_loot_near(
 }
 
 /// All uses belonging to a session, ordered by `used_at` ascending.
-pub fn uses_for_session(conn: &Connection, session_id: i64) -> Result<Vec<SurveyUse>> {
+pub fn uses_for_session<C: DbRead + ?Sized>(conn: &C, session_id: i64) -> Result<Vec<SurveyUse>> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, character_name, server_name, used_at,
                 map_internal_name, map_display_name, kind, area, status, loot_qty

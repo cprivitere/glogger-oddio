@@ -105,10 +105,16 @@ pub fn save_farming_session(
     db: State<'_, DbPool>,
     input: SaveFarmingSessionInput,
 ) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
-    save_farming_session_impl(&conn, &input)
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+    let id = save_farming_session_impl(&conn, &input)?;
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    Ok(id)
 }
 
 /// Core save/upsert logic, separated from Tauri managed state so it can be

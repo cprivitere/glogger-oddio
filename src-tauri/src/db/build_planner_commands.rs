@@ -290,9 +290,12 @@ pub fn set_build_preset_mods(
     preset_id: i64,
     mods: Vec<BuildPresetModInput>,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Delete existing mods
     conn.execute(
@@ -318,14 +321,17 @@ pub fn set_build_preset_mods(
         ])
         .map_err(|e| format!("Failed to insert mod: {e}"))?;
     }
+    drop(stmt);
 
     // Touch preset updated_at
     conn.execute(
         "UPDATE build_presets SET updated_at = datetime('now') WHERE id = ?1",
         [preset_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch preset: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -337,9 +343,12 @@ pub fn set_build_preset_slot_item(
     db: State<'_, DbPool>,
     input: SetSlotItemInput,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     conn.execute(
         "INSERT INTO build_preset_slot_items (preset_id, equip_slot, item_id, item_name, slot_level, slot_rarity, is_crafted, is_masterwork)
@@ -362,8 +371,10 @@ pub fn set_build_preset_slot_item(
         "UPDATE build_presets SET updated_at = datetime('now') WHERE id = ?1",
         [input.preset_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch preset: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -740,9 +751,12 @@ pub fn set_build_preset_abilities(
     bar: String,
     abilities: Vec<BuildPresetAbilityInput>,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Delete existing abilities for this bar
     conn.execute(
@@ -767,13 +781,16 @@ pub fn set_build_preset_abilities(
         ])
         .map_err(|e| format!("Failed to insert ability: {e}"))?;
     }
+    drop(stmt);
 
     conn.execute(
         "UPDATE build_presets SET updated_at = datetime('now') WHERE id = ?1",
         [preset_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch preset: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -866,9 +883,12 @@ pub fn clone_build_preset(
     preset_id: i64,
     new_name: String,
 ) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Get the source preset
     let source = conn
@@ -937,6 +957,8 @@ pub fn clone_build_preset(
     )
     .map_err(|e| format!("Failed to clone CP recipes: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(new_id)
 }
 
@@ -947,9 +969,12 @@ pub fn set_build_preset_cp_recipes(
     equip_slot: String,
     recipes: Vec<BuildPresetCpRecipeInput>,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Delete existing CP recipes for this slot
     conn.execute(
@@ -977,14 +1002,17 @@ pub fn set_build_preset_cp_recipes(
         ])
         .map_err(|e| format!("Failed to insert CP recipe: {e}"))?;
     }
+    drop(stmt);
 
     // Touch preset updated_at
     conn.execute(
         "UPDATE build_presets SET updated_at = datetime('now') WHERE id = ?1",
         [preset_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch preset: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -1185,9 +1213,12 @@ pub fn import_build_preset(
         ));
     }
 
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     conn.execute(
         "INSERT INTO build_presets (character_id, name, skill_primary, skill_secondary, target_level, target_rarity, notes)
@@ -1246,6 +1277,8 @@ pub fn import_build_preset(
         }
     }
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(new_id)
 }
 

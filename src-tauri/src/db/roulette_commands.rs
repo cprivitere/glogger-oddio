@@ -18,7 +18,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use tauri::State;
 
-use super::DbPool;
+use super::{DbPool, DbRead};
 use crate::chat_parser::parse_chat_line;
 use crate::chat_status_parser::{parse_status_message, ChatStatusEvent};
 use crate::settings::SettingsManager;
@@ -60,7 +60,7 @@ pub fn record_roulette_result(
 }
 
 /// Aggregate all persisted spins into outcome stats.
-pub fn aggregate_stats(conn: &rusqlite::Connection) -> Result<RouletteStats, String> {
+pub fn aggregate_stats<C: DbRead + ?Sized>(conn: &C) -> Result<RouletteStats, String> {
     let mut stmt = conn
         .prepare(
             "SELECT number, COUNT(*) FROM roulette_results

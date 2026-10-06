@@ -1,4 +1,4 @@
-use super::DbPool;
+use super::{DbPool, DbRead};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 /// Crafting helper project persistence commands
@@ -262,9 +262,12 @@ pub fn add_project_entry(
     db: State<'_, DbPool>,
     input: AddProjectEntryInput,
 ) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Get next sort_order
     let next_order: i32 = conn.query_row(
@@ -287,9 +290,12 @@ pub fn add_project_entry(
         "UPDATE crafting_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
         [input.project_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch project: {e}"))?;
 
-    Ok(conn.last_insert_rowid())
+    let new_id = conn.last_insert_rowid();
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    Ok(new_id)
 }
 
 #[tauri::command]
@@ -297,9 +303,12 @@ pub fn update_project_entry(
     db: State<'_, DbPool>,
     input: UpdateProjectEntryInput,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     let ids_json = serde_json::to_string(&input.expanded_ingredient_ids)
         .map_err(|e| format!("Failed to serialize expanded_ingredient_ids: {e}"))?;
@@ -316,8 +325,10 @@ pub fn update_project_entry(
          WHERE id = (SELECT project_id FROM crafting_project_entries WHERE id = ?1)",
         [input.id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch project: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -328,9 +339,12 @@ pub fn batch_update_entry_expansions(
     db: State<'_, DbPool>,
     entries: Vec<BatchUpdateExpansionsEntry>,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     for entry in &entries {
         let ids_json = serde_json::to_string(&entry.expanded_ingredient_ids)
@@ -349,17 +363,22 @@ pub fn batch_update_entry_expansions(
              WHERE id = (SELECT project_id FROM crafting_project_entries WHERE id = ?1)",
             [first.id],
         )
-        .ok();
+        .map_err(|e| format!("Failed to touch project: {e}"))?;
     }
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn remove_project_entry(db: State<'_, DbPool>, entry_id: i64) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Touch the project's updated_at before deleting
     conn.execute(
@@ -367,7 +386,7 @@ pub fn remove_project_entry(db: State<'_, DbPool>, entry_id: i64) -> Result<(), 
          WHERE id = (SELECT project_id FROM crafting_project_entries WHERE id = ?1)",
         [entry_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch project: {e}"))?;
 
     conn.execute(
         "DELETE FROM crafting_project_entries WHERE id = ?1",
@@ -375,6 +394,8 @@ pub fn remove_project_entry(db: State<'_, DbPool>, entry_id: i64) -> Result<(), 
     )
     .map_err(|e| format!("Failed to remove entry: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
@@ -383,9 +404,12 @@ pub fn reorder_project_entries(
     db: State<'_, DbPool>,
     input: ReorderEntriesInput,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     for (index, entry_id) in input.entry_ids.iter().enumerate() {
         conn.execute(
@@ -400,16 +424,21 @@ pub fn reorder_project_entries(
         "UPDATE crafting_projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
         [input.project_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch project: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn duplicate_crafting_project(db: State<'_, DbPool>, project_id: i64) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Get original project
     let (name, notes, group_name, fee_config, customer_provides): (String, String, Option<String>, String, String) = conn
@@ -439,6 +468,8 @@ pub fn duplicate_crafting_project(db: State<'_, DbPool>, project_id: i64) -> Res
         rusqlite::params![new_id, project_id],
     ).map_err(|e| format!("Failed to copy entries: {e}"))?;
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(new_id)
 }
 
@@ -478,8 +509,8 @@ pub fn export_crafting_project(db: State<'_, DbPool>, project_id: i64) -> Result
     export_crafting_project_impl(&conn, project_id)
 }
 
-fn export_crafting_project_impl(
-    conn: &rusqlite::Connection,
+fn export_crafting_project_impl<C: DbRead + ?Sized>(
+    conn: &C,
     project_id: i64,
 ) -> Result<String, String> {
     let (name, notes, group_name, fee_config, customer_provides): (String, String, Option<String>, String, String) = conn
@@ -527,10 +558,16 @@ fn export_crafting_project_impl(
 
 #[tauri::command]
 pub fn import_crafting_project(db: State<'_, DbPool>, encoded: String) -> Result<i64, String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
-    import_crafting_project_impl(&conn, &encoded)
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+    let new_id = import_crafting_project_impl(&conn, &encoded)?;
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+    Ok(new_id)
 }
 
 fn import_crafting_project_impl(

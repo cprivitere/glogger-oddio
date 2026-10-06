@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use tauri::State;
 
-use super::DbPool;
+use super::{DbPool, DbRead};
 use crate::chat_parser::parse_chat_line;
 use crate::chat_status_parser::{parse_status_message, ChatStatusEvent};
 use crate::settings::SettingsManager;
@@ -84,8 +84,8 @@ pub fn get_combat_wisdom_monsters(
 }
 
 /// Core of [`get_combat_wisdom_monsters`], factored out for testing.
-pub fn aggregate_monsters(
-    conn: &rusqlite::Connection,
+pub fn aggregate_monsters<C: DbRead + ?Sized>(
+    conn: &C,
 ) -> Result<Vec<CombatWisdomMonster>, String> {
     // Pull all monster rows ordered by monster then time; fold per-monster.
     let mut stmt = conn

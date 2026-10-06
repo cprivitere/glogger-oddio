@@ -22,6 +22,7 @@ mod report_stats;
 mod settings;
 mod setup_commands;
 mod shop_log_parser;
+mod single_instance;
 mod stall_aggregations;
 mod stall_ocr;
 mod stall_year_resolver;
@@ -260,6 +261,11 @@ fn log_startup(message: String) {
 /// On first run or when the version changes, this copies `glogger.db` and
 /// `settings.json` from the release data directory so testers start with real
 /// data. The release install is never modified.
+///
+/// Operates on `<app_data_dir>/glogger.db` unconditionally — even when the
+/// user set a custom `settings.db_path` — because it runs before
+/// `SettingsManager` init and is what copies `settings.json` in the first
+/// place. Must stay ordered before settings init in `run()`.
 fn seed_experimental_data(app_data_dir: &std::path::Path, current_version: &Option<String>) {
     use std::fs;
 
@@ -322,6 +328,14 @@ fn seed_experimental_data(app_data_dir: &std::path::Path, current_version: &Opti
             startup_log!("Experimental seed: failed to remove old db: {}", e);
             return;
         }
+    }
+    // Also drop the SQLite journal sidecars. A stale `-wal` beside a freshly
+    // copied main file can make the next open recover a journal that does not
+    // belong to the file. They may legitimately not exist.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = fs::remove_file(std::path::PathBuf::from(sidecar));
     }
 
     // Copy database from release
@@ -398,6 +412,19 @@ pub fn run() {
 
             let current_version = app.config().version.clone();
             startup_log!("glogger v{} starting up", current_version.as_deref().unwrap_or("unknown"));
+
+            // Step 0: refuse to start a second instance against the same app
+            // data (two processes on one DB file produce real `database is
+            // locked`). Must run before any DB/settings work.
+            if !single_instance::acquire(app.handle()) {
+                use tauri_plugin_dialog::DialogExt;
+                app.dialog()
+                    .message("glogger is already running. Close the other window first.")
+                    .title("glogger is already running")
+                    .blocking_show();
+                app.handle().exit(0);
+                return Ok(());
+            }
 
             // Step 1: Get app data directory
             let app_data_dir = app
@@ -635,7 +662,7 @@ pub fn run() {
                         // Persist CDN data to database only if version changed
                         if let Some(pool) = app_handle.try_state::<db::DbPool>() {
                             if let Ok(mut conn) = pool.get_write() {
-                                let db_version = db::queries::cdn_data::get_cdn_version(&conn).ok().flatten();
+                                let db_version = db::queries::cdn_data::get_cdn_version(&*conn).ok().flatten();
                                 if db_version == Some(data.version) {
                                     startup_log!("CDN v{} already persisted to database, skipping", data.version);
                                 } else {

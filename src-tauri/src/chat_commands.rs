@@ -572,9 +572,9 @@ pub async fn delete_all_chat_messages(db_pool: State<'_, DbPool>) -> Result<usiz
     )
     .map_err(|e| format!("Failed to reset file positions: {e}"))?;
 
-    // Reclaim disk space
-    conn.execute_batch("VACUUM;")
-        .map_err(|e| format!("Failed to vacuum database: {e}"))?;
+    // Reclaim disk space (retried on SQLITE_BUSY)
+    crate::db::vacuum_with_retry(&conn, 3)
+        .map_err(|e| format!("Failed to vacuum database (busy after 3 attempts): {e}"))?;
 
     Ok(deleted)
 }

@@ -13,6 +13,7 @@
 //! loot attribution, so we persist it. See
 //! `docs/architecture/survey-mechanics.md` for the full mechanics.
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use crate::db::DbRead;
 use serde::{Deserialize, Serialize};
 
 /// One row from `open_multihit_nodes`.
@@ -88,8 +89,8 @@ pub fn close_node(
 }
 
 /// Fetch the open-multihit row for one node, if tracked.
-pub fn get_node(
-    conn: &Connection,
+pub fn get_node<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
     node_entity_id: i64,
@@ -106,8 +107,8 @@ pub fn get_node(
 
 /// All open nodes for a character/server pair, oldest `last_hit_at` first.
 /// Used by the per-character timeout sweep.
-pub fn list_nodes(
-    conn: &Connection,
+pub fn list_nodes<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> Result<Vec<OpenMultihitNode>> {

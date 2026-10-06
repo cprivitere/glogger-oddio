@@ -6,6 +6,7 @@
 //! the persisted state.
 
 use crate::coordinator::DataIngestCoordinator;
+use crate::db::DbRead;
 use crate::settings::{resolve_item_value, SettingsManager};
 use crate::survey::persistence;
 use crate::survey::types::{SurveySession, SurveyUse};
@@ -242,8 +243,8 @@ pub fn survey_tracker_session_detail(
 // SQL helpers
 // ============================================================
 
-fn list_multihit_summaries(
-    conn: &rusqlite::Connection,
+fn list_multihit_summaries<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> SqlResult<Vec<MultihitSummary>> {
@@ -269,8 +270,8 @@ fn list_multihit_summaries(
     rows.collect()
 }
 
-fn list_recent_sessions(
-    conn: &rusqlite::Connection,
+fn list_recent_sessions<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
     limit: u32,
@@ -300,8 +301,8 @@ fn list_recent_sessions(
 /// The `json_extract` index path uses SQLite's JSON1 functions. The query
 /// is bounded by session size so even noisy 100x sessions complete in
 /// milliseconds.
-fn loot_summary_for_session(
-    conn: &rusqlite::Connection,
+fn loot_summary_for_session<C: DbRead + ?Sized>(
+    conn: &C,
     session_id: i64,
     server: &str,
     valuation_mode: &str,
@@ -381,8 +382,8 @@ fn loot_summary_for_session(
 /// each fully-consumed ingredient (those with `chance_to_consume` NULL or
 /// 1.0). Falls back to `survey_types.crafting_cost` (the CDN-precomputed
 /// vendor-buy number) if no recipe is found.
-fn session_cost_from_recipes(
-    conn: &rusqlite::Connection,
+fn session_cost_from_recipes<C: DbRead + ?Sized>(
+    conn: &C,
     session_id: i64,
     server: &str,
     valuation_mode: &str,
@@ -457,8 +458,8 @@ fn session_cost_from_recipes(
 /// Craft material breakdown for a session. Groups recipe ingredients
 /// across all uses by item, summing quantities and applying the user's
 /// valuation mode for per-unit pricing.
-fn craft_materials_for_session(
-    conn: &rusqlite::Connection,
+fn craft_materials_for_session<C: DbRead + ?Sized>(
+    conn: &C,
     session_id: i64,
     server: &str,
     valuation_mode: &str,
@@ -511,8 +512,8 @@ fn craft_materials_for_session(
 /// + a fresh survey-types cost query. Splitting it out keeps the
 /// historical-row query (which wants economics for many sessions in one
 /// trip) from having to re-run the full loot summary per session.
-fn economics_from_loot_and_uses(
-    conn: &rusqlite::Connection,
+fn economics_from_loot_and_uses<C: DbRead + ?Sized>(
+    conn: &C,
     session_id: i64,
     server: &str,
     valuation_mode: &str,
@@ -591,8 +592,8 @@ pub fn survey_tracker_historical_sessions(
         .map_err(|e| e.to_string())
 }
 
-fn historical_session_rows(
-    conn: &rusqlite::Connection,
+fn historical_session_rows<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
     valuation_mode: &str,
@@ -954,8 +955,8 @@ pub fn survey_tracker_analytics(
     })
 }
 
-fn zone_summaries(
-    conn: &rusqlite::Connection,
+fn zone_summaries<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> SqlResult<Vec<ZoneSummary>> {
@@ -1022,8 +1023,8 @@ fn zone_summaries(
     Ok(out)
 }
 
-fn survey_type_summaries(
-    conn: &rusqlite::Connection,
+fn survey_type_summaries<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> SqlResult<Vec<SurveyTypeSummary>> {
@@ -1104,8 +1105,8 @@ fn survey_type_summaries(
 /// Per-item breakdown scoped to a single zone (`area` value). `"(unknown)"`
 /// is the sentinel for `area IS NULL` and matches whatever `zone_summaries`
 /// emits.
-fn items_for_zone(
-    conn: &rusqlite::Connection,
+fn items_for_zone<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
     area_label: &str,
@@ -1143,8 +1144,8 @@ fn items_for_zone(
 /// Per-item breakdown scoped to a single survey type (map_internal_name +
 /// area). `area` of `None` here means the surveys of this map were recorded
 /// without an area tag, matching the NULL case in the DB.
-fn items_for_survey_type(
-    conn: &rusqlite::Connection,
+fn items_for_survey_type<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
     map_internal_name: &str,
@@ -1186,8 +1187,8 @@ fn items_for_survey_type(
     rows.collect()
 }
 
-fn item_summaries(
-    conn: &rusqlite::Connection,
+fn item_summaries<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> SqlResult<Vec<ItemSummary>> {
@@ -1277,8 +1278,8 @@ pub fn survey_tracker_item_cost_analysis(
     item_cost_analysis_rows(&conn, &character, &server).map_err(|e| e.to_string())
 }
 
-fn item_cost_analysis_rows(
-    conn: &rusqlite::Connection,
+fn item_cost_analysis_rows<C: DbRead + ?Sized>(
+    conn: &C,
     character: &str,
     server: &str,
 ) -> SqlResult<Vec<ItemSourceAnalysis>> {

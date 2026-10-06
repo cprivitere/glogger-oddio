@@ -189,17 +189,19 @@ pub fn import_market_values(
         serde_json::from_str(&json_data).map_err(|e| format!("Invalid JSON: {e}"))?;
 
     let server = resolve_server(&settings_manager, &server_name);
-    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut updated = 0usize;
 
-    conn.execute("BEGIN", []).ok();
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     for entry in &entries {
         // Check for existing value
-        let existing: Option<String> = conn
+        let existing: Option<String> = tx
             .query_row(
                 "SELECT updated_at FROM market_values WHERE server_name = ?1 AND item_type_id = ?2",
                 rusqlite::params![server, entry.item_type_id],
@@ -219,7 +221,7 @@ pub fn import_market_values(
         };
 
         if should_write {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO market_values (server_name, item_type_id, item_name, market_value, notes, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(server_name, item_type_id) DO UPDATE SET
@@ -228,7 +230,7 @@ pub fn import_market_values(
                     notes = excluded.notes,
                     updated_at = excluded.updated_at",
                 rusqlite::params![server, entry.item_type_id, entry.item_name, entry.market_value, entry.notes, entry.updated_at],
-            ).ok();
+            ).map_err(|e| format!("Import error: {e}"))?;
 
             if existing.is_some() {
                 updated += 1;
@@ -240,7 +242,7 @@ pub fn import_market_values(
         }
     }
 
-    conn.execute("COMMIT", []).ok();
+    tx.commit().map_err(|e| format!("Commit failed: {e}"))?;
 
     Ok(ImportMarketValuesResult {
         imported,
@@ -265,26 +267,25 @@ pub fn bulk_update_market_values(
     server_name: Option<String>,
 ) -> Result<usize, String> {
     let server = resolve_server(&settings_manager, &server_name);
-    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
 
-    conn.execute("BEGIN", []).ok();
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     let mut count = 0usize;
     for update in &updates {
-        let affected = conn
+        let affected = tx
             .execute(
                 "UPDATE market_values SET market_value = ?1, updated_at = datetime('now')
                  WHERE server_name = ?2 AND item_type_id = ?3",
                 rusqlite::params![update.market_value, server, update.item_type_id],
             )
-            .map_err(|e| {
-                conn.execute("ROLLBACK", []).ok();
-                format!("Update error: {e}")
-            })?;
+            .map_err(|e| format!("Update error: {e}"))?;
         count += affected;
     }
 
-    conn.execute("COMMIT", []).ok();
+    tx.commit().map_err(|e| format!("Commit failed: {e}"))?;
     Ok(count)
 }
 

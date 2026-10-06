@@ -604,7 +604,10 @@ pub fn set_tracked_skills(
     server_name: String,
     skills: Vec<TrackedSkillEntry>,
 ) -> Result<(), String> {
-    let conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
     conn.execute(
         "DELETE FROM tracked_skills WHERE character_name = ?1 AND server_name = ?2",
@@ -628,7 +631,10 @@ pub fn set_tracked_skills(
         ])
         .map_err(|e| format!("Insert error: {e}"))?;
     }
+    drop(stmt);
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
     Ok(())
 }
 

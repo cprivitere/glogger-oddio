@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use tauri::State;
 
-use super::DbPool;
+use super::{DbPool, DbRead};
 use crate::arena_parser::{ArenaBetTracker, ArenaTracker};
 use crate::chat_parser::parse_chat_line;
 use crate::settings::SettingsManager;
@@ -115,7 +115,7 @@ pub fn record_arena_bet(
 }
 
 /// Aggregate the player's personal betting record.
-fn aggregate_betting(conn: &rusqlite::Connection) -> Result<ArenaBettingSummary, String> {
+fn aggregate_betting<C: DbRead + ?Sized>(conn: &C) -> Result<ArenaBettingSummary, String> {
     // won-bet payouts and all-bet wagers, in one pass.
     let (total, won, total_wagered, total_won) = conn
         .query_row(
@@ -155,7 +155,7 @@ fn aggregate_betting(conn: &rusqlite::Connection) -> Result<ArenaBettingSummary,
 
 /// Aggregate all persisted matches into fighter records, a head-to-head matrix,
 /// and a recent-results list.
-pub fn aggregate_stats(conn: &rusqlite::Connection) -> Result<ArenaStats, String> {
+pub fn aggregate_stats<C: DbRead + ?Sized>(conn: &C) -> Result<ArenaStats, String> {
     // Pull every match once; the dataset is tiny (hundreds of rows at most).
     let mut stmt = conn
         .prepare(

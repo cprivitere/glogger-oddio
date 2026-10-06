@@ -380,6 +380,22 @@ impl DataIngestCoordinator {
             .ok()
             .map(|mtime| chrono::DateTime::<chrono::Utc>::from(mtime).date_naive());
 
+        // Parse the whole file BEFORE taking the write lock: the parse loop is
+        // pure CPU and must not hold the sole write connection (a whole-file
+        // scan under the lock starves every other writer).
+        let mut parsed: Vec<(String, String, String, String)> = Vec::new();
+        for line in text.lines() {
+            // Cheap pre-filter before the fuller parse.
+            if !line.contains("\"Poem by ") {
+                continue;
+            }
+            if let Some(poem) = parse_poem_line(line) {
+                // Combine the log's HH:MM:SS with the file-date anchor.
+                let recorded_at = to_utc_datetime_with_base(&poem.timestamp, base_date);
+                parsed.push((poem.author, poem.title, poem.content, recorded_at));
+            }
+        }
+
         let mut conn = self.db_pool.get_write().map_err(|e| e.to_string())?;
         // BEGIN IMMEDIATE: runs at startup alongside other backfills; a deferred
         // tx that upgrades read→write on its first INSERT gets an instant
@@ -396,24 +412,11 @@ impl DataIngestCoordinator {
                      VALUES (?1, ?2, ?3, ?4)",
                 )
                 .map_err(|e| e.to_string())?;
-            for line in text.lines() {
-                // Cheap pre-filter before the fuller parse.
-                if !line.contains("\"Poem by ") {
-                    continue;
-                }
-                if let Some(poem) = parse_poem_line(line) {
-                    // Combine the log's HH:MM:SS with the file-date anchor.
-                    let recorded_at = to_utc_datetime_with_base(&poem.timestamp, base_date);
-                    let changed = stmt
-                        .execute(rusqlite::params![
-                            poem.author,
-                            poem.title,
-                            poem.content,
-                            recorded_at
-                        ])
-                        .map_err(|e| e.to_string())?;
-                    inserted += changed;
-                }
+            for (author, title, content, recorded_at) in &parsed {
+                let changed = stmt
+                    .execute(rusqlite::params![author, title, content, recorded_at])
+                    .map_err(|e| e.to_string())?;
+                inserted += changed;
             }
         }
         tx.commit().map_err(|e| e.to_string())?;

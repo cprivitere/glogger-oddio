@@ -171,12 +171,13 @@ pub fn import_character_report_internal(
         ));
     }
 
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
     // 4. Begin transaction
-    conn.execute("BEGIN", [])
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     let result = (|| -> Result<ImportResult, String> {
@@ -347,18 +348,12 @@ pub fn import_character_report_internal(
         })
     })();
 
-    // 12. Commit or rollback
-    match &result {
-        Ok(_) => {
-            conn.execute("COMMIT", [])
-                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-        }
-        Err(_) => {
-            conn.execute("ROLLBACK", []).ok();
-        }
-    }
+    // 12. Commit (a dropped `Transaction` rolls back on any earlier `?`)
+    let value = result?;
+    conn.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
-    result
+    Ok(value)
 }
 
 #[tauri::command]
@@ -706,7 +701,7 @@ fn seed_game_state_from_snapshot(
         "INSERT INTO servers (server_name) VALUES (?1) ON CONFLICT DO NOTHING",
         rusqlite::params![server],
     )
-    .ok();
+    .map_err(|e| format!("Failed to upsert server: {e}"))?;
 
     // Seed skills — resolve internal names to canonical IDs + display names
     let mut skill_stmt = conn.prepare(
@@ -743,7 +738,7 @@ fn seed_game_state_from_snapshot(
                 skill_data.xp_needed_for_next_level,
                 ts,
             ])
-            .ok();
+            .map_err(|e| format!("Failed to upsert skill: {e}"))?;
     }
 
     // Seed recipes — snapshot uses string keys like "Recipe_12345", extract numeric ID
@@ -769,7 +764,7 @@ fn seed_game_state_from_snapshot(
                     completions,
                     ts,
                 ])
-                .ok();
+                .map_err(|e| format!("Failed to upsert recipe: {e}"))?;
         }
     }
 
@@ -801,7 +796,7 @@ fn seed_game_state_from_snapshot(
                 favor_data.favor_level,
                 ts,
             ])
-            .ok();
+            .map_err(|e| format!("Failed to upsert favor: {e}"))?;
     }
 
     // Seed currencies
@@ -824,7 +819,7 @@ fn seed_game_state_from_snapshot(
                 *amount as f64,
                 ts,
             ])
-            .ok();
+            .map_err(|e| format!("Failed to upsert currency: {e}"))?;
     }
 
     // Re-anchor the council-wallet estimate (migration v56) on this export's
@@ -849,7 +844,7 @@ fn seed_game_state_from_snapshot(
                 OR excluded.anchor_at > currency_estimate.anchor_at",
             rusqlite::params![character, server, *gold, anchor_at],
         )
-        .ok();
+        .map_err(|e| format!("Failed to re-anchor currency estimate: {e}"))?;
     }
 
     // Seed storage vault contents from the latest item snapshot
@@ -858,7 +853,7 @@ fn seed_game_state_from_snapshot(
         "DELETE FROM game_state_storage WHERE character_name = ?1 AND server_name = ?2",
         rusqlite::params![character, server],
     )
-    .ok();
+    .map_err(|e| format!("Failed to clear storage: {e}"))?;
 
     // Find the latest item snapshot for this character+server
     let latest_snapshot_id: Option<i64> = conn
@@ -913,7 +908,7 @@ fn seed_game_state_from_snapshot(
                     stack_size,
                     ts,
                 ])
-                .ok();
+                .map_err(|e| format!("Failed to insert storage item: {e}"))?;
         }
     }
 
