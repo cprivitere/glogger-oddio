@@ -2651,7 +2651,7 @@ impl DataIngestCoordinator {
         // (base_date_override handles replay/reparse).
         let observed_at = crate::parsers::to_utc_datetime_with_base(timestamp, None);
 
-        let Ok(conn) = self.db_pool.get() else {
+        let Ok(conn) = self.db_pool.get_write() else {
             return;
         };
         let result = conn.execute(
