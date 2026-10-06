@@ -254,25 +254,6 @@ pub fn toggle_food_eaten_status(
     }
 }
 
-/// Import a player's gourmand report (the in-game SkillReport .txt file).
-/// Parses the eaten food names and returns them without persisting to the database.
-/// Used by the Cook's Helper to determine what a player has already eaten.
-#[tauri::command]
-pub fn import_cooks_helper_file(file_path: String) -> Result<Vec<String>, String> {
-    let content =
-        std::fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
-
-    let entries = parse_gourmand_report(&content)?;
-    if entries.is_empty() {
-        return Err(
-            "No food entries found in the file. Make sure this is a gourmand skill report."
-                .to_string(),
-        );
-    }
-
-    Ok(entries.into_iter().map(|e| e.name).collect())
-}
-
 /// Write text content to a file (used for uneaten food export)
 #[tauri::command]
 pub fn export_text_file(file_path: String, content: String) -> Result<(), String> {

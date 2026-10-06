@@ -1,12 +1,13 @@
-import { defineStore } from 'pinia'
+import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useCraftingStore } from './craftingStore'
 import { useGameStateStore } from './gameStateStore'
 import { useSettingsStore } from './settingsStore'
 import type { RecipeInfo } from '../types/gameData/recipes'
-import type { FoodItem } from '../types/gourmand'
+import type { FoodItem, GourmandFoodEntry, GourmandImportResult } from '../types/gourmand'
 import type { MaterialNeed } from '../types/crafting'
 
 export interface HelpfulRecipe {
@@ -143,12 +144,33 @@ export const useCooksHelperStore = defineStore('cooksHelper', () => {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
+  /** Reload the eaten-food set from the shared gourmand table */
+  async function loadEatenFromDb() {
+    const entries = await invoke<GourmandFoodEntry[]>('get_gourmand_eaten_foods')
+    importedEatenNames.value = new Set(entries.map(e => e.name))
+  }
+
+  /** Auto-import the newest report in Books/ on mount, then hydrate from the DB */
+  async function tryAutoImport() {
+    if (blankMode.value) return
+    loading.value = true
+    try {
+      await invoke<GourmandImportResult | null>('import_latest_gourmand_report')
+      await loadEatenFromDb()
+      await loadFoodsAndRecipes()
+    } catch (e) {
+      console.warn("Cook's Helper auto-import:", e)
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function importFile() {
     error.value = null
 
     const settingsStore = useSettingsStore()
     const filePath = await open({
-      defaultPath: (settingsStore.settings.gameDataPath ? settingsStore.settings.gameDataPath + '/Reports' : undefined),
+      defaultPath: (settingsStore.settings.gameDataPath ? settingsStore.settings.gameDataPath + '/Books' : undefined),
       filters: [{ name: 'Gourmand Skill Report', extensions: ['txt'] }],
     })
 
@@ -156,10 +178,10 @@ export const useCooksHelperStore = defineStore('cooksHelper', () => {
 
     try {
       loading.value = true
-      const names = await invoke<string[]>('import_cooks_helper_file', {
+      await invoke<GourmandImportResult>('import_gourmand_report', {
         filePath: filePath as string,
       })
-      importedEatenNames.value = new Set(names)
+      await loadEatenFromDb()
 
       // Load food + recipe data
       await loadFoodsAndRecipes()
@@ -267,6 +289,11 @@ export const useCooksHelperStore = defineStore('cooksHelper', () => {
     error.value = null
   }
 
+  // Keep eaten state fresh when the backend imports a report or the log records a live food-eaten
+  listen<number>('gourmand-updated', () => {
+    if (!blankMode.value) void loadEatenFromDb()
+  })
+
   return {
     // State
     importedEatenNames,
@@ -289,6 +316,7 @@ export const useCooksHelperStore = defineStore('cooksHelper', () => {
     stats,
     // Actions
     importFile,
+    tryAutoImport,
     startFresh,
     ownedCount,
     checkAllMaterials,
@@ -300,3 +328,7 @@ export const useCooksHelperStore = defineStore('cooksHelper', () => {
     clear,
   }
 })
+
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useCooksHelperStore, import.meta.hot))
+}

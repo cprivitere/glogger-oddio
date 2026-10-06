@@ -198,7 +198,7 @@ export const useGourmandStore = defineStore('gourmand', () => {
 
     const settingsStore = useSettingsStore()
     const filePath = await open({
-      defaultPath: (settingsStore.settings.gameDataPath ? settingsStore.settings.gameDataPath + '/Reports' : undefined),
+      defaultPath: (settingsStore.settings.gameDataPath ? settingsStore.settings.gameDataPath + '/Books' : undefined),
       filters: [{ name: 'Gourmand Report', extensions: ['txt'] }],
     })
 

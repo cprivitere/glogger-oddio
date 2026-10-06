@@ -183,6 +183,7 @@ const targetProjectId = ref<number | null>(null)
 
 // Load project list for the dropdown
 onMounted(() => {
+  void store.tryAutoImport()
   craftingStore.loadProjects()
 })
 

@@ -209,7 +209,7 @@ use db::game_state_commands::{
     get_harvest_almanac,
 };
 use db::gourmand_commands::{
-    export_text_file, get_all_foods, get_gourmand_eaten_foods, import_cooks_helper_file,
+    export_text_file, get_all_foods, get_gourmand_eaten_foods,
     import_gourmand_report, import_latest_gourmand_report, toggle_food_eaten_status,
 };
 use db::inventory_commands::{
@@ -887,7 +887,6 @@ pub fn run() {
             // Gourmand tracker
             get_all_foods,
             import_gourmand_report,
-            import_cooks_helper_file,
             get_gourmand_eaten_foods,
             toggle_food_eaten_status,
             export_text_file,
