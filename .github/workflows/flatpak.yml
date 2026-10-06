@@ -6,6 +6,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-personal'
   # Trigger manually from the Actions tab against an existing release tag.
   workflow_dispatch:
     inputs:

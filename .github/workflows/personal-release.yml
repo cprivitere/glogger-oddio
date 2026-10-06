@@ -1,0 +1,99 @@
+name: Personal Release
+
+# Builds the glogger.Personal installer on a v<version>-personal tag push and
+# publishes it as a GitHub Release on this fork. Personal profile has
+# createUpdaterArtifacts:false, so no signing secrets are required.
+
+on:
+  push:
+    tags:
+      - 'v*-personal'
+
+permissions:
+  contents: write
+
+env:
+  PERSONAL_REPO: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build personal installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npx tauri
+          args: --config src-tauri/tauri.personal.conf.json
+
+      - name: Collect installer
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          VERSION="$(echo "${GITHUB_REF_NAME}" | sed 's/^v//; s/-personal$//')"
+          BUNDLE_DIR=$(find src-tauri/target -path "*/release/bundle" -type d 2>/dev/null | head -1)
+          if [ -z "$BUNDLE_DIR" ]; then
+            echo "ERROR: no bundle dir"; find src-tauri/target -name bundle -type d; exit 1
+          fi
+          cp "$BUNDLE_DIR"/nsis/*.exe "release-artifacts/glogger-${VERSION}-personal-windows-setup.exe"
+          ls -la release-artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: personal-nsis
+          path: release-artifacts/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: personal-nsis
+          path: all-artifacts
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(echo "$TAG" | sed 's/^v//; s/-personal$//')"
+          NAME="glogger-${VERSION}-personal-windows-setup.exe"
+          BASE_URL="https://github.com/$PERSONAL_REPO/releases/download/$TAG"
+          {
+            echo "## Downloads"
+            echo
+            echo "| Platform | Installer |"
+            echo "|----------|-----------|"
+            echo "| **Windows** | [$NAME]($BASE_URL/$NAME) |"
+            echo
+            echo "---"
+            echo
+            echo "**Personal build** — the \`glogger.Personal\` profile. Data lives in \`%APPDATA%\\\\glogger.Personal\` and is preserved across reinstalls."
+          } > RELEASE_NOTES.md
+          gh release create "$TAG" --repo "$PERSONAL_REPO" --title "Personal $TAG" --notes-file RELEASE_NOTES.md --latest
+          gh release upload "$TAG" all-artifacts/*.exe --repo "$PERSONAL_REPO"

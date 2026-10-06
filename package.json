@@ -18,6 +18,7 @@
     "tauri:build:personal": "tauri build --config src-tauri/tauri.personal.conf.json",
     "tauri:dev:experimental": "tauri dev --config src-tauri/tauri.experimental.conf.json",
     "version:bump": "bash scripts/bump-version.sh",
+    "release:personal": "bash scripts/release-personal.sh",
     "changelog": "bash scripts/generate-changelog.sh",
     "survey-test": "cd src-tauri && cargo test --lib survey::replay_tests::accuracy_report -- --ignored --nocapture"
   },
