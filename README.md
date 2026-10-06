@@ -1,6 +1,6 @@
 # Glogger
 
-**[Download Latest Release](https://github.com/crisp-oddio/glogger-oddio/releases)**
+**[Download Latest Release](https://github.com/cprivitere/glogger-twinkleoftoes/releases)**
 
 A desktop companion app for **[Project: Gorgon](https://projectgorgon.com)**. glogger reads your game's log files in real time and gives you dashboards, analytics, and tools for tracking your gameplay.
 
@@ -21,6 +21,8 @@ https://www.youtube.com/watch?v=wXSaIyMzuuA
 - There is no server for this app to talk to; everything runs locally to try and keep it as speedy and responsive as possible. Has to download some Citan-provided data on boot and with new patches, and pokes github to check for app updates.
 
 I apologize for bad UI/UX/programming - I'm a game designer by trade, not a software engineer. I'm more at home with excel and scripts than app development, so I'm learning as I go.
+
+Maintained by [cprivitere (TwinkleofToes)](https://github.com/cprivitere). Built on [crisp-oddio/glogger-oddio](https://github.com/crisp-oddio/glogger-oddio), originally [danielout/glogger](https://github.com/danielout/glogger).
 
 ## Why beta?
 
@@ -102,7 +104,7 @@ Multi-zone route planner with teleport-aware pathfinding. Respects bind location
 
 Grab the latest release for your platform:
 
-**[Download Latest Release](https://github.com/crisp-oddio/glogger-oddio/releases)**
+**[Download Latest Release](https://github.com/cprivitere/glogger-twinkleoftoes/releases)**
 
 | Platform | Installer |
 |----------|-----------|

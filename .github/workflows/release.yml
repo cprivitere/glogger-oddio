@@ -1,39 +1,28 @@
 name: Release
 
-# Phase 1 of the release: validate, bump the version on a `release/vX` branch,
-# and open a PR for review. Merging that PR to `main` is what publishes the
-# release — see release-publish.yml, which builds + publishes once the bump
-# lands on `main`.
-#
-# This two-phase split exists because `main` is protected (PRs required), so
-# the release bot cannot push the version-bump commit directly. The bump goes
-# through a normal PR you approve + merge.
+# Tag push v<semver> from main -> test gate, signed Windows NSIS build, GitHub
+# Release on this fork, then refresh latest.json on the `updater-latest` pointer
+# release (that tag URL is the updater endpoint compiled into the app, so it
+# stays stable while the asset behind it is replaced on every release).
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version bump type or explicit version (patch, minor, major, or x.y.z)"
-        required: true
-        default: "patch"
-        type: string
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
-  pull-requests: write
+
+env:
+  REPO: ${{ github.repository }}
+  CHANNEL_TAG: updater-latest
 
 jobs:
-  # ── Step 0: validate the project builds and tests pass ──
-  validate:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -55,66 +44,118 @@ jobs:
       - name: Frontend type-check and build
         run: npm run build
 
-      - name: Rust check and tests
+      - name: Rust tests
         working-directory: src-tauri
-        run: |
-          cargo check
-          cargo test
+        run: cargo test --lib
 
-  # ── Step 1: bump version + changelog on a branch, open the release PR ──
-  open-release-pr:
-    needs: validate
+      - name: Build release installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: npx tauri
+          args: --config src-tauri/tauri.release.conf.json
+          updaterJsonPreferNsis: true
+
+      - name: Collect installer
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          VERSION="$(echo "${GITHUB_REF_NAME}" | sed 's/^v//')"
+          BUNDLE_DIR=$(find src-tauri/target -path "*/release/bundle" -type d 2>/dev/null | head -1)
+          if [ -z "$BUNDLE_DIR" ]; then
+            echo "ERROR: no bundle dir"; find src-tauri/target -name bundle -type d; exit 1
+          fi
+          NAME="glogger-${VERSION}-windows-setup.exe"
+          cp "$BUNDLE_DIR"/nsis/*.exe "release-artifacts/$NAME"
+          SIG=$(ls "$BUNDLE_DIR"/nsis/*.exe.sig 2>/dev/null | head -1)
+          if [ -z "$SIG" ]; then
+            echo "ERROR: no .sig — the build was not signed (missing TAURI_SIGNING_PRIVATE_KEY secret?)"
+            find "$BUNDLE_DIR" -type f
+            exit 1
+          fi
+          cp "$SIG" "release-artifacts/$NAME.sig"
+          ls -la release-artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-nsis
+          path: release-artifacts/*
+
+  publish:
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Download artifact
+        uses: actions/download-artifact@v8
         with:
-          fetch-depth: 0
+          name: release-nsis
+          path: all-artifacts
 
-      - name: Bump version
-        id: version
+      - name: Generate latest.json updater manifest
         shell: bash
         run: |
-          chmod +x scripts/bump-version.sh
-          scripts/bump-version.sh "${{ github.event.inputs.version }}"
-          NEW_VERSION=$(sed -n 's/.*"version"\s*:\s*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)
-          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(echo "$TAG" | sed 's/^v//')"
+          NAME="glogger-${VERSION}-windows-setup.exe"
+          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          if [ ! -f "all-artifacts/$NAME.sig" ]; then
+            echo "ERROR: missing signature all-artifacts/$NAME.sig"; ls -la all-artifacts; exit 1
+          fi
+          SIG="$(cat "all-artifacts/$NAME.sig")"
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          cat > all-artifacts/latest.json <<ENDJSON
+          {
+            "version": "${VERSION}",
+            "notes": "glogger ${TAG}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "url": "${BASE_URL}/${NAME}",
+                "signature": "${SIG}"
+              }
+            }
+          }
+          ENDJSON
+          python3 -m json.tool all-artifacts/latest.json
+          echo "verified: latest.json parses"
 
-      - name: Generate changelog
-        shell: bash
-        run: |
-          chmod +x scripts/generate-changelog.sh
-          scripts/generate-changelog.sh > RELEASE_NOTES.md
-          cat RELEASE_NOTES.md
-
-      - name: Create release branch and open PR
+      - name: Create release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          BRANCH="release/v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(echo "$TAG" | sed 's/^v//')"
+          NAME="glogger-${VERSION}-windows-setup.exe"
+          BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+          {
+            echo "## Downloads"
+            echo
+            echo "| Platform | Installer |"
+            echo "|----------|-----------|"
+            echo "| **Windows** | [$NAME]($BASE_URL/$NAME) |"
+            echo
+            echo "---"
+            echo
+            echo "Installed builds auto-update from the \`$CHANNEL_TAG\` channel."
+            echo
+            echo "Original app by Daniel Auchenpaugh ([danielout/glogger](https://github.com/danielout/glogger)); build pipeline inherited from the [oddio fork](https://github.com/crisp-oddio/glogger-oddio). This fork is maintained by [cprivitere (TwinkleofToes)](https://github.com/cprivitere)."
+          } > RELEASE_NOTES.md
+          gh release create "$TAG" --repo "$REPO" --title "glogger $TAG" --notes-file RELEASE_NOTES.md --latest
+          gh release upload "$TAG" all-artifacts/*.exe all-artifacts/*.sig --repo "$REPO"
 
-          # Recreate the branch from the current main so re-runs are idempotent.
-          git checkout -b "$BRANCH"
-          git add -A
-          git commit -m "release: v${VERSION}"
-          git push --force origin "$BRANCH"
-
-          # Only an OPEN PR should suppress creation — `gh pr view` also matches
-          # closed/merged PRs, so a stale release/vX from an earlier (reverted or
-          # reused) version number would silently skip opening the new PR.
-          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
-            echo "PR already open for $BRANCH — branch updated."
-          else
-            BODY=$(printf 'Automated version bump to **v%s**.\n\nApprove and merge this PR to publish the release. Once it lands on `main`, the **Release Publish** workflow tags `v%s` and builds the Windows / macOS / Linux installers + GitHub Release automatically, then attaches the Flatpak.\n\n---\n\n%s\n' "$VERSION" "$VERSION" "$(cat RELEASE_NOTES.md)")
-            gh pr create \
-              --base main \
-              --head "$BRANCH" \
-              --title "release: v${VERSION}" \
-              --body "$BODY"
-          fi
-
-          echo "Opened release PR for v${VERSION}. Approve + merge it to publish."
+      - name: Update the update-channel pointer release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$CHANNEL_TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$CHANNEL_TAG" --repo "$REPO" \
+              --title 'Update channel' --latest=false \
+              --notes 'Pointer release: holds latest.json for the app updater endpoint. Replaced on every v* release — do not delete.'
+          gh release upload "$CHANNEL_TAG" all-artifacts/latest.json --repo "$REPO" --clobber
+          echo "channel updated: https://github.com/$REPO/releases/download/$CHANNEL_TAG/latest.json"

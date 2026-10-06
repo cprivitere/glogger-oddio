@@ -39,13 +39,11 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0MEYzNUNCNjUzNzY4NzkKUldSNWFEZGx5elVQNUxNUmNPeGowa3ZhZUZnRU0vR0p4bjBIb0Y4N1QvZE1taEVzVmN2OWpyQ3MK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUzOUYyMTUwMjQ0QjgyQ0EKUldUS2drc2tVQ0dmNDZwclZzTm9oaFFFSVJ2RG5ybFE5MWlEWFJCYUl4bjVialA1bWpERW81S3EK",
       "endpoints": [
-        "https://github.com/crisp-oddio/glogger-oddio/releases/latest/download/latest.json"
+        "https://github.com/cprivitere/glogger-twinkleoftoes/releases/download/updater-latest/latest.json"
       ],
-      "windows": {
-        "installMode": "passive"
-      }
+      "windows": { "installMode": "passive" }
     }
   }
 }

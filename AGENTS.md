@@ -78,7 +78,7 @@ Vue 3 + Pinia frontend (src/)  ◄────────  lib.rs generate_hand
 | `src/components/Dashboard/dashboardWidgets.ts` | Widget registry |
 | `src-tauri/tauri.conf.json` | Version source of truth + updater + window config |
 | `vite.config.ts` | Two HTML inputs (`index.html`, `dev-panel.html`), port 1420 strict |
-| `.github/workflows/release.yml` | Two-phase release pipeline |
+| `.github/workflows/release.yml` | Tag-triggered release pipeline: test gate → signed Windows build → GitHub release → updater-latest manifest |
 | `HANDOFF.md` | Session log with durable gotchas — read before nontrivial work |
 
 ## Runtime/Tooling Preferences
@@ -87,7 +87,7 @@ Vue 3 + Pinia frontend (src/)  ◄────────  lib.rs generate_hand
 - **Rust**: stable toolchain, edition 2021, crate `glogger_lib`.
 - Tauri plugins (import `@tauri-apps/plugin-*`): dialog, opener, process, updater, window-state. Capabilities live in `src-tauri/capabilities/` (windows `main` + `dev-panel`).
 - **No linter configured**; the type-check gate is `vue-tsc --noEmit` via `npm run build`.
-- Version lives in **5 files** (`tauri.conf.json` = source of truth; `package.json`, `Cargo.toml` package version, and per-config window titles mirror it) — always bump via `npm run version:bump`, never hand-edit.
+- Version lives in **4 files** (`tauri.conf.json` = source of truth; `package.json`, `Cargo.toml` package version, plus the release/experimental window titles) — always bump via `npm run version:bump`, never hand-edit.
 
 ## Testing & QA
 
@@ -95,7 +95,7 @@ Vue 3 + Pinia frontend (src/)  ◄────────  lib.rs generate_hand
 - DB tests use `rusqlite::Connection::open_in_memory()` + `crate::db::migrations::run_migrations` via a local `setup()` helper per module; parser tests embed real log-line fixtures as string constants.
 - Frontend: **no tests** — `vue-tsc --noEmit` is the only gate; the dev panel is for manual/live testing.
 - Replay fixtures live **outside the crate** (`test_data/`, `docs/CDN-full-examples/`), reached via relative paths from `src-tauri` — breaks if run from another CWD.
-- CI gates releases with `cargo check && cargo test` on ubuntu; ignored replay tests never run in CI.
+- The release workflow gates releases with `npm run build` + `cargo test --lib` before bundling; ignored replay tests never run in CI.
 
 ## Gotchas
 
@@ -109,11 +109,9 @@ Vue 3 + Pinia frontend (src/)  ◄────────  lib.rs generate_hand
 - **Time math**: never parse display-formatted time strings (`formatTimeFull` honors 12/24h user setting; 12h strings break `tsToSeconds` → NaN). Parse machine formats; format only at render; guard comparisons with `Number.isFinite`.
 - **`src-tauri/Cargo.toml` phantom CRLF diff**: permanent git-status modification; leave uncommitted.
 - **PowerShell 5.1** mangles `git commit -m` here-strings with double quotes — use `git commit -F <file>`.
-- **Re-dispatching `release.yml`** for a merged-but-lost release PR silently skips PR creation (matches MERGED PRs); branch gets force-updated, open the PR manually.
-- **Flatpak runtime bumps** must touch three files together: `flatpak/io.github.crisp_oddio.glogger.yml`, `.github/workflows/flatpak.yml` (builder image), `docs/flatpak-build.md`. Use `python -m flatpak_node_generator`. Current: GNOME 50 / SDK 25.08. Rerunning flatpak.yml against an old tag can't fix it — fixes ship only via a new tag.
 - **Two Vite entrypoints**: new root-level pages must be added to `vite.config.ts` inputs; dev panel is a separate app, not a route.
 - `game-state-updated` payloads are domain lists — refresh only named domains.
-- Version drift risk: `tauri.release.conf.json`/`tauri.experimental.conf.json` window titles have sed patterns that no longer match their current strings, so `version:bump` silently skips them; CI overrides titles inline for release builds.
-- **Avoid force-pushes to shared branches** — an accidental force-push once wiped `main` (restored via PR). Dev is the active branch; releases flow dev → `release/vX.Y.Z` → PR → main.
+- `scripts/bump-version.sh` rewrites the release window title with a version-agnostic sed.
+- **Avoid force-pushes to shared branches** — an accidental force-push once wiped `main` (restored via PR). `main` is the release branch; cut a release with `npm run release <patch|minor|major|x.y.z>`, which bumps, tags `v<semver>` and pushes. Avoid force-pushes to `main`.
 - Commit prefixes: `feat:`, `fix:`, `impv:`, `docs:`, `test:`, `build:` (hooks warn; install via `git config core.hooksPath .githooks` or `scripts/setup-hooks.sh`).
 - `db/price_helper_commands.rs` and `db/survey_commands.rs` are `#[allow(dead_code)]` placeholders kept intentionally.

@@ -97,8 +97,7 @@ passed, 0 failed** (includes all 6 vendor parser tests + 4 stall db tests).
 - Dev DB has 3 test rows (ids 4-6, includes the fake "ZzzBlorp Widget") —
   delete when resuming or leave (observed_at purge will age them out).
 - Local HEAD is 4 unpushed commits on `main` (stall-price feature,
-  compliance gate, dependabot). The four-PR upstream plan
-  (`four-pr-plan.md`) is a separate workstream, untouched.
+  compliance gate, dependabot).
 
 ---
 

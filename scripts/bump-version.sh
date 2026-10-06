@@ -18,7 +18,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAURI_CONF="$ROOT/src-tauri/tauri.conf.json"
 TAURI_RELEASE_CONF="$ROOT/src-tauri/tauri.release.conf.json"
 TAURI_EXPERIMENTAL_CONF="$ROOT/src-tauri/tauri.experimental.conf.json"
-TAURI_PERSONAL_CONF="$ROOT/src-tauri/tauri.personal.conf.json"
 PACKAGE_JSON="$ROOT/package.json"
 CARGO_TOML="$ROOT/src-tauri/Cargo.toml"
 
@@ -75,17 +74,10 @@ sed -i "s/\"version\": \"$CURRENT\"/\"version\": \"$NEW_VERSION\"/" "$TAURI_CONF
 sed -i "s/\"title\": \"glogger v$CURRENT DEV\"/\"title\": \"glogger v$NEW_VERSION DEV\"/" "$TAURI_CONF"
 
 # 3. Update tauri.release.conf.json — release window title
-sed -i "s/\"title\": \"glogger beta v$CURRENT\"/\"title\": \"glogger beta v$NEW_VERSION\"/" "$TAURI_RELEASE_CONF"
+sed -i -E "s/\"title\": \"glogger v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?\"/\"title\": \"glogger v$NEW_VERSION\"/" "$TAURI_RELEASE_CONF"
 
 # 3b. Update tauri.experimental.conf.json — experimental window title
 sed -i "s/\"title\": \"glogger v$CURRENT EXPERIMENTAL\"/\"title\": \"glogger v$NEW_VERSION EXPERIMENTAL\"/" "$TAURI_EXPERIMENTAL_CONF"
-
-# 3c. Update tauri.personal.conf.json — personal window title
-# The personal conf is written as compact JSON ("title":"…", no space after
-# the colon). The optional-space capture keeps whichever spacing the file
-# uses; a literal `\?` in the *replacement* would emit a `?` character and
-# corrupt the JSON (do not reintroduce it).
-sed -i -E "s/\"title\":([[:space:]]*)\"glogger v$CURRENT PERSONAL\"/\"title\":\1\"glogger v$NEW_VERSION PERSONAL\"/" "$TAURI_PERSONAL_CONF"
 
 # 4. Update package.json
 sed -i "s/\"version\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"version\": \"$NEW_VERSION\"/" "$PACKAGE_JSON"
@@ -104,7 +96,6 @@ echo "Version bumped to $NEW_VERSION in:"
 echo "  - src-tauri/tauri.conf.json"
 echo "  - src-tauri/tauri.release.conf.json"
 echo "  - src-tauri/tauri.experimental.conf.json"
-echo "  - src-tauri/tauri.personal.conf.json"
 echo "  - package.json"
 echo "  - src-tauri/Cargo.toml"
 echo ""

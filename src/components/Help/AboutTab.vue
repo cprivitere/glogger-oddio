@@ -13,6 +13,11 @@
       <p class="m-0 mt-0.5 text-text-dim text-xs">
         (Also known as Daniel Auchenpaugh)
       </p>
+      <p class="m-0 mt-0.5 text-text-dim text-xs">
+        Fork maintained by
+        <a href="https://github.com/cprivitere">TwinkleofToes</a> &middot; built on the
+        <a href="https://github.com/crisp-oddio/glogger-oddio">oddio fork</a>
+      </p>
 
       <span class="inline-block mt-3 px-3 py-1 rounded-full bg-surface-dark border border-border-default text-text-muted text-xs font-mono">
         v{{ appVersion }}
