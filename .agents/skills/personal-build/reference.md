@@ -1,17 +1,18 @@
 # glogger personal build — integration & release pipeline (fork-local)
 
-Skill for managing the **`local/integration`** branch: merging work in,
+Skill for managing the **`personal`** branch: merging work in,
 building the `glogger.Personal` daily driver, and keeping data intact.
-Everything here is fork-local by design — tracked on `local/integration`
-but never PR'd to `crisp-oddio/glogger-oddio`, and `local/*` branches
-are never pushed to the fork.
+Everything here is fork-local by design — tracked on `personal`
+but never PR'd to `crisp-oddio/glogger-oddio`. The `personal` branch IS
+pushed to the fork (`origin`) — it is the source of truth for the fork's
+`v<version>-personal` Releases (`.github/workflows/personal-release.yml`).
 
 ## Branch map
 
 | Branch | Purpose | Push? |
 |---|---|---|
 | `main` | Mirror of `origin/main` (this fork's shared branch). Pin to `origin/main`. | only upstreamable fixes |
-| `local/integration` | The daily-driver source of truth: personal fixes + cherry-picked work. | NO |
+| `personal` | The daily-driver + fork-release source of truth: personal fixes + cherry-picked work. | YES (to `origin`) |
 | `fix/*`, `feat/*` | Reviewable single-purpose branches cut for eventual upstream PRs. | YES (to fork) |
 | `upstream/*` | `crisp-oddio` remotes — read-only reference. | never |
 
@@ -27,7 +28,7 @@ are never pushed to the fork.
 ## Commands
 
 ```powershell
-# Build the personal installer (from local/integration):
+# Build the personal installer (from personal):
 npm run tauri:build:personal
 # → src-tauri/target/release/bundle/nsis/*.exe
 
@@ -44,10 +45,10 @@ npm run build
 ## Routine: "I want fix X in my daily glogger"
 
 1. **Source the fix.** If it lives on a side branch: `git merge fix/<name>` into
-   `local/integration`. If it's uncommitted work: commit it to
-   `local/integration` in logical chunks first (small commits, honest
+   `personal`. If it's uncommitted work: commit it to
+   `personal` in logical chunks first (small commits, honest
    messages). If it's a TODO-style change made directly on
-   `local/integration`: nothing to do.
+   `personal`: nothing to do.
 2. **Verify:** `cd src-tauri && cargo test --lib` (expect 585+, 0 failed) and
    `npm run build` (vue-tsc) if frontend changed.
 3. **Build:** `npm run tauri:build:personal` (~3–10 min; first build ~20 min).
@@ -56,6 +57,22 @@ npm run build
    personal build preserves `%APPDATA%\glogger.Personal` untouched.
 5. **Smoke:** launch, check window title `glogger v<version> PERSONAL`,
    confirm live data (new events since the last session appear).
+
+## Routine: publish a fork Release
+
+```bash
+npm run release:personal <patch|minor|major|x.y.z>
+```
+
+Must be run on `personal` with a clean tree. It runs `scripts/bump-version.sh`
+(sets `0.12.18`-style version everywhere, including the personal window
+title), commits `release: v<version>-personal`, tags it, and pushes both the
+branch and the tag to `origin`. CI
+(`.github/workflows/personal-release.yml`) then builds the Windows NSIS
+`glogger.Personal` installer and publishes it to
+`https://github.com/cprivitere/glogger-oddio/releases/tag/v<version>-personal`
+as `glogger-<version>-personal-windows-setup.exe`. The upstream Flatpak
+workflow ignores `v*-personal` tags.
 
 ## Data safety invariants (NEVER break these)
 
@@ -84,7 +101,7 @@ npm run build
 ## Upstream PR path (later)
 
 Per `four-pr-plan.md` (repo root, untracked): upstream PRs are cut from
-`upstream/dev` (crisp-oddio), NOT from `local/integration` or `main`.
+`upstream/dev` (crisp-oddio), NOT from `personal` or `main`.
 Cherry-pick the relevant commits onto a fresh branch off `upstream/dev`,
 rebase if the tip moved, `gh pr create --repo crisp-oddio/glogger-oddio
 --base dev`. The local pre-push constraint scanner
