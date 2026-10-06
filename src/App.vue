@@ -64,7 +64,7 @@
 
       <!-- Bottom bar -->
       <div class="shrink-0 h-6 bg-surface-base border-t border-border-default flex items-center justify-between px-3">
-        <span class="text-text-dim text-[10px]">Glogger by Zenith of Dreva -- Community fork maintained by oddio -- Some portions copyright 2026 Elder Game, LLC.</span>
+        <span class="text-text-dim text-[10px]">Glogger by Zenith of Dreva -- fork maintained by TwinkleofToes, built on the oddio fork -- Some portions copyright 2026 Elder Game, LLC.</span>
         <div v-if="updateStore.updateAvailable && !updateStore.dismissed" class="flex items-center gap-1.5 text-[10px]">
           <template v-if="updateStore.installing">
             <span class="text-accent-blue">
