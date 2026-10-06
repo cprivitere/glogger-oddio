@@ -391,7 +391,7 @@ pub fn update_build_preset_slot_props(
     slot_skill_primary: Option<String>,
     slot_skill_secondary: Option<String>,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
@@ -435,15 +435,22 @@ pub fn update_build_preset_slot_props(
     params.push(Box::new(preset_id));
     params.push(Box::new(equip_slot));
 
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    conn.execute(&sql, param_refs.as_slice())
+    tx.execute(&sql, param_refs.as_slice())
         .map_err(|e| format!("Failed to update slot props: {e}"))?;
 
-    conn.execute(
+    tx.execute(
         "UPDATE build_presets SET updated_at = datetime('now') WHERE id = ?1",
         [preset_id],
     )
-    .ok();
+    .map_err(|e| format!("Failed to touch preset: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(())
 }

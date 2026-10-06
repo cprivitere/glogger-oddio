@@ -132,7 +132,7 @@ impl GameStateManager {
         self.active_character = Some(name.to_string());
         self.active_server = Some(server.to_string());
 
-        let conn = match db.get_write() {
+        let mut conn = match db.get_write() {
             Ok(c) => c,
             Err(e) => {
                 startup_log!("[game_state] DB error on set_active_character: {e}");
@@ -141,55 +141,73 @@ impl GameStateManager {
         };
 
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let live_mode = self.live_mode;
 
-        // Update session singleton
-        conn.execute(
-            "INSERT INTO game_state_session (id, character_name, server_name, last_login_at, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?3)
-             ON CONFLICT(id) DO UPDATE SET
-                character_name = excluded.character_name,
-                server_name = excluded.server_name,
-                last_login_at = excluded.last_login_at,
-                updated_at = excluded.updated_at",
-            rusqlite::params![name, server, now],
-        ).ok();
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) => {
+                startup_log!("[game_state] set_active_character transaction failed: {e}");
+                return;
+            }
+        };
 
-        // Auto-create server record if not exists
-        conn.execute(
-            "INSERT INTO servers (server_name) VALUES (?1) ON CONFLICT DO NOTHING",
-            rusqlite::params![server],
-        )
-        .ok();
+        let result = (|| -> rusqlite::Result<()> {
+            // Update session singleton
+            tx.execute(
+                "INSERT INTO game_state_session (id, character_name, server_name, last_login_at, updated_at)
+                 VALUES (1, ?1, ?2, ?3, ?3)
+                 ON CONFLICT(id) DO UPDATE SET
+                    character_name = excluded.character_name,
+                    server_name = excluded.server_name,
+                    last_login_at = excluded.last_login_at,
+                    updated_at = excluded.updated_at",
+                rusqlite::params![name, server, now],
+            )?;
 
-        // Only clear transient state during live tailing — during replay/catch-up
-        // we want to accumulate data for all characters, not nuke it on each login.
-        if self.live_mode {
-            conn.execute(
-                "DELETE FROM game_state_inventory WHERE character_name = ?1 AND server_name = ?2",
-                rusqlite::params![name, server],
-            )
-            .ok();
-            conn.execute(
-                "DELETE FROM game_state_equipment WHERE character_name = ?1 AND server_name = ?2",
-                rusqlite::params![name, server],
-            )
-            .ok();
-            conn.execute(
-                "DELETE FROM game_state_combat WHERE character_name = ?1 AND server_name = ?2",
-                rusqlite::params![name, server],
-            )
-            .ok();
-            conn.execute(
-                "DELETE FROM game_state_mount WHERE character_name = ?1 AND server_name = ?2",
-                rusqlite::params![name, server],
-            )
-            .ok();
+            // Auto-create server record if not exists
+            tx.execute(
+                "INSERT INTO servers (server_name) VALUES (?1) ON CONFLICT DO NOTHING",
+                rusqlite::params![server],
+            )?;
 
-            // Reset favor deltas — new session starts accumulating from scratch
-            conn.execute(
-                "UPDATE game_state_favor SET cumulative_delta = 0, source = CASE WHEN favor_tier IS NOT NULL THEN 'snapshot' ELSE source END WHERE character_name = ?1 AND server_name = ?2",
-                rusqlite::params![name, server],
-            ).ok();
+            // Only clear transient state during live tailing — during replay/catch-up
+            // we want to accumulate data for all characters, not nuke it on each login.
+            if live_mode {
+                tx.execute(
+                    "DELETE FROM game_state_inventory WHERE character_name = ?1 AND server_name = ?2",
+                    rusqlite::params![name, server],
+                )?;
+                tx.execute(
+                    "DELETE FROM game_state_equipment WHERE character_name = ?1 AND server_name = ?2",
+                    rusqlite::params![name, server],
+                )?;
+                tx.execute(
+                    "DELETE FROM game_state_combat WHERE character_name = ?1 AND server_name = ?2",
+                    rusqlite::params![name, server],
+                )?;
+                tx.execute(
+                    "DELETE FROM game_state_mount WHERE character_name = ?1 AND server_name = ?2",
+                    rusqlite::params![name, server],
+                )?;
+
+                // Reset favor deltas — new session starts accumulating from scratch
+                tx.execute(
+                    "UPDATE game_state_favor SET cumulative_delta = 0, source = CASE WHEN favor_tier IS NOT NULL THEN 'snapshot' ELSE source END WHERE character_name = ?1 AND server_name = ?2",
+                    rusqlite::params![name, server],
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            startup_log!("[game_state] set_active_character transaction failed: {e}");
+            // tx dropped here → rollback
+            return;
+        }
+
+        if let Err(e) = tx.commit() {
+            startup_log!("[game_state] set_active_character transaction failed: {e}");
+            return;
         }
 
         eprintln!(

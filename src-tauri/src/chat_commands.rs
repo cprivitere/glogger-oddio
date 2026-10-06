@@ -526,55 +526,79 @@ pub async fn get_tell_conversations(
 
 #[tauri::command]
 pub async fn purge_chat_messages(days: u32, db_pool: State<'_, DbPool>) -> Result<usize, String> {
-    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
 
     let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days as i64);
     let cutoff_str = cutoff_date.format("%Y-%m-%d %H:%M:%S").to_string();
 
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     // Delete orphaned item links for messages that will be purged
     // (in case foreign_keys pragma wasn't active for older data)
-    conn.execute(
+    tx.execute(
         "DELETE FROM chat_item_links WHERE message_id IN (SELECT id FROM chat_messages WHERE timestamp < ?1)",
         [&cutoff_str],
     )
     .map_err(|e| format!("Failed to purge item links: {e}"))?;
 
-    let deleted = conn
+    let deleted = tx
         .execute(
             "DELETE FROM chat_messages WHERE timestamp < ?1",
             [&cutoff_str],
         )
         .map_err(|e| format!("Failed to purge messages: {e}"))?;
 
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+
     Ok(deleted)
 }
 
 #[tauri::command]
 pub async fn delete_all_chat_messages(db_pool: State<'_, DbPool>) -> Result<usize, String> {
-    let conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+    let mut conn = db_pool.get_write().map_err(|e| format!("Database error: {e}"))?;
+
+    let deleted = delete_all_chat_messages_impl(&mut conn)?;
+
+    // Reclaim disk space (retried on SQLITE_BUSY). Must run after the commit —
+    // VACUUM cannot run inside a transaction.
+    crate::db::vacuum_with_retry(&conn, 3)
+        .map_err(|e| format!("Failed to vacuum database (busy after 3 attempts): {e}"))?;
+
+    Ok(deleted)
+}
+
+/// Four DELETEs in one transaction. Split out from the command so the
+/// all-or-nothing behaviour is unit-testable. `conn` is `&mut` because
+/// `transaction_with_behavior` needs it.
+fn delete_all_chat_messages_impl(conn: &mut rusqlite::Connection) -> Result<usize, String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // Delete item links first (in case foreign_keys pragma wasn't active for older data)
-    conn.execute("DELETE FROM chat_item_links", [])
+    tx.execute("DELETE FROM chat_item_links", [])
         .map_err(|e| format!("Failed to delete item links: {e}"))?;
 
-    let deleted = conn
+    let deleted = tx
         .execute("DELETE FROM chat_messages", [])
         .map_err(|e| format!("Failed to delete all messages: {e}"))?;
 
     // Clear legacy chat log file tracking
-    conn.execute("DELETE FROM chat_log_files", [])
+    tx.execute("DELETE FROM chat_log_files", [])
         .map_err(|e| format!("Failed to delete chat log files: {e}"))?;
 
     // Reset file positions for chat logs so they can be re-imported
-    conn.execute(
+    tx.execute(
         "DELETE FROM log_file_positions WHERE file_type = 'chat'",
         [],
     )
     .map_err(|e| format!("Failed to reset file positions: {e}"))?;
 
-    // Reclaim disk space (retried on SQLITE_BUSY)
-    crate::db::vacuum_with_retry(&conn, 3)
-        .map_err(|e| format!("Failed to vacuum database (busy after 3 attempts): {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(deleted)
 }
@@ -604,4 +628,36 @@ pub async fn get_watch_rule_messages(
         &app_settings.excluded_chat_channels,
     )
     .map_err(|e| format!("Failed to get watch rule messages: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_all_chat_messages_rolls_back_on_partial_failure() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chat_messages (id INTEGER PRIMARY KEY);
+             CREATE TABLE chat_item_links (id INTEGER PRIMARY KEY, message_id INTEGER);
+             CREATE TABLE chat_log_files (id INTEGER PRIMARY KEY);
+             CREATE TABLE log_file_positions (file_path TEXT, file_type TEXT);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_messages (id) VALUES (1);
+             INSERT INTO chat_item_links (message_id) VALUES (1);",
+        )
+        .unwrap();
+        // Break the SECOND delete so the transaction must roll back the first.
+        conn.execute_batch("DROP TABLE chat_messages").unwrap();
+        assert!(delete_all_chat_messages_impl(&mut conn).is_err());
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_item_links", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "first DELETE must roll back when a later statement fails"
+        );
+    }
 }

@@ -217,21 +217,28 @@ pub fn set_active_character(
     character_name: String,
     server_name: String,
 ) -> Result<(), String> {
-    let conn = db
+    let mut conn = db
         .get_write()
         .map_err(|e| format!("Database connection error: {e}"))?;
 
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     // Clear all active flags
-    conn.execute("UPDATE user_characters SET is_active = 0", [])
+    tx.execute("UPDATE user_characters SET is_active = 0", [])
         .map_err(|e| format!("Failed to clear active flags: {e}"))?;
 
     // Set the selected character as active
-    conn.execute(
+    tx.execute(
         "UPDATE user_characters SET is_active = 1, updated_at = CURRENT_TIMESTAMP
          WHERE character_name = ?1 AND server_name = ?2",
         rusqlite::params![character_name, server_name],
     )
     .map_err(|e| format!("Failed to set active character: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     // Update settings
     let mut settings = settings_manager.get();

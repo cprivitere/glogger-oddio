@@ -168,10 +168,15 @@ pub fn survey_tracker_end_session(
         None => return Ok(None),
     };
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
-    coord
+    let mut conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let r = coord
         .survey_aggregator_mut()
-        .end_active_session(&conn, &character, &server, &now)
+        .end_active_session(&tx, &character, &server, &now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(r)
 }
 
 /// Recent completed (or current) sessions for the active character/server,
@@ -765,24 +770,36 @@ pub fn survey_tracker_delete_session(
     session_id: i64,
 ) -> Result<(), String> {
     let mut coord = coordinator.lock().map_err(|e| e.to_string())?;
-    let conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
-    // Delete uses first (no cascade defined). Then delete the session header.
-    conn.execute(
-        "DELETE FROM survey_uses WHERE session_id = ?1",
-        params![session_id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM survey_sessions WHERE id = ?1",
-        params![session_id],
-    )
-    .map_err(|e| e.to_string())?;
+    let mut conn = coord.db_pool().get_write().map_err(|e| e.to_string())?;
+    delete_session_impl(&mut conn, session_id)?;
     drop(conn);
     // The aggregator caches the active-session id. If we just deleted that
     // session, the cache is now stale — the next survey use would insert
     // against a missing session id and fail the FK. Invalidate so it
     // re-resolves (and auto-starts a fresh session) on the next use.
     coord.survey_aggregator_mut().invalidate_session_cache();
+    Ok(())
+}
+
+/// Delete a session's uses then the session row in one transaction. Split out
+/// from the command (which also invalidates the aggregator cache) so the
+/// atomicity is unit-testable.
+fn delete_session_impl(conn: &mut rusqlite::Connection, session_id: i64) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    // Delete uses first (no cascade defined). Then delete the session header.
+    tx.execute(
+        "DELETE FROM survey_uses WHERE session_id = ?1",
+        params![session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM survey_sessions WHERE id = ?1",
+        params![session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1915,7 +1932,7 @@ mod tests {
     fn test_delete_session_clears_uses_but_keeps_transactions() {
         // We delete the survey_uses row but leave item_transactions in place
         // so the historical ledger isn't corrupted.
-        let conn = fresh_db();
+        let mut conn = fresh_db();
         let session_id = seed_session(&conn);
 
         let pre_uses: i64 = conn
@@ -1927,12 +1944,8 @@ mod tests {
         assert_eq!(pre_uses, 2);
         assert_eq!(pre_tx, 2);
 
-        // Mirror what the Tauri command does (we can't easily call the
-        // command itself in a unit test without a full coordinator harness).
-        conn.execute("DELETE FROM survey_uses WHERE session_id = ?1", [session_id])
-            .unwrap();
-        conn.execute("DELETE FROM survey_sessions WHERE id = ?1", [session_id])
-            .unwrap();
+        // Exercise the same helper the Tauri command delegates to.
+        delete_session_impl(&mut conn, session_id).unwrap();
 
         let post_uses: i64 = conn
             .query_row("SELECT COUNT(*) FROM survey_uses", [], |r| r.get(0))

@@ -738,7 +738,10 @@ pub fn ingest_kill_loot_from_logs(
 
     // --- Pass B: persist kills, then attribute loot ---
     // The parse is done; only NOW take the dedicated write connection.
-    let conn = db.get_write().map_err(|e| format!("DB connection error: {e}"))?;
+    let mut conn = db.get_write().map_err(|e| format!("DB connection error: {e}"))?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
     let mut result = IngestResult {
         kills_added: 0,
         loot_added: 0,
@@ -757,7 +760,7 @@ pub fn ingest_kill_loot_from_logs(
     // loot. A corpse is uniquely identified by (character, entity_id, killed_at)
     // regardless of server, so match on that natural key instead.
     let find_existing_kill = |entity_id_str: &str, killed_at: &str| -> Option<i64> {
-        conn.query_row(
+        tx.query_row(
             "SELECT id FROM enemy_kills
              WHERE character_name IS ?1 AND enemy_entity_id = ?2 AND killed_at = ?3
              LIMIT 1",
@@ -779,7 +782,7 @@ pub fn ingest_kill_loot_from_logs(
             // No prior row for this corpse — insert it. (INSERT OR IGNORE guards a
             // rare race with the live tailer inserting the same corpse between our
             // check and this write; the fallback re-lookup then resolves it.)
-            let inserted = conn
+            let inserted = tx
                 .execute(
                     "INSERT OR IGNORE INTO enemy_kills
                         (enemy_name, enemy_entity_id, killing_ability,
@@ -798,7 +801,7 @@ pub fn ingest_kill_loot_from_logs(
                 .map_err(|e| format!("Failed to insert kill: {e}"))?;
             if inserted > 0 {
                 result.kills_added += 1;
-                conn.last_insert_rowid()
+                tx.last_insert_rowid()
             } else {
                 find_existing_kill(&entity_id_str, killed_at).unwrap_or(-1)
             }
@@ -813,22 +816,22 @@ pub fn ingest_kill_loot_from_logs(
             Some(id) => *id,
             None => continue, // loot from a corpse we didn't (or couldn't) record
         };
-        if conn
+        if tx
             .execute(
                 "INSERT OR IGNORE INTO enemy_kill_loot
                     (kill_id, item_name, quantity, instance_id)
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![kill_id, item_name, quantity, instance_id],
             )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            .map_err(|e| format!("Failed to insert loot: {e}"))?
+            > 0
         {
             result.loot_added += 1;
         }
     }
 
     // Record this file as ingested (idempotency).
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO player_prev_ingests
             (content_hash, source_path, ingested_at, kills_added, loot_added)
          VALUES (?1, ?2, CURRENT_TIMESTAMP, ?3, ?4)",
@@ -840,6 +843,9 @@ pub fn ingest_kill_loot_from_logs(
         ],
     )
     .map_err(|e| format!("Failed to record ingest: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
     Ok(result)
 }
@@ -985,6 +991,23 @@ mod ingest_tests {
         assert!(r2.already_ingested);
         assert_eq!(r2.kills_added, 0);
         assert_eq!(r2.loot_added, 0);
+
+        // The wrapped transaction committed exactly once, and the second
+        // (no-op) call wrote nothing: kills/loot/ingest rows are unchanged.
+        let kills_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM enemy_kills", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kills_after, 2, "no duplicate kills after re-ingest no-op");
+        let loot_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM enemy_kill_loot", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(loot_after, 2, "Goblin 2 + Rat 0 loot rows");
+        let ingests_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM player_prev_ingests", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(ingests_after, 1, "one ingest record for this content hash");
 
         drop(conn);
         let _ = std::fs::remove_file(&log_path);

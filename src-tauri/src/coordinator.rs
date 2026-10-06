@@ -1801,11 +1801,14 @@ impl DataIngestCoordinator {
                 ability.damage_type.clone()
             });
 
-        let conn = self
+        let mut conn = self
             .db_pool
             .get_write()
             .map_err(|e| format!("Database connection error: {e}"))?;
-        conn.execute(
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        tx.execute(
             "INSERT INTO character_deaths
                 (character_name, server_name, died_at, killer_name, killer_entity_id,
                  killing_ability, health_damage, armor_damage, area, damage_type)
@@ -1825,7 +1828,7 @@ impl DataIngestCoordinator {
         )
         .map_err(|e| format!("Failed to insert death: {}", e))?;
 
-        let death_id = conn.last_insert_rowid();
+        let death_id = tx.last_insert_rowid();
 
         // Persist recent damage sources leading up to the death
         for (order, dmg_event) in self.recent_damage.iter().enumerate() {
@@ -1839,7 +1842,7 @@ impl DataIngestCoordinator {
                 is_crit,
             } = dmg_event
             {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO death_damage_sources
                         (death_id, event_order, timestamp, attacker_name, attacker_entity_id,
                          ability_name, health_damage, armor_damage, is_crit)
@@ -1859,6 +1862,9 @@ impl DataIngestCoordinator {
                 .map_err(|e| format!("Failed to insert damage source: {}", e))?;
             }
         }
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
         Ok(())
     }
@@ -2229,9 +2235,12 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get_write() {
+        let mut conn = match self.db_pool.get_write() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                startup_log!("[coordinator] garden almanac write connection failed: {e}");
+                return;
+            }
         };
 
         let _ = timestamp; // timestamp not needed; we use wall-clock time
@@ -2244,56 +2253,25 @@ impl DataIngestCoordinator {
             return;
         }
 
-        // Replace all previous entries for this character+server
-        conn.execute(
-            "DELETE FROM garden_almanac WHERE character_name = ?1 AND server_name = ?2",
-            rusqlite::params![character, server],
-        )
-        .ok();
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) => {
+                startup_log!("[coordinator] garden almanac transaction failed: {e}");
+                return;
+            }
+        };
 
-        for event in &events {
-            conn.execute(
-                "INSERT INTO garden_almanac (character_name, server_name, crop_name, zone_name, event_start, event_end, is_current, captured_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    character,
-                    server,
-                    event.crop_name,
-                    event.zone_name,
-                    event.event_start,
-                    event.event_end,
-                    event.is_current as i32,
-                    event.captured_at,
-                ],
-            )
-            .ok();
+        let result = (|| -> rusqlite::Result<()> {
+            // Replace all previous entries for this character+server
+            tx.execute(
+                "DELETE FROM garden_almanac WHERE character_name = ?1 AND server_name = ?2",
+                rusqlite::params![character, server],
+            )?;
 
-            // Save to history (deduplicate by crop+zone+event timing)
-            let event_key_start = event.event_start.as_deref().unwrap_or("");
-            let event_key_end = event.event_end.as_deref().unwrap_or("");
-            let exists: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM garden_almanac_history
-                     WHERE character_name = ?1 AND server_name = ?2
-                       AND crop_name = ?3 AND zone_name = ?4
-                       AND COALESCE(event_start, '') = ?5
-                       AND COALESCE(event_end, '') = ?6",
-                    rusqlite::params![
-                        character,
-                        server,
-                        event.crop_name,
-                        event.zone_name,
-                        event_key_start,
-                        event_key_end,
-                    ],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-
-            if !exists {
-                conn.execute(
-                    "INSERT INTO garden_almanac_history (character_name, server_name, crop_name, zone_name, event_start, event_end, captured_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            for event in &events {
+                tx.execute(
+                    "INSERT INTO garden_almanac (character_name, server_name, crop_name, zone_name, event_start, event_end, is_current, captured_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
                         character,
                         server,
@@ -2301,11 +2279,61 @@ impl DataIngestCoordinator {
                         event.zone_name,
                         event.event_start,
                         event.event_end,
+                        event.is_current as i32,
                         event.captured_at,
                     ],
-                )
-                .ok();
+                )?;
+
+                // Save to history (deduplicate by crop+zone+event timing)
+                let event_key_start = event.event_start.as_deref().unwrap_or("");
+                let event_key_end = event.event_end.as_deref().unwrap_or("");
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM garden_almanac_history
+                         WHERE character_name = ?1 AND server_name = ?2
+                           AND crop_name = ?3 AND zone_name = ?4
+                           AND COALESCE(event_start, '') = ?5
+                           AND COALESCE(event_end, '') = ?6",
+                        rusqlite::params![
+                            character,
+                            server,
+                            event.crop_name,
+                            event.zone_name,
+                            event_key_start,
+                            event_key_end,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !exists {
+                    tx.execute(
+                        "INSERT INTO garden_almanac_history (character_name, server_name, crop_name, zone_name, event_start, event_end, captured_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        rusqlite::params![
+                            character,
+                            server,
+                            event.crop_name,
+                            event.zone_name,
+                            event.event_start,
+                            event.event_end,
+                            event.captured_at,
+                        ],
+                    )?;
+                }
             }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            startup_log!("[coordinator] garden almanac transaction failed: {e}");
+            // tx dropped here → rollback
+            return;
+        }
+
+        if let Err(e) = tx.commit() {
+            startup_log!("[coordinator] garden almanac transaction failed: {e}");
+            return;
         }
 
         startup_log!(
@@ -2326,9 +2354,12 @@ impl DataIngestCoordinator {
             None => return,
         };
 
-        let conn = match self.db_pool.get_write() {
+        let mut conn = match self.db_pool.get_write() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                startup_log!("[coordinator] harvest almanac write connection failed: {e}");
+                return;
+            }
         };
 
         let _ = timestamp; // timestamp not needed; we use wall-clock time
@@ -2339,28 +2370,48 @@ impl DataIngestCoordinator {
             return;
         }
 
-        conn.execute(
-            "DELETE FROM harvest_almanac WHERE character_name = ?1 AND server_name = ?2",
-            rusqlite::params![character, server],
-        )
-        .ok();
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) => {
+                startup_log!("[coordinator] harvest almanac transaction failed: {e}");
+                return;
+            }
+        };
 
-        for event in &events {
-            conn.execute(
-                "INSERT INTO harvest_almanac (character_name, server_name, monster_name, description, event_start, event_end, is_current, captured_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    character,
-                    server,
-                    event.monster_name,
-                    event.description,
-                    event.event_start,
-                    event.event_end,
-                    event.is_current as i32,
-                    event.captured_at,
-                ],
-            )
-            .ok();
+        let result = (|| -> rusqlite::Result<()> {
+            tx.execute(
+                "DELETE FROM harvest_almanac WHERE character_name = ?1 AND server_name = ?2",
+                rusqlite::params![character, server],
+            )?;
+
+            for event in &events {
+                tx.execute(
+                    "INSERT INTO harvest_almanac (character_name, server_name, monster_name, description, event_start, event_end, is_current, captured_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        character,
+                        server,
+                        event.monster_name,
+                        event.description,
+                        event.event_start,
+                        event.event_end,
+                        event.is_current as i32,
+                        event.captured_at,
+                    ],
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            startup_log!("[coordinator] harvest almanac transaction failed: {e}");
+            // tx dropped here → rollback
+            return;
+        }
+
+        if let Err(e) = tx.commit() {
+            startup_log!("[coordinator] harvest almanac transaction failed: {e}");
+            return;
         }
 
         startup_log!(
