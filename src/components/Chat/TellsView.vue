@@ -90,6 +90,7 @@ async function loadConversations() {
 
 async function selectConversation(name: string) {
   selectedConversation.value = name
+  messages.value = []
   offset.value = 0
   hasMore.value = true
   await loadMessages()

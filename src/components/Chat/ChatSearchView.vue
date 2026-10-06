@@ -120,6 +120,7 @@ const contextMessageId = ref<number | null>(null)
 const contextMessages = ref<ChatMessage[]>([])
 const contextLoading = ref(false)
 const contextChannel = ref<string | null>(null)
+let contextGeneration = 0
 
 let searchTimeout: number | null = null
 // Query generation: bumped ONLY when the filter/query changes (page-0
@@ -200,9 +201,8 @@ function loadMore() {
   loadMessages()
 }
 
-function refresh() {
-  // With a day filter active, refresh re-centers on that day (the plain
-  // day-bounds query can legitimately be empty; around-time keeps context).
+function reloadResults() {
+  exitContext()
   if (dateNav.activeDay.value) {
     loadAroundDay(dateNav.activeDay.value)
   } else {
@@ -210,31 +210,24 @@ function refresh() {
     hasMore.value = true
     loadMessages()
   }
+}
+
+function refresh() {
+  // With a day filter active, refresh re-centers on that day (the plain
+  // day-bounds query can legitimately be empty; around-time keeps context).
+  reloadResults()
 }
 
 function onSearchInput() {
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = window.setTimeout(() => {
-    exitContext()
-    if (dateNav.activeDay.value) {
-      loadAroundDay(dateNav.activeDay.value)
-    } else {
-      offset.value = 0
-      hasMore.value = true
-      loadMessages()
-    }
+    reloadResults()
   }, 300)
 }
 
 function toggleSort() {
   sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc'
-  if (dateNav.activeDay.value) {
-    loadAroundDay(dateNav.activeDay.value)
-  } else {
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
-  }
+  reloadResults()
 }
 
 function removeTextWord(word: string) {
@@ -247,13 +240,7 @@ function removeTextWord(word: string) {
     .trim()
     .replace(/\s+/g, ' ')
     .replace(/""/g, '')
-  if (dateNav.activeDay.value) {
-    loadAroundDay(dateNav.activeDay.value)
-  } else {
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
-  }
+  reloadResults()
 }
 
 function removeOperator(op: 'from' | 'in') {
@@ -262,50 +249,42 @@ function removeOperator(op: 'from' | 'in') {
     ? /\bfrom:(?:"[^"]*"|[\S]+)/gi
     : /\bin:(?:"[^"]*"|[\S]+)/gi
   rawQuery.value = rawQuery.value.replace(pattern, '').trim().replace(/\s+/g, ' ')
-  if (dateNav.activeDay.value) {
-    loadAroundDay(dateNav.activeDay.value)
-  } else {
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
-  }
+  reloadResults()
 }
 
 async function onMessageClick(msg: ChatMessage) {
   contextMessageId.value = msg.id
   contextChannel.value = msg.channel ?? null
   contextLoading.value = true
+  const gen = ++contextGeneration
   try {
     const result = await invoke<ChatMessage[]>('get_chat_messages_around', {
       messageId: msg.id,
       contextCount: 25,
     })
+    if (gen !== contextGeneration) return
     contextMessages.value = result
+    if (result.length === 0) exitContext()
   } catch (e) {
     console.error('Failed to load message context:', e)
-    contextMessageId.value = null
+    if (gen === contextGeneration) exitContext()
   } finally {
-    contextLoading.value = false
+    if (gen === contextGeneration) contextLoading.value = false
   }
 }
 
 function exitContext() {
+  contextGeneration++
   contextMessageId.value = null
   contextMessages.value = []
   contextChannel.value = null
+  contextLoading.value = false
 }
 
 // Day filter changes reload from the day boundary
 watch(() => dateNav.activeDay.value, (day, prev) => {
   if (day === prev) return
-  exitContext()
-  if (day) {
-    loadAroundDay(day)
-  } else {
-    offset.value = 0
-    hasMore.value = true
-    loadMessages()
-  }
+  reloadResults()
 })
 
 async function loadAroundDay(day: string) {

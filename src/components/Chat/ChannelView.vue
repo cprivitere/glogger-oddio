@@ -103,6 +103,7 @@ async function loadChannels() {
 
 async function selectChannel(channel: string) {
   selectedChannel.value = channel
+  messages.value = []
   offset.value = 0
   searchText.value = ''
   hasMore.value = true

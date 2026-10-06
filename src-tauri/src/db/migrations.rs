@@ -375,7 +375,25 @@ pub fn run_migrations(conn: &Connection, tz_offset_seconds: Option<i32>) -> Resu
         super::record_migration(conn, 68)?;
     }
 
+    if current_version < 69 {
+        migration_v69_chat_channel_timestamp_index(conn)?;
+        super::record_migration(conn, 69)?;
+    }
+
     tx.commit()?;
+    Ok(())
+}
+
+/// Migration V69: composite `(channel, timestamp)` index for the "messages
+/// around a target" query, which filters one channel by a timestamp range and
+/// orders by timestamp. The single-column `idx_chat_messages_channel` forced a
+/// temp-B-tree sort of the entire channel per neighbour scan; this index turns
+/// each scan into an ordered range seek (near-instant even for 50k-row channels).
+fn migration_v69_chat_channel_timestamp_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_chat_messages_channel_timestamp
+            ON chat_messages(channel, timestamp);",
+    )?;
     Ok(())
 }
 
@@ -3306,13 +3324,13 @@ mod tests {
         run_migrations(&conn, None).unwrap();
         assert_eq!(
             crate::db::get_schema_version(&conn).unwrap(),
-            68,
+            69,
             "fresh DB migrates to the head version"
         );
         // Second run: every `if current_version < N` block is skipped. If the
         // run had left the version table unadvanced (or partially advanced),
         // the non-idempotent ALTER/CREATE blocks would re-run and error here.
         run_migrations(&conn, None).unwrap();
-        assert_eq!(crate::db::get_schema_version(&conn).unwrap(), 68);
+        assert_eq!(crate::db::get_schema_version(&conn).unwrap(), 69);
     }
 }

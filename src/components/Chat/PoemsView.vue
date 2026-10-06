@@ -142,7 +142,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { formatDateTimeFull as formatTs } from '../../composables/useTimestamp'
@@ -178,6 +178,13 @@ const filteredPoems = computed(() => {
 const current = computed<Poem | null>(() =>
   selectedIndex.value >= 0 ? filteredPoems.value[selectedIndex.value] ?? null : null,
 )
+
+// Keep the detail pane coherent: if the filter (or a reload) shrinks the
+// list below the selected index, fall back to list mode so the pane never
+// renders blank with no way back.
+watch(filteredPoems, (list) => {
+  if (selectedIndex.value >= list.length) selectedIndex.value = -1
+})
 
 async function loadPoems() {
   loading.value = true

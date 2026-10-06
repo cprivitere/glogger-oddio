@@ -225,8 +225,10 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { pendingWatchwordRuleId } from '../../composables/useViewNavigation'
 import type { WatchRule, WatchCondition, ConditionMatch, ChatMessage } from '../../types/database'
 import ChatMessageList from './ChatMessageList.vue'
+import { useChatRequestGuard } from '../../composables/useChatRequestGuard'
 
 const settingsStore = useSettingsStore()
+const reqGuard = useChatRequestGuard()
 
 const knownChannels = ['Global', 'Trade', 'Guild', 'Party', 'Nearby', 'Tell', 'Help']
 
@@ -247,6 +249,7 @@ const selectedRule = computed(() =>
 async function selectRule(rule: WatchRule) {
   if (editing.value) return
   selectedRuleId.value = rule.id
+  messages.value = []
   offset.value = 0
   hasMore.value = true
   await loadMessages()
@@ -256,12 +259,15 @@ async function loadMessages() {
   if (!selectedRuleId.value) return
 
   loading.value = true
+  const generation = reqGuard.begin()
   try {
     const newMessages = await invoke<ChatMessage[]>('get_watch_rule_messages', {
       ruleId: selectedRuleId.value,
       limit: LIMIT,
       offset: offset.value,
     })
+
+    if (!reqGuard.isCurrent(generation)) return
 
     if (offset.value === 0) {
       messages.value = newMessages
@@ -274,7 +280,7 @@ async function loadMessages() {
   } catch (e) {
     console.error('Failed to load watch rule messages:', e)
   } finally {
-    loading.value = false
+    if (reqGuard.isCurrent(generation)) loading.value = false
   }
 }
 

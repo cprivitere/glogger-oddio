@@ -9,10 +9,11 @@
         />
         <template v-else>{{ part.content }}</template>
       </template>
-      <ItemInline
-        v-else-if="part.type === 'item' && part.link"
-        :reference="part.link.item_name"
-      />
+      <span v-else-if="part.type === 'item' && part.link" @click.stop>
+        <ItemInline
+          :reference="part.link.item_name"
+        />
+      </span>
     </template>
   </span>
 </template>

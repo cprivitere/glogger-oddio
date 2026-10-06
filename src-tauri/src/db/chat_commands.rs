@@ -133,8 +133,6 @@ pub fn get_chat_messages<C: DbRead + ?Sized>(
     conn: &C,
     filter: &ChatMessageFilter,
 ) -> Result<Vec<ChatMessageRow>> {
-    eprintln!("[DEBUG] get_chat_messages filter: {:?}", filter);
-
     let (conditions, params) = build_chat_where(filter);
 
     let where_clause = if conditions.is_empty() {
@@ -149,8 +147,6 @@ pub fn get_chat_messages<C: DbRead + ?Sized>(
          FROM chat_messages cm {} ORDER BY cm.timestamp {}, cm.id {} LIMIT {} OFFSET {}",
         where_clause, order_dir, order_dir, filter.limit, filter.offset
     );
-
-    eprintln!("[DEBUG] Chat query: {}", query);
 
     let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
@@ -202,6 +198,19 @@ pub fn count_chat_messages<C: DbRead + ?Sized>(
     let mut stmt = conn.prepare(&query)?;
     let count: i64 = stmt.query_row(params_refs.as_slice(), |row| row.get(0))?;
     Ok(count)
+}
+
+/// Escape LIKE metacharacters so a token matches literally. Used with
+/// `ESCAPE '\'` in the LIKE fallback path.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Shared WHERE builder for chat message queries: conditions + bound params,
@@ -287,21 +296,28 @@ fn build_chat_where(
                     ));
                 }
                 None => {
-                    // FTS syntax error / unsupported operators: fall back to
-                    // LIKE per word. Each token is matched as a raw
-                    // substring — quotes included, so a phrase the FTS
-                    // parser rejected as zero-token (`"!!!"`) still finds
-                    // rows containing `spam!!!` exactly as typed.
+                    // LIKE-per-word fallback. `"` is dropped (a punctuation-only
+                    // phrase like `"!!!"` must match the raw `!!!`); `%`/`_` are
+                    // ESCAPED, not dropped, so a search of `%` matches a literal
+                    // percent sign instead of silently pushing no condition at all.
+                    let mut pushed = false;
                     for word in text.split_whitespace() {
-                        let clean: String = word
-                            .chars()
-                            .filter(|c| *c != '%' && *c != '_' && *c != '"')
-                            .collect();
-                        if !clean.is_empty() {
-                            conditions.push(format!("cm.message LIKE ?{}", param_idx));
-                            params.push(Box::new(format!("%{}%", clean)));
-                            param_idx += 1;
+                        let clean: String = word.chars().filter(|c| *c != '"').collect();
+                        if clean.is_empty() {
+                            continue;
                         }
+                        conditions.push(format!("cm.message LIKE ?{} ESCAPE '\\'", param_idx));
+                        params.push(Box::new(format!("%{}%", escape_like(&clean))));
+                        param_idx += 1;
+                        pushed = true;
+                    }
+                    if !pushed {
+                        // Every token was quotes/whitespace only: match the raw
+                        // text literally so the fallback can never degrade to
+                        // "no filter".
+                        conditions.push(format!("cm.message LIKE ?{} ESCAPE '\\'", param_idx));
+                        params.push(Box::new(format!("%{}%", escape_like(text))));
+                        param_idx += 1;
                     }
                 }
             }
@@ -355,26 +371,37 @@ pub fn get_messages_around<C: DbRead + ?Sized>(
     message_id: i64,
     context_count: i64,
 ) -> Result<Vec<ChatMessageRow>> {
+    // `before`/`after` are evaluated ONCE each (they only reference `target`,
+    // never the outer `cm`), so this is O(log n + context) per branch rather
+    // than the O(n² log n) the previous `cm.id IN (<correlated subquery>)`
+    // form produced — that form re-ran both neighbour scans for every one of
+    // the channel's rows and hung for tens of seconds on busy channels.
+    // `IS` is NULL-safe equality, so NULL-channel (zone/system) targets work.
     let query = "
         WITH target AS (
-            SELECT timestamp, channel FROM chat_messages WHERE id = ?1
+            SELECT timestamp AS ts, channel AS ch FROM chat_messages WHERE id = ?1
+        ),
+        before AS (
+            SELECT id FROM chat_messages, target
+            WHERE chat_messages.channel IS target.ch
+              AND chat_messages.id != ?1
+              AND chat_messages.timestamp <= target.ts
+            ORDER BY chat_messages.timestamp DESC
+            LIMIT ?2
+        ),
+        after AS (
+            SELECT id FROM chat_messages, target
+            WHERE chat_messages.channel IS target.ch
+              AND chat_messages.id != ?1
+              AND chat_messages.timestamp >= target.ts
+            ORDER BY chat_messages.timestamp ASC
+            LIMIT ?2
         )
         SELECT cm.id, cm.timestamp, cm.channel, cm.sender, cm.message, cm.is_system, cm.from_player
-        FROM chat_messages cm, target t
-        WHERE cm.channel = t.channel
-          AND (
-            (cm.timestamp < t.timestamp AND cm.id IN (
-                SELECT id FROM chat_messages
-                WHERE channel = t.channel AND timestamp <= t.timestamp AND id != ?1
-                ORDER BY timestamp DESC LIMIT ?2
-            ))
-            OR cm.id = ?1
-            OR (cm.timestamp > t.timestamp AND cm.id IN (
-                SELECT id FROM chat_messages
-                WHERE channel = t.channel AND timestamp >= t.timestamp AND id != ?1
-                ORDER BY timestamp ASC LIMIT ?2
-            ))
-          )
+        FROM chat_messages cm
+        WHERE cm.id = ?1
+           OR cm.id IN (SELECT id FROM before)
+           OR cm.id IN (SELECT id FROM after)
         ORDER BY cm.timestamp ASC
     ";
 
@@ -1145,6 +1172,17 @@ mod tests {
     }
 
     #[test]
+    fn test_like_fallback_punctuation_only_never_returns_everything() {
+        let conn = setup();
+        msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "50% off ore");
+        msg_with(&*conn, "2026-07-01 10:01:00", "General", "Bob", "no discount");
+
+        let messages = get_chat_messages(&*conn, &filter_with(Some("%"))).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender.as_deref().unwrap(), "Alice");
+    }
+
+    #[test]
     fn test_fts_search_sort_order_respected() {
         let conn = setup();
         msg_with(&*conn, "2026-07-01 10:00:00", "General", "Alice", "gorgon one");
@@ -1288,6 +1326,51 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].sender.as_deref().unwrap(), "A");
         assert_eq!(messages[1].sender.as_deref().unwrap(), "B");
+    }
+
+    #[test]
+    fn test_get_messages_around_null_channel_returns_target_and_neighbors() {
+        let conn = setup();
+        let ins = |ts: &str, msg: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO chat_messages (timestamp, channel, sender, message, is_system, log_file, from_player)
+                 VALUES (?1, NULL, NULL, ?2, 1, 'Chat-test.log', NULL)",
+                rusqlite::params![ts, msg],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        ins("2026-07-01 10:00:00", "you have entered Eltibule");
+        let target = ins("2026-07-01 10:01:00", "you have entered Gazluk");
+        ins("2026-07-01 10:02:00", "you have entered Sun Vale");
+
+        let messages = get_messages_around(&*conn, target, 25).unwrap();
+        assert_eq!(messages.len(), 3, "NULL-channel context must return target + neighbors");
+        assert!(messages.iter().any(|m| m.id == target));
+    }
+
+    #[test]
+    fn test_get_messages_around_ties_no_duplicates_and_bounded() {
+        // 60 rows sharing ONE timestamp exercise the before(`<=`)/after(`>=`)
+        // overlap: the outer query must still return each row at most once.
+        let conn = setup();
+        let ins = |msg: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO chat_messages (timestamp, channel, sender, message, is_system, log_file, from_player)
+                 VALUES ('2026-07-01 10:00:00', 'General', 'A', ?1, 0, 'Chat-test.log', 0)",
+                rusqlite::params![msg],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let ids: Vec<i64> = (0..60).map(|i| ins(&format!("msg {i}"))).collect();
+        let target = ids[30];
+
+        let around = get_messages_around(&*conn, target, 25).unwrap();
+        let unique: std::collections::HashSet<i64> = around.iter().map(|m| m.id).collect();
+        assert_eq!(unique.len(), around.len(), "no duplicate rows");
+        assert!(around.iter().any(|m| m.id == target));
+        assert!(around.len() <= 51, "target + at most 25 each side");
     }
 
     #[test]
