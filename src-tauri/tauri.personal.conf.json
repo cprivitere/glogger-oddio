@@ -1,7 +1,7 @@
 {
   "identifier": "glogger.Personal",
   "app": {
-    "windows": [{ "title": "glogger v0.12.19 PERSONAL" }]
+    "windows": [{ "title": "glogger v0.12.20 PERSONAL" }]
   },
   "plugins": {
     "updater": {
