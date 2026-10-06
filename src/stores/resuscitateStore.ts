@@ -41,13 +41,11 @@ export const useResuscitateStore = defineStore('resuscitations', () => {
     caster_name: string
     target_name: string
   }) {
-    console.debug('[resuscitations] Received event:', JSON.stringify(payload))
     const settings = useSettingsStore()
     const characterName = settings.settings.activeCharacterName ?? ''
     const serverName = settings.settings.activeServerName ?? ''
 
     const success = payload.kind === 'Resuscitated'
-    console.debug(`[resuscitations] kind="${payload.kind}" success=${success} caster="${payload.caster_name}" target="${payload.target_name}"`)
 
     resuscitations.value.unshift({
       id: Date.now(),
